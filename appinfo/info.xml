@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<info>
+	<id>ocrflow</id>
+	<name>OCR Flow</name>
+	<summary>Make scans and images searchable: OCR in place, nothing left behind</summary>
+	<description><![CDATA[
+OCR Flow finds the files in a Nextcloud folder that carry no text — scans, photos of
+documents, image-only PDFs — and gives them a searchable text layer without moving or
+renaming them.
+
+The control plane is this app: it owns the queue, the per-file state and the UI. The
+actual recognition runs in a companion worker (an ExApp), so the heavy work — PDF
+rasterising, cloud OCR calls, font embedding — never blocks a Nextcloud request.
+
+Behaviour worth knowing:
+
+* Nothing is overwritten. An existing `report.pdf` never becomes the target of an
+  image conversion; the app picks `report(1).pdf` the way Nextcloud itself does.
+* Conversion is reversible. An image becomes a PDF with the original JPEG embedded
+  bit-for-bit, and the worker can hand the original back with its EXIF intact.
+* Nothing is silently dropped. Nextcloud does not retry failed event deliveries, so
+  the queue is reconciled on a schedule instead of relying on the event alone.
+* Fail closed. If the classifier cannot decide whether a file is a scan, the job
+  errors and the file is left untouched.
+	]]></description>
+	<version>0.1.0</version>
+	<licence>agpl</licence>
+	<author mail="likivik@likivik.com" homepage="https://likivik.com">Likivik</author>
+	<namespace>OcrFlow</namespace>
+	<category>files</category>
+	<website>https://github.com/Likivik/ocrflow</website>
+	<bugs>https://github.com/Likivik/ocrflow/issues</bugs>
+	<repository type="git">https://github.com/Likivik/ocrflow</repository>
+	<dependencies>
+		<nextcloud min-version="32" max-version="35"/>
+	</dependencies>
+	<commands>
+		<command>OCA\OcrFlow\Command\WorkerSecret</command>
+	</commands>
+	<background-jobs>
+		<job>OCA\OcrFlow\BackgroundJob\ReconcileJob</job>
+	</background-jobs>
+</info>
