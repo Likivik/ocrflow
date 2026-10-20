@@ -148,8 +148,11 @@ def _preprocess(png_bytes: bytes):
     import numpy as np
     from PIL import Image
 
-    with Image.open(io.BytesIO(png_bytes)) as im:
-        im = im.convert("RGB")
+    with Image.open(io.BytesIO(png_bytes)) as src:
+        # A separate name: Image.open returns ImageFile, and every later
+        # assignment here is a plain Image. Reusing one name makes the
+        # annotation wrong for half the function.
+        im: Image.Image = src.convert("RGB")
         w, h = im.size
         if w < h:
             nw, nh = _SHORT_SIDE, round(h * _SHORT_SIDE / w)

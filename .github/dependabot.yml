@@ -31,12 +31,6 @@ updates:
       - dependencies
     open-pull-requests-limit: 5
 
-  # The container is a deployable artefact; its base image is a trust boundary.
-  - package-ecosystem: docker
-    directory: /
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: "docker"
-    labels:
-      - dependencies
+  # The `docker` ecosystem is deliberately absent until the Dockerfile lands:
+  # Dependabot fails a run for every configured ecosystem it cannot find, and a
+  # permanently red job is a permanently ignored job. Re-add it with the image.
