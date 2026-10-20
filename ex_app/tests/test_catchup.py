@@ -33,7 +33,7 @@ import pytest
 os.environ.setdefault("NC_OCR_STATE_DIR", tempfile.mkdtemp(prefix="ncocr-catchup-"))
 _STATE_DIR = os.environ["NC_OCR_STATE_DIR"]
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 

@@ -46,7 +46,7 @@ def _repin_state_dir():
     yield
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 

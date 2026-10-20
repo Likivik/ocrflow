@@ -15,7 +15,7 @@ import img2pdf
 import pymupdf
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from nc_ocr_flow import extract as ex
 
