@@ -1,0 +1,42 @@
+# Keep the CI actions current.
+#
+# .github/workflows/ci.yml pins every action to a full commit SHA — pinning is
+# the supply-chain fix (a tag can be moved, a branch definitely can), but a
+# pinned SHA never moves on its own. Dependabot is what moves it, in a
+# reviewable commit.
+#
+# One PR per action is deliberate: bumping an action is a trust event, and
+# batching several into one PR hides which upstream actually moved.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies
+
+  # Python runtime dependencies: floors live in pyproject.toml, so a bump here
+  # surfaces upstream drift (and security advisories) instead of staying
+  # invisible until something breaks.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "deps"
+    labels:
+      - dependencies
+    open-pull-requests-limit: 5
+
+  # The container is a deployable artefact; its base image is a trust boundary.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "docker"
+    labels:
+      - dependencies

@@ -1,0 +1,109 @@
+name: CI
+
+# Gates before anything reaches main:
+#
+#   python tests  — pytest over src/ + tests/, required
+#   lint          — ruff check + ruff format --check, required
+#   typecheck     — mypy over src/, required
+#
+# Every `uses:` is pinned to a full commit SHA, not a tag: a tag can be moved
+# and a branch can (`...@main` upstream was changeable at will, running with our
+# token). Dependabot is what moves these, in a reviewable PR.
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  # Never cancel a run on main — that result is what gates the branch.
+  # Superseding an in-flight PR run is fine.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # PP-LCNet document-orientation model. Verified by sha256 on every run, so a
+  # replaced upstream artefact fails loudly instead of silently changing what
+  # the orientation tests exercise.
+  ORI_MODEL_URL: https://huggingface.co/PaddleOcrNet/PaddleOcrNet-models/resolve/main/PP-LCNet_x1_0_doc_ori.onnx
+  ORI_MODEL_SHA256: d85b3185075afca1a83157f73eac2e52b598d72e9d47dd19cc4a2f3605e23e3f
+  PYTHONPATH: src
+
+jobs:
+  python-tests:
+    name: python tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            pymupdf pillow requests img2pdf numpy onnxruntime \
+            fastapi uvicorn pydantic pdf-inspector \
+            google-cloud-vision google-cloud-storage \
+            pytest httpx httpx2
+
+      - name: Fetch the orientation model (verified by sha256)
+        run: |
+          curl -fsSL -o /tmp/pp_lcnet_x1_0_doc_ori.onnx "$ORI_MODEL_URL"
+          echo "$ORI_MODEL_SHA256  /tmp/pp_lcnet_x1_0_doc_ori.onnx" | sha256sum -c -
+
+      - name: Install the font used for the text layer
+        # An explicitly configured font path is authoritative, so without this
+        # the suite would silently exercise the Latin-only Helvetica fallback and
+        # prove nothing about Cyrillic text layers.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-dejavu-core
+          test -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+
+      - name: Run the test suite
+        env:
+          NC_OCR_ORIENTATION_MODEL: /tmp/pp_lcnet_x1_0_doc_ori.onnx
+          NC_OCR_FONT_PATH: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+        run: python -m pytest tests/ -q
+
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install ruff (pinned — the lint result must not drift with a release)
+        run: python -m pip install ruff==0.16.10
+      - name: ruff check
+        run: ruff check src tests
+      - name: ruff format --check
+        run: ruff format --check src tests
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install mypy and the importable deps
+        run: |
+          python -m pip install "mypy>=1.10" pymupdf pillow requests img2pdf numpy \
+            fastapi pydantic pdf-inspector
+      - name: mypy
+        run: mypy src
