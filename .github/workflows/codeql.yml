@@ -1,0 +1,48 @@
+name: CodeQL
+
+# Code scanning runs as a workflow rather than GitHub's "default setup" so the
+# analysis config lives in the repo and is reviewed like any other change.
+#
+# `security-extended` over the default query set: this app parses untrusted
+# PDFs, images and XML, and calls out to a third-party OCR API — the extra
+# taint-tracking queries are worth the few minutes.
+#
+# The action is pinned to a commit SHA; Dependabot moves it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so a new query in the CodeQL bundle reaches us even in a quiet week.
+    - cron: "27 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (python)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4
+        with:
+          languages: python
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4
+        with:
+          category: "/language:python"
