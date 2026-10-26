@@ -94,9 +94,13 @@ class Job extends Entity
 	 */
 	public function toApi(): array
 	{
+		// snake_case, matching the column names and the worker's dataclass. This
+		// used to emit camelCase (`fileId`), and the worker's `.get('file_id')`
+		// then returned None instead of failing — a silent loss of the field the
+		// queue's uniqueness depends on.
 		return [
 			'id' => $this->getId(),
-			'fileId' => $this->getFileId(),
+			'file_id' => $this->getFileId(),
 			'path' => $this->getPath(),
 			'status' => $this->getStatus(),
 			'reason' => $this->getReason(),
@@ -107,9 +111,9 @@ class Job extends Entity
 			'pages' => $this->getPages(),
 			'chars' => $this->getChars(),
 			'error' => $this->getError(),
-			'createdAt' => $this->getCreatedAt(),
-			'claimedAt' => $this->getClaimedAt(),
-			'finishedAt' => $this->getFinishedAt(),
+			'created_at' => $this->getCreatedAt(),
+			'claimed_at' => $this->getClaimedAt(),
+			'finished_at' => $this->getFinishedAt(),
 		];
 	}
 }
