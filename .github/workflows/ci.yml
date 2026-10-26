@@ -144,4 +144,25 @@ jobs:
       - name: Integration smoke
         run: bash tests/integration/app-smoke.sh
 
+  frontend:
+    name: frontend bundle is current
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install
+        run: npm ci --no-audit --no-fund
+      - name: Build
+        run: npm run build
+      # The bundle is committed so installing the app needs no node. That makes a
+      # stale bundle a real possibility: edit src/, forget `npm run build`, and
+      # the shipped panel silently keeps the old behaviour.
+      - name: The committed bundle matches src/
+        run: git diff --exit-code js/
+
+
 

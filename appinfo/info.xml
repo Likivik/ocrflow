@@ -35,6 +35,10 @@ Behaviour worth knowing:
 	<dependencies>
 		<nextcloud min-version="32" max-version="35"/>
 	</dependencies>
+	<settings>
+		<personal>OCA\OcrFlow\Settings\Personal</personal>
+		<personal-section>OCA\OcrFlow\Settings\PersonalSection</personal-section>
+	</settings>
 	<commands>
 		<command>OCA\OcrFlow\Command\WorkerSecret</command>
 	</commands>

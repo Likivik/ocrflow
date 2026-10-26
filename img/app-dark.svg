@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- A page with a text baseline: the smallest honest picture of "scan becomes text". -->
+  <path fill="#ffffff" d="M9 3h10l6 6v20a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm10 1.5V9h4.5z"/>
+  <g fill="#ffffff" opacity="0.75">
+    <rect x="12" y="14" width="12" height="2.5" rx="1"/>
+    <rect x="12" y="19" width="12" height="2.5" rx="1"/>
+    <rect x="12" y="24" width="7" height="2.5" rx="1"/>
+  </g>
+</svg>

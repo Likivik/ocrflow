@@ -16,3 +16,7 @@ js/dist/
 /vendor/
 /.phpunit.cache/
 /composer.phar
+
+/node_modules/
+# js/ is deliberately NOT ignored: the bundle is committed so installing the app
+# needs no node and no network. CI rebuilds it and fails on a diff.
