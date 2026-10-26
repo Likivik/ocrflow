@@ -182,4 +182,19 @@ status=$(sqlite "SELECT status FROM ${JOBS} WHERE id=${id}")
 [ "$status" = "error" ] || fail "job status should be error after a reported failure, got ${status}"
 ok "failure recorded as ${status}"
 
+echo "== a dead worker's claim is taken back, and the attempt is counted"
+id=$(sqlite "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
+stale=$(( $(date +%s) - 1000 ))   # older than Application::STALE_CLAIM_SECONDS (900)
+sqlite "UPDATE ${JOBS} SET status='claimed', claimed_at=${stale}, attempts=0 WHERE id=${id}" >/dev/null
+# Reset the job's last_run so Nextcloud considers it due; matching on the class
+# name needs LIKE, because every backslash in a PHP namespace is an escape in
+# two languages at once and the first attempt silently matched nothing.
+sqlite "UPDATE oc_jobs SET last_run=0 WHERE class LIKE '%ReconcileJob'" >/dev/null 2>&1 || true
+jobid=$(sqlite "SELECT id FROM oc_jobs WHERE class LIKE '%ReconcileJob' LIMIT 1")
+reconcile_out=$(occ background-job:execute --force-execute "$jobid" 2>&1 || true)
+echo "   (reconcile: $(echo "$reconcile_out" | tr -d '\n' | cut -c1-160))"
+status=$(sqlite "SELECT status FROM ${JOBS} WHERE id=${id}")
+[ "$status" = "queued" ] || fail "a claim older than the stale window must go back to queued, still ${status}"
+ok "stale claim requeued"
+
 echo "ALL INTEGRATION ASSERTIONS PASSED"
