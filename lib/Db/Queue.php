@@ -39,15 +39,29 @@ class Queue extends QBMapper
 	}
 
 	/**
-	 * Queue one path. Returns null when the path is already in flight or done —
-	 * the caller treats null as "nothing to do", not as an error.
+	 * Queue one path. Returns null when this content version is already queued
+	 * or already done — the caller treats null as "nothing to do", not as an
+	 * error.
+	 *
+	 * Identity is `(file_id, etag)`, not the path. A rename or a move changes
+	 * the path and nothing else, and Nextcloud can deliver the same event
+	 * twice; neither must cost a second OCR run. A file whose content changed
+	 * has a new `etag` and is queued again. See `docs/adr/0001`.
 	 *
 	 * @throws Exception
 	 */
 	public function enqueue(string $path, ?int $fileId, ?int $size, ?string $etag): ?int
 	{
-		$existing = $this->findByPath($path);
-		if ($existing !== null) {
+		if ($fileId !== null) {
+			if ($this->jobForVersion($fileId, $etag) !== null) {
+				return null;
+			}
+			if ($this->isDoneForVersion($fileId, $etag)) {
+				return null;
+			}
+		} elseif ($this->findByPath($path) !== null) {
+			// No file id (a path from outside the cache): the path is all we
+			// have to go on, so keep the old, weaker rule.
 			return null;
 		}
 
@@ -86,6 +100,51 @@ class Queue extends QBMapper
 			->setMaxResults(1);
 		$rows = $qb->executeQuery()->fetchAll();
 		return $rows === [] ? null : Job::fromRow($rows[0]);
+	}
+
+	/**
+	 * The job for this exact content version, if one was ever queued.
+	 *
+	 * @throws Exception
+	 */
+	public function jobForVersion(int $fileId, ?string $etag): ?Job
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('*')->from(self::JOBS)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->andWhere($this->etagPredicate($qb, $etag))
+			->setMaxResults(1);
+		$rows = $qb->executeQuery()->fetchAll();
+		return $rows === [] ? null : Job::fromRow($rows[0]);
+	}
+
+	/**
+	 * True when the per-file row already records `done` for this version. A row
+	 * with a different etag is an older version of the file, not an answer.
+	 *
+	 * @throws Exception
+	 */
+	public function isDoneForVersion(int $fileId, ?string $etag): bool
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('id')->from(self::FILES)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_DONE)))
+			->andWhere($this->etagPredicate($qb, $etag))
+			->setMaxResults(1);
+		return $qb->executeQuery()->fetch() !== false;
+	}
+
+	/**
+	 * `etag = ?` or `etag IS NULL`. An unknown version never matches a known one,
+	 * in either direction: "we do not know which version this is" is not "this
+	 * version is already done".
+	 */
+	private function etagPredicate(IQueryBuilder $qb, ?string $etag): string
+	{
+		return $etag === null
+			? $qb->expr()->isNull('etag')
+			: $qb->expr()->eq('etag', $qb->createNamedParameter($etag));
 	}
 
 	/**

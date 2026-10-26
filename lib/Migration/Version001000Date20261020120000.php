@@ -59,8 +59,12 @@ class Version001000Date20261020120000 extends SimpleMigrationStep
 			$table->addColumn('finished_at', Types::BIGINT, ['notnull' => false, 'default' => null]);
 			$table->setPrimaryKey(['id']);
 			$table->addIndex(['status'], 'ocrflow_jobs_status');
-			$table->addUniqueIndex(['path'], 'ocrflow_jobs_path');
-			$table->addIndex(['file_id'], 'ocrflow_jobs_fileid');
+			// One job per content version, not per path: renaming or moving a
+			// file must not make it look unprocessed, and a duplicate event
+			// delivery must not queue it twice. The database, not a lookup,
+			// enforces it. See docs/adr/0001.
+			$table->addUniqueIndex(['file_id', 'etag'], 'ocrflow_jobs_fileid_etag');
+			$table->addIndex(['path'], 'ocrflow_jobs_path');
 			$changed = true;
 		}
 

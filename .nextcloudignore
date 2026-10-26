@@ -1,5 +1,6 @@
 # Files that belong to the repository but not to the installable app.
-/ex_app
+/worker
+/docs
 /tests
 /.github
 /.git

@@ -9,7 +9,8 @@ documents, image-only PDFs — and gives them a searchable text layer without mo
 renaming them.
 
 The control plane is this app: it owns the queue, the per-file state and the UI. The
-actual recognition runs in a companion worker (an ExApp), so the heavy work — PDF
+actual recognition runs in a companion worker (a plain HTTP client of this app's own
+OCS endpoints, not an AppAPI/ExApp), so the heavy work — PDF
 rasterising, cloud OCR calls, font embedding — never blocks a Nextcloud request.
 
 Behaviour worth knowing:
