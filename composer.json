@@ -1,0 +1,28 @@
+{
+    "name": "likivik/ocrflow",
+    "description": "OCR for Nextcloud: the app (PHP) owns the queue and per-file state, a stateless worker does the heavy lifting",
+    "type": "nextcloud-app",
+    "license": "AGPL-3.0-or-later",
+    "require-dev": {
+        "nextcloud/ocp": "^34.0",
+        "phpunit/phpunit": "^11.5",
+        "doctrine/dbal": "^3.9"
+    },
+    "autoload": {
+        "psr-4": {
+            "OCA\\OcrFlow\\": "lib/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "OCA\\OcrFlow\\Tests\\": "tests/",
+            "OCP\\": "vendor/nextcloud/ocp/OCP/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
