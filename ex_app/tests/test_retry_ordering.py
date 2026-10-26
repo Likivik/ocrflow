@@ -25,7 +25,7 @@ from pathlib import Path
 import requests
 
 _HERE = Path(__file__).resolve().parent
-_SRC = (_HERE.parent / "src").resolve()
+_SRC = (_HERE.parent / "lib").resolve()
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 

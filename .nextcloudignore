@@ -1,0 +1,12 @@
+# Files that belong to the repository but not to the installable app.
+/ex_app
+/tests
+/.github
+/.git
+/.jj
+/README.md
+/SECURITY.md
+/composer.json
+/composer.lock
+/vendor
+/phpunit.xml

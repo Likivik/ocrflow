@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 
 os.environ.setdefault("NC_OCR_STATE_DIR", "/tmp/ncocr-image-branch-tests")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 import nc_ocr_flow.webhook_server as ws
 from nc_ocr_flow.classifier import ClassifierUnavailable, ClassifyResult
