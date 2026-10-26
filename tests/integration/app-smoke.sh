@@ -91,12 +91,26 @@ ok "instance installed"
 
 echo "== copying the app in"
 $ENGINE exec "$NAME" mkdir -p /var/www/html/custom_apps/ocrflow
-$ENGINE cp "${APP_DIR}/appinfo" "$NAME:/var/www/html/custom_apps/ocrflow/appinfo"
-$ENGINE cp "${APP_DIR}/lib" "$NAME:/var/www/html/custom_apps/ocrflow/lib"
+# Everything the app needs at run time, not just the PHP: the committed Vue
+# bundle in js/ and the icon in img/ are part of the app, not build artefacts of
+# the test.
+for part in appinfo lib templates js img; do
+  if [ -d "${APP_DIR}/${part}" ]; then
+    $ENGINE cp "${APP_DIR}/${part}" "$NAME:/var/www/html/custom_apps/ocrflow/${part}"
+  fi
+done
 
 occ app:enable ocrflow >/dev/null || fail "occ app:enable ocrflow"
 occ app:list | grep -q ocrflow || fail "app not in app:list"
 ok "app enabled"
+
+echo "== the panel renders inside personal settings"
+code=$(curl -s -o /tmp/ocrflow-panel.html -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  "$BASE/settings/user/ocrflow")
+[ "$code" = "200" ] || fail "settings/user/ocrflow should be 200, got $code"
+grep -q 'id="ocrflow-panel"' /tmp/ocrflow-panel.html || fail "the Vue mount point is missing from the page"
+grep -q 'ocrflow-panel\.js' /tmp/ocrflow-panel.html || fail "the bundle was not added to the page (Util::addScript)"
+ok "panel page serves the mount point and the bundle"
 
 echo "== migration landed on the real database"
 for table in "$JOBS" "$FILES" "$SETTINGS"; do
