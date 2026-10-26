@@ -13,7 +13,7 @@ use OCP\EventDispatcher\Event;
 use OCP\EventDispatcher\IEventListener;
 use OCP\Files\Events\Node\NodeCreatedEvent;
 use OCP\Files\Events\Node\NodeWrittenEvent;
-use OCP\Files\Node;
+use OCP\Files\File;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -40,7 +40,11 @@ class FileListener implements IEventListener
 			return;
 		}
 		$node = $event->getNode();
-		if (!$node instanceof Node || !$node->isFile()) {
+		// A Node is either a File or a Folder; only the File interface tells us
+		// which. `Node::isFile()` does not exist — calling it raised a fatal
+		// inside the upload request, and the listener's own catch could not save
+		// the upload because the Error escaped before the try block.
+		if (!$node instanceof File) {
 			return;
 		}
 		if (!$this->candidate->isProcessable($node->getName())) {

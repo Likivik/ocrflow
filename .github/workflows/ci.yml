@@ -131,3 +131,17 @@ jobs:
       - name: PHPUnit
         run: vendor/bin/phpunit --no-coverage
 
+  integration:
+    name: integration (real Nextcloud)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The only test that can answer "does this app actually work on an
+      # instance": a real Nextcloud in a container, the real migration, the
+      # real event dispatcher, and the OCS endpoints over HTTP. It has already
+      # caught two defects no unit test could see.
+      - name: Integration smoke
+        run: bash tests/integration/app-smoke.sh
+
+

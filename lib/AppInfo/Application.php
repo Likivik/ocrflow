@@ -45,8 +45,14 @@ class Application extends App implements IBootstrap
 	{
 		// The reconciler has to exist even if no event ever reaches us, because
 		// Nextcloud drops failed event deliveries without retrying them.
+		//
+		// `IJobList::has()` takes the argument as a second parameter in NC 34+;
+		// calling it with the class alone raises an ArgumentCountError, which
+		// surfaces only as "Could not boot ocrflow" in nextcloud.log while the
+		// app still serves requests — a silent half-boot found by the
+		// integration smoke, not by any unit test.
 		$context->injectFn(static function (IJobList $jobs): void {
-			if (!$jobs->has(ReconcileJob::class)) {
+			if (!$jobs->has(ReconcileJob::class, null)) {
 				$jobs->add(ReconcileJob::class, null);
 			}
 		});
