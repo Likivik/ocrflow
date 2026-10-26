@@ -18,6 +18,10 @@ PORT="${NC_PORT:-8089}"
 ADMIN_USER="admin"
 ADMIN_PASS="integration-pass-123"
 BASE="http://127.0.0.1:${PORT}"
+# Cold runners with a loaded disk took over 120s to install the image; the fix
+# for a slow install is a longer budget, not a rerun.
+INSTALL_TIMEOUT_S="${INSTALL_TIMEOUT_S:-420}"
+ENABLE_TIMEOUT_S="${ENABLE_TIMEOUT_S:-180}"
 
 # Nextcloud prefixes app tables with the configured dbtableprefix, `oc_` by
 # default. Querying `ocrflow_jobs` yields "no such table", which looks exactly
@@ -80,13 +84,19 @@ $ENGINE run -d --name "$NAME" -p "127.0.0.1:${PORT}:80" \
   "$IMAGE" >/dev/null
 
 echo "== waiting for the instance to install"
-for _ in $(seq 1 60); do
-  if $ENGINE exec -u www-data "$NAME" php occ status 2>/dev/null | grep -q 'installed: true'; then
-    break
+# The old loop was a fixed 60 x 2s = 120s and then one last check, so a slow
+# runner produced "FAIL: instance never finished installing" with no evidence
+# and no way to tell a slow install from a broken one. The budget is now a
+# deadline, and expiring it prints what the container actually said.
+install_deadline=$(( $(date +%s) + INSTALL_TIMEOUT_S ))
+until $ENGINE exec -u www-data "$NAME" php occ status 2>/dev/null | grep -q 'installed: true'; do
+  if [ "$(date +%s)" -ge "$install_deadline" ]; then
+    echo "-- occ status said:"
+    $ENGINE exec -u www-data "$NAME" php occ status 2>&1 | head -12 || true
+    fail "instance never finished installing within ${INSTALL_TIMEOUT_S}s"
   fi
-  sleep 2
+  sleep 3
 done
-$ENGINE exec -u www-data "$NAME" php occ status 2>/dev/null | grep -q 'installed: true' || fail "instance never finished installing"
 ok "instance installed"
 
 echo "== copying the app in"
@@ -100,8 +110,21 @@ for part in appinfo lib templates js img; do
   fi
 done
 
-occ app:enable ocrflow >/dev/null || fail "occ app:enable ocrflow"
-occ app:list | grep -q ocrflow || fail "app not in app:list"
+# `occ app:enable` is not the first thing to touch the database: on a cold runner
+# the entrypoint is still finishing its own install, and enabling exactly once
+# hid the reason — the run failed with "app not in app:list", which names the
+# symptom and nothing else. Retry to a deadline and keep the output.
+echo "== enabling the app"
+enable_deadline=$(( $(date +%s) + ENABLE_TIMEOUT_S ))
+until occ app:enable ocrflow >/tmp/ocrflow-enable.log 2>&1 \
+      && occ app:list 2>/dev/null | grep -q ocrflow; do
+  if [ "$(date +%s)" -ge "$enable_deadline" ]; then
+    echo "-- occ app:enable said:"; tail -6 /tmp/ocrflow-enable.log || true
+    echo "-- occ app:list said:"; occ app:list 2>&1 | head -8 || true
+    fail "app could not be enabled within ${ENABLE_TIMEOUT_S}s"
+  fi
+  sleep 3
+done
 ok "app enabled"
 
 echo "== the panel renders inside personal settings"
