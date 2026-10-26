@@ -58,14 +58,26 @@ class QueueController extends OCSController
 		if (($denied = $this->denyIfNotWorker()) !== null) {
 			return $denied;
 		}
+
+		// A worker may legitimately decide that a file needs no work: a
+		// born-digital PDF, a photo that is not a document. That is not an error,
+		// so it is not reported as one — but it is also not "done", because no
+		// text layer was produced. One status per outcome, whitelisted here so a
+		// worker cannot invent one that the UI has no words for.
+		$status = $this->nullableString('status') ?? Queue::STATUS_DONE;
+		if (!in_array($status, [Queue::STATUS_DONE, 'skipped'], true)) {
+			$status = Queue::STATUS_DONE;
+		}
+
 		$this->queue->finish($id, [
-			'status' => Queue::STATUS_DONE,
+			'status' => $status,
+			'reason' => $this->nullableString('reason'),
 			'engine' => $this->nullableString('engine'),
 			'pages' => $this->nullableInt('pages'),
 			'chars' => $this->nullableInt('chars'),
 			'stamp_version' => $this->nullableString('stamp_version'),
 		]);
-		return new DataResponse(['id' => $id, 'status' => Queue::STATUS_DONE]);
+		return new DataResponse(['id' => $id, 'status' => $status]);
 	}
 
 	#[PublicPage]
