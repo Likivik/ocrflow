@@ -66,9 +66,9 @@ class Job extends Entity
 	/**
 	 * @param array<string, mixed> $row
 	 */
-	public static function fromRow(array $row): self
+	public static function fromRow(array $row): static
 	{
-		$job = new self();
+		$job = new static();
 		$job->setId((int) $row['id']);
 		$job->setFileId($row['file_id'] === null ? null : (int) $row['file_id']);
 		$job->setPath((string) $row['path']);

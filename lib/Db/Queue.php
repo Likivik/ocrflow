@@ -243,18 +243,23 @@ class Queue extends QBMapper
 			->setMaxResults(1);
 		$exists = $qb->executeQuery()->fetch() !== false;
 
-		$values = [
-			'status' => $qb->createNamedParameter($status),
-			'reason' => $qb->createNamedParameter($result['reason'] ?? null),
-			'engine' => $qb->createNamedParameter($result['engine'] ?? null),
-			'stamp_version' => $qb->createNamedParameter($result['stamp_version'] ?? null),
-			'path' => $qb->createNamedParameter($job->getPath()),
-			'size' => $qb->createNamedParameter($job->getSize(), IQueryBuilder::PARAM_INT),
-			'etag' => $qb->createNamedParameter($job->getEtag()),
-			'updated_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
-		];
-
+		// Parameters belong to the builder that created them. Binding them on the
+		// SELECT builder and executing the INSERT/UPDATE on another raises
+		// "Named parameter dcValue2 does not have a bound value" at run time —
+		// which made every finished job answer 500, on the success path as well
+		// as the failure path. Caught by the integration smoke; no unit test can
+		// see it, because it is a property of the query builder, not of our data.
 		$w = $this->db->getQueryBuilder();
+		$values = [
+			'status' => $w->createNamedParameter($status),
+			'reason' => $w->createNamedParameter($result['reason'] ?? null),
+			'engine' => $w->createNamedParameter($result['engine'] ?? null),
+			'stamp_version' => $w->createNamedParameter($result['stamp_version'] ?? null),
+			'path' => $w->createNamedParameter($job->getPath()),
+			'size' => $w->createNamedParameter($job->getSize(), IQueryBuilder::PARAM_INT),
+			'etag' => $w->createNamedParameter($job->getEtag()),
+			'updated_at' => $w->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
+		];
 		if ($exists) {
 			$w->update(self::FILES);
 			foreach ($values as $column => $param) {

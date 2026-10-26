@@ -79,3 +79,18 @@ same `(file_id, etag)` yield one job; the same file with a new `etag` yields a
 second; the same content at a new path yields none. Until the PHPUnit job exists
 in CI, that test runs from the app's `tests/Unit/Db/QueueIdempotencyTest.php`
 suite locally, and the migration is exercised against a real schema.
+
+## Operational trap: the secret lives in a cache too
+
+Nextcloud 34 stores app config in a "fast cache" as well as the database, and the
+CLI's cache is **not** the web SAPI's cache. Immediately after
+`occ ocrflow:worker:secret`, the running web process still answers
+`worker secret not configured` and returns 401 — with a correct secret in the
+database and on the command line. Rotating the secret has the same effect in
+reverse: the old secret keeps working until the web process drops its cache.
+
+Fix, and the only reliable one: reload the PHP process after issuing or rotating
+the secret (`systemctl reload php-fpm`). The integration smoke does exactly this,
+because an operator hitting it during cutover would otherwise lose an hour to a
+401 that looks like a wrong secret.
+
