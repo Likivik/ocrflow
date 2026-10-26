@@ -1,14 +1,16 @@
 # NixOS module for the OCR worker side.
 #
 # The app itself is a directory that Nextcloud serves; the only thing a host has
-# to run is the worker. Everything here is about that unit and the two secrets it
-# needs, because both are easy to get subtly wrong:
+# to run is the worker. Everything here is about that unit, the two secrets it
+# needs, and the two invariants that are expensive to learn twice:
 #
 #  * the worker secret must come from `LoadCredential`, never from `ExecStart` or
 #    `environment`, or it shows up in `systemctl show` and in `/proc/*/environ`;
 #  * after the secret is issued or rotated the PHP process must be reloaded, or
 #    the running web workers keep answering 401 with "worker secret not
-#    configured" from their own fast cache (see docs/adr/0001).
+#    configured" from their own fast cache (see docs/adr/0001);
+#  * exactly ONE OCR pipeline may own PDFs in an instance (see the long note on
+#    `forbidCompetingApps`).
 { self }:
 { config, lib, pkgs, ... }:
 
@@ -99,6 +101,31 @@ in
       description = "Package set the Python interpreter is taken from.";
     };
 
+    forbidCompetingApps = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Fail evaluation when a known competing OCR app is configured, and force
+        the Nextcloud app store off.
+
+        A second writer that OCRs the same postCreate/postWrite events does not
+        "add" anything: it overwrites the first one's text layer minutes later,
+        silently, while the victim's own XMP stamp survives the rewrite — so its
+        skip logic still records the file as stamped by us, and the money is
+        already spent. Measured on the old deployment: our 7.6 MB Google layer
+        replaced by a 6.3 MB OCRmyPDF one extracting 0 Cyrillic characters.
+
+        A `throw` rather than a NixOS assertion, deliberately: an assertion only
+        fails once the system is really built, and this must fail `nix eval`.
+      '';
+    };
+
+    competingApps = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "workflow_ocr" ];
+      description = "Curated list of Nextcloud app ids that must not share this instance.";
+    };
+
     nginxQueueAllowCidrs = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ "127.0.0.1/32" "::1/128" ];
@@ -110,81 +137,108 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = builtins.pathExists cfg.secretFile;
-        message = "services.ocrflow.secretFile does not exist: run `occ ocrflow:worker:secret` and point this at the file it wrote.";
-      }
-      {
-        assertion = builtins.pathExists cfg.davPasswordFile;
-        message = "services.ocrflow.davPasswordFile does not exist: the worker cannot download a single file without it.";
-      }
-    ];
+  config = lib.mkMerge [
+    (lib.mkIf cfg.enable {
+      assertions = [
+        {
+          assertion = builtins.pathExists cfg.secretFile;
+          message = "services.ocrflow.secretFile does not exist: run `occ ocrflow:worker:secret` and point this at the file it wrote.";
+        }
+        {
+          assertion = builtins.pathExists cfg.davPasswordFile;
+          message = "services.ocrflow.davPasswordFile does not exist: the worker cannot download a single file without it.";
+        }
+      ];
 
-    users.users.${cfg.user} = {
-      isSystemUser = true;
-      group = cfg.user;
-      home = "/var/lib/ocrflow";
-      createHome = true;
-    };
-    users.groups.${cfg.user} = { };
-
-    systemd.services.ocrflow-worker = {
-      description = "OCR Flow worker";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
-
-      serviceConfig = {
-        Type = "simple";
-        User = cfg.user;
-        Group = cfg.user;
-        ExecStart = workerBin;
-        Restart = "always";
-        RestartSec = 5;
-
-        # The two secrets, and nothing else about them in the unit's metadata.
-        LoadCredential = [
-          "ocrflow-worker-secret:${cfg.secretFile}"
-          "ocrflow-dav-password:${cfg.davPasswordFile}"
-        ];
-
-        # A worker downloads untrusted files and parses them with three different
-        # engines. Give it as little as possible to be wrong with.
-        NoNewPrivileges = true;
-        PrivateTmp = true;
-        PrivateDevices = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectControlGroups = true;
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
-        RestrictNamespaces = true;
-        LockPersonality = true;
-        MemoryDenyWriteExecute = false; # onnxruntime JITs
-        SystemCallArchitectures = "native";
-        StateDirectory = "ocrflow";
+      users.users.${cfg.user} = {
+        isSystemUser = true;
+        group = cfg.user;
+        home = "/var/lib/ocrflow";
+        createHome = true;
       };
-    };
+      users.groups.${cfg.user} = { };
 
-    # Surfaced rather than applied: the allow-list belongs in the vhost that
-    # serves Nextcloud, which this module does not own.
-    warnings = [
-      ''
-        services.ocrflow: add this to the Nextcloud vhost so the worker plane is
-        not reachable from the internet (secret + @PublicPage is not enough on a
-        route that moves files):
+      systemd.services.ocrflow-worker = {
+        description = "OCR Flow worker";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network-online.target" ];
+        wants = [ "network-online.target" ];
 
-          location ~ ^/ocs/v2\.php/apps/ocrflow/api/v1/queue/ {
-            ${lib.concatMapStringsSep "\n    " (c: "allow ${c};") cfg.nginxQueueAllowCidrs}
-            deny all;
-            include ${config.services.nginx.package}/conf/fastcgi_params;
-            fastcgi_pass unix:/run/phpfpm/nextcloud.sock;
-            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-          }
-      ''
-    ];
-  };
+        serviceConfig = {
+          Type = "simple";
+          User = cfg.user;
+          Group = cfg.user;
+          ExecStart = workerBin;
+          Restart = "always";
+          RestartSec = 5;
+
+          # The two secrets, and nothing else about them in the unit's metadata.
+          LoadCredential = [
+            "ocrflow-worker-secret:${cfg.secretFile}"
+            "ocrflow-dav-password:${cfg.davPasswordFile}"
+          ];
+
+          # A worker downloads untrusted files and parses them with three
+          # different engines. Give it as little as possible to be wrong with.
+          NoNewPrivileges = true;
+          PrivateTmp = true;
+          PrivateDevices = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectControlGroups = true;
+          RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+          RestrictNamespaces = true;
+          LockPersonality = true;
+          MemoryDenyWriteExecute = false; # onnxruntime JITs
+          SystemCallArchitectures = "native";
+          StateDirectory = "ocrflow";
+        };
+      };
+
+      # Surfaced rather than applied: the allow-list belongs in the vhost that
+      # serves Nextcloud, which this module does not own.
+      warnings = [
+        ''
+          services.ocrflow: add this to the Nextcloud vhost so the worker plane is
+          not reachable from the internet (secret + @PublicPage is not enough on a
+          route that moves files):
+
+            location ~ ^/ocs/v2\.php/apps/ocrflow/api/v1/queue/ {
+              ${lib.concatMapStringsSep "\n    " (c: "allow ${c};") cfg.nginxQueueAllowCidrs}
+              deny all;
+              include ${config.services.nginx.package}/conf/fastcgi_params;
+              fastcgi_pass unix:/run/phpfpm/nextcloud.sock;
+              fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            }
+        ''
+      ];
+    })
+
+    # Only when a Nextcloud is actually configured here: referencing its options
+    # in a host that has no Nextcloud is an evaluation error, not a guard.
+    (lib.mkIf (cfg.enable && cfg.forbidCompetingApps && config.services ? nextcloud && (config.services.nextcloud.enable or false)) (
+      let
+        rivals = lib.filter (app: config.services.nextcloud.extraApps ? ${app}) cfg.competingApps;
+      in
+      {
+        # The app store is the only way a rival can appear at run time; the throw
+        # below can only see what this configuration declares.
+        services.nextcloud.appstoreEnable = lib.mkForce false;
+
+        warnings = lib.mkIf (rivals != [ ]) (throw ''
+          services.ocrflow: a competing OCR app is configured: ${lib.concatStringsSep ", " rivals}
+
+          Two OCR pipelines on one instance silently destroy each other's text
+          layers (the survivor's stamp makes the victim record the file as done),
+          and the API spend is already paid by the time you notice.
+
+          Either drop it from services.nextcloud.extraApps, or set
+          services.ocrflow.forbidCompetingApps = false if you know why you want
+          both.
+        '');
+      }
+    ))
+  ];
 }
