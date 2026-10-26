@@ -13,3 +13,6 @@ js/dist/
 *.sqlite
 *.db
 .env
+/vendor/
+/.phpunit.cache/
+/composer.phar

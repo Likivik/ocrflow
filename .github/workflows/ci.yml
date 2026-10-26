@@ -2,9 +2,11 @@ name: CI
 
 # Gates before anything reaches main:
 #
-#   python tests  — pytest over src/ + tests/, required
+#   python tests  — pytest over worker/ + tests/, required
 #   lint          — ruff check + ruff format --check, required
-#   typecheck     — mypy over src/, required
+#   typecheck     — mypy over worker/lib, required
+#   php tests     — PHPUnit over lib/, required (the app's own logic: schema
+#                   constraints, the worker-plane secret, candidate selection)
 #
 # Every `uses:` is pinned to a full commit SHA, not a tag: a tag can be moved
 # and a branch can (`...@main` upstream was changeable at will, running with our
@@ -111,3 +113,21 @@ jobs:
       - name: mypy
         working-directory: worker
         run: mypy lib
+
+  php-tests:
+    name: php tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: PHP and composer versions
+        # Both ship on the hosted runner image, so this job needs no third-party
+        # action at all — nothing to pin, nothing that can move under us.
+        run: |
+          php -v
+          composer --version
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --prefer-dist
+      - name: PHPUnit
+        run: vendor/bin/phpunit --no-coverage
+
