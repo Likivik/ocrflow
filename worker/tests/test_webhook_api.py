@@ -33,20 +33,29 @@ _STATE_DIR = os.environ["NC_OCR_STATE_DIR"]
 
 
 @pytest.fixture(autouse=True)
-def _repin_state_dir():
-    """Re-pin ``NC_OCR_STATE_DIR`` before every test in this file.
+def _fresh_state_dir(monkeypatch):
+    """Re-pin ``NC_OCR_STATE_DIR`` and repair the file index if it went dead.
 
-    ``test_db_path_resolution_env_precedence`` legitimately pops the env
-    var between two ``_Env`` blocks. Without this re-pin the next
-    ``jobstore.init()`` (after ``_reset_for_tests``) would resolve the
-    DB path from ``/var/lib/nc-ocr`` and silently fall back to a
-    permission-denied no-op state.
+    Re-pinning the env var alone is not enough: ``jobstore`` caches the
+    resolved path in a module global (``_DB_PATH``) and its ``init()`` never
+    raises, so a single resolution against an unwritable path leaves the
+    index in a silent no-op state for the rest of the session — an "already
+    OCR'd" mark that vanishes, a scan that queues the same file twice, and a
+    ``no such table`` warning nobody reads. That is what broke CI.
+
+    Repair, do not rebuild: a per-test reset would fight the worker thread
+    that was started at import. One healthy index per pytest process is
+    enough, and asserting ``_ready()`` makes the silent mode impossible.
     """
-    os.environ["NC_OCR_STATE_DIR"] = _STATE_DIR
+    monkeypatch.setenv("NC_OCR_STATE_DIR", _STATE_DIR)
+    if not ws.jobstore._ready():
+        ws.jobstore._reset_for_tests()
+        ws.jobstore.init()
+    assert ws.jobstore._ready(), f"jobstore did not initialise at {ws.jobstore.db_path()}"
     yield
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 

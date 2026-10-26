@@ -775,10 +775,10 @@ class TestDetectOrientation:
         # stage-1 to return a flat distribution to drive the
         # fallback deterministically — it doesn't depend on a real
         # blank image.
-        from PIL import Image, ImageDraw, ImageFont
-
         # doc_ori is imported lazily inside detect_orientation;
         # expose it so the patch sticks.
+        from PIL import Image, ImageDraw, ImageFont
+
         from nc_ocr_flow import doc_ori
         from nc_ocr_flow import orientation as orient_mod
 
