@@ -39,6 +39,7 @@ let
     export NC_OCR_WORKER_NAME=${lib.escapeShellArg cfg.workerName}
     export NC_OCR_IDLE_SECONDS=${toString cfg.idleSeconds}
     ${lib.optionalString (cfg.engine != null) "export NC_OCR_ENGINE=${lib.escapeShellArg cfg.engine}"}
+${lib.concatMapStrings (name: "    export ${name}=${lib.escapeShellArg cfg.extraEnvironment.${name}}\n") (lib.attrNames cfg.extraEnvironment)}
     exec ${python}/bin/python3 -m nc_ocr_flow.runner
   '';
 in
@@ -99,6 +100,33 @@ in
       default = pkgs;
       defaultText = lib.literalExpression "pkgs";
       description = "Package set the Python interpreter is taken from.";
+    };
+
+    extraEnvironment = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = { };
+      example = {
+        GOOGLE_APPLICATION_CREDENTIALS = "$CREDENTIALS_DIRECTORY/google-ocr-key";
+        NC_OCR_GOOGLE_PROJECT = "my-project";
+      };
+      description = ''
+        Extra environment for the worker, for everything the engines need and this
+        module does not model: Google Vision's key path and project, a MiniMax key,
+        an engine selector. `$CREDENTIALS_DIRECTORY` expands to the unit's private
+        credentials directory, so a secret is referenced there and never inlined.
+      '';
+    };
+
+    extraCredentials = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "google-ocr-key:/run/secrets/google/ocr-key.json" ];
+      description = ''
+        Additional `LoadCredential` entries, as `name:path`. The file is copied into
+        the unit's private credentials directory before it starts and is readable by
+        nothing else — which is why the key path in `extraEnvironment` is
+        `$CREDENTIALS_DIRECTORY/<name>` rather than the source path.
+      '';
     };
 
     forbidCompetingApps = lib.mkOption {
@@ -176,7 +204,7 @@ in
           LoadCredential = [
             "ocrflow-worker-secret:${cfg.secretFile}"
             "ocrflow-dav-password:${cfg.davPasswordFile}"
-          ];
+          ] ++ cfg.extraCredentials;
 
           # A worker downloads untrusted files and parses them with three
           # different engines. Give it as little as possible to be wrong with.
