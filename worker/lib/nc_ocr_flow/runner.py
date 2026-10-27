@@ -121,7 +121,15 @@ def main(argv: list[str] | None = None) -> int:
 
     # Imported late so `--help`-ish paths and the unit tests do not need the
     # whole OCR stack (PyMuPDF, ONNX runtime, cloud SDKs) to be installed.
-    from .webhook_server import _process_file
+    from .webhook_server import DavCredentialsMissing, _process_file, verify_dav_credentials
+
+    # Before claiming anything: a worker with no WebDAV identity would claim a
+    # job, fail to fetch it, and blame the document. Refuse to start instead.
+    try:
+        verify_dav_credentials()
+    except DavCredentialsMissing as exc:
+        log.error("%s", exc)
+        return 2
 
     log.info("worker started: %s, idle %ss", base_url, idle)
     while True:
