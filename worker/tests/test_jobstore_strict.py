@@ -33,10 +33,9 @@ def test_strict_mode_raises_instead_of_degrading(broken_store, monkeypatch) -> N
     monkeypatch.setenv("NC_OCR_STATE_STRICT", "1")
     with pytest.raises(jobstore.JobStoreUnavailable, match="init"):
         jobstore.init()
-    # `_ready()` retries the init, so in strict mode it raises rather than
-    # reporting False — a caller cannot mistake "broken" for "empty".
-    with pytest.raises(jobstore.JobStoreUnavailable):
-        jobstore._ready()
+    # `_ready()` is a predicate: it retries the init and answers False, so the
+    # repair path can rebuild. It must not raise even here.
+    assert jobstore._ready() is False
 
 
 def test_permissive_mode_still_degrades_for_a_live_worker(broken_store, monkeypatch) -> None:
