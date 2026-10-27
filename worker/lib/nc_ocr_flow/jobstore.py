@@ -1596,13 +1596,25 @@ def usage_month(engine: str | None = None) -> dict[str, int]:
 
 
 def _reset_for_tests() -> None:
-    """Drop all rows. Only meaningful in tests."""
+    """Drop all rows. Only meaningful in tests.
+
+    The journal files go too. `db_path()` runs in WAL mode, so deleting only
+    `jobs.db` leaves `jobs.db-wal` and `jobs.db-shm` behind, and the next open
+    replays a WAL that belongs to a file which no longer exists — SQLite then says
+    `database disk image is malformed` or `file is not a database`, in a test that
+    never touched the store. That was today's whole flake class on CI.
+    """
     global _INITIALISED, _DB_PATH
     _INITIALISED = False
     _DB_PATH = None
     try:
         p = db_path()
-        if p.exists():
-            p.unlink()
     except Exception:
-        pass
+        return
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        sidecar = p.with_name(p.name + suffix)
+        try:
+            if sidecar.exists():
+                sidecar.unlink()
+        except OSError:
+            pass
