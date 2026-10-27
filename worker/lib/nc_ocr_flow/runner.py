@@ -121,6 +121,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Imported late so `--help`-ish paths and the unit tests do not need the
     # whole OCR stack (PyMuPDF, ONNX runtime, cloud SDKs) to be installed.
+    #
+    # Importing `webhook_server` starts its own scheduler unless told otherwise,
+    # which would put the legacy webhook workers and the catch-up pass next to
+    # this loop — two writers on one instance. This process owns the queue; the
+    # old server does not run here.
+    os.environ.setdefault("NC_OCR_RUN_SCHEDULER", "0")
     from .webhook_server import DavCredentialsMissing, _process_file, verify_dav_credentials
 
     # Before claiming anything: a worker with no WebDAV identity would claim a
