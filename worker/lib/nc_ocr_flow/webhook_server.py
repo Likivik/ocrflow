@@ -39,11 +39,33 @@ log = logging.getLogger(__name__)
 
 # --- Config from environment ---
 NC_URL = os.environ.get("NC_OCR_NC_URL", "http://localhost").rstrip("/")
-NC_USER = os.environ.get("NC_OCR_NC_USER", "likivik")
+# No default user. It used to be "likivik" — a person, with that person's
+# authority over the whole instance — so an unset variable silently ran the
+# worker as a human instead of as the account it was given. A missing user is
+# now an error at start-up (see verify_dav_credentials) rather than a policy.
+NC_USER = (os.environ.get("NC_OCR_DAV_USER") or os.environ.get("NC_OCR_NC_USER") or "").strip()
+
+
+class DavCredentialsMissing(RuntimeError):
+    """No WebDAV identity, so no file can be fetched or written."""
 
 
 def _read_secret(env_var: str) -> str:
-    """Read secret from env var directly or from file (env var + '_FILE')."""
+    """Read a secret: systemd credentials dir, then env (var + '_FILE') then var.
+
+    `$CREDENTIALS_DIRECTORY` comes first because `LoadCredential=` is the only
+    path where the value never appears in `systemctl show` or in
+    `/proc/<pid>/environ`. The `_FILE` form is kept for the deployments that
+    already use it.
+    """
+    cred_dir = os.environ.get("CREDENTIALS_DIRECTORY", "")
+    if cred_dir:
+        # The unit names the file `ocrflow-dav-password`; accept the generic
+        # spelling too so the module and a hand-written unit agree.
+        for name in ("ocrflow-dav-password", "nc-ocr-password", env_var.lower()):
+            candidate = Path(cred_dir) / name
+            if candidate.is_file():
+                return candidate.read_text().strip()
     val = os.environ.get(env_var)
     if val:
         return val
@@ -56,6 +78,28 @@ def _read_secret(env_var: str) -> str:
 
 NC_PASSWORD = _read_secret("NC_OCR_NC_PASSWORD")
 WEBHOOK_SECRET = _read_secret("NC_OCR_WEBHOOK_SECRET")
+
+
+def _dav_auth() -> tuple[str, str]:
+    """The one place a WebDAV identity is handed to `requests`.
+
+    Reading the module globals (not the environment) keeps the existing tests
+    that monkeypatch `ws.NC_USER` / `ws.NC_PASSWORD` working unchanged.
+    """
+    if not NC_USER or not NC_PASSWORD:
+        raise DavCredentialsMissing(
+            "no WebDAV credentials: set NC_OCR_DAV_USER (or NC_OCR_NC_USER) and "
+            "put the app password in $CREDENTIALS_DIRECTORY/ocrflow-dav-password "
+            "(or NC_OCR_NC_PASSWORD / NC_OCR_NC_PASSWORD_FILE)"
+        )
+    return NC_USER, NC_PASSWORD
+
+
+def verify_dav_credentials() -> None:
+    """Fail at start-up, not on the first document."""
+    _dav_auth()
+
+
 LISTEN_HOST = os.environ.get("NC_OCR_LISTEN_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("NC_OCR_LISTEN_PORT", "8095"))
 
@@ -319,7 +363,7 @@ def _webdav_download(nc_path: str, dest: Path) -> None:
     def _do_get():
         r = requests.get(
             url,
-            auth=(NC_USER, NC_PASSWORD),
+            auth=_dav_auth(),
             stream=True,
             timeout=120,
         )
@@ -396,7 +440,7 @@ def _webdav_upload(nc_path: str, src: Path) -> None:
             r = requests.put(
                 url,
                 data=f,
-                auth=(NC_USER, NC_PASSWORD),
+                auth=_dav_auth(),
                 headers={"Content-Type": "application/octet-stream"},
                 timeout=300,
             )
@@ -447,7 +491,7 @@ def _webdav_delete(nc_path: str) -> None:
     def _do_delete() -> requests.Response:
         r = requests.delete(
             url,
-            auth=(NC_USER, NC_PASSWORD),
+            auth=_dav_auth(),
             timeout=30,
         )
         r.raise_for_status()
@@ -511,7 +555,7 @@ def _webdav_replace_atomic(nc_path: str, src: Path) -> None:
             r = requests.put(
                 tmp_url,
                 data=f,
-                auth=(NC_USER, NC_PASSWORD),
+                auth=_dav_auth(),
                 headers={"Content-Type": "application/octet-stream"},
                 timeout=300,
             )
@@ -521,7 +565,7 @@ def _webdav_replace_atomic(nc_path: str, src: Path) -> None:
         r = requests.request(
             "MOVE",
             tmp_url,
-            auth=(NC_USER, NC_PASSWORD),
+            auth=_dav_auth(),
             headers={
                 "Destination": target_url,
                 "Overwrite": "T",
@@ -543,7 +587,7 @@ def _webdav_replace_atomic(nc_path: str, src: Path) -> None:
         try:
             requests.delete(
                 tmp_url,
-                auth=(NC_USER, NC_PASSWORD),
+                auth=_dav_auth(),
                 timeout=30,
             ).raise_for_status()
         except Exception as exc:
@@ -577,7 +621,7 @@ def _propfind_size_etag(nc_path: str) -> tuple[int | None, str | None]:
             "PROPFIND",
             url,
             data=body,
-            auth=(NC_USER, NC_PASSWORD),
+            auth=_dav_auth(),
             headers={"Depth": "0", "Content-Type": "application/xml"},
             timeout=60,
         )
@@ -644,7 +688,7 @@ def _webdav_exists(nc_path: str, timeout: int = 10) -> bool:
         r = requests.request(
             "HEAD",
             url,
-            auth=(NC_USER, NC_PASSWORD),
+            auth=_dav_auth(),
             timeout=timeout,
         )
     except (requests.RequestException, TimeoutError, OSError) as exc:
@@ -865,7 +909,7 @@ def _list_dir_names(dir_nc_path: str) -> set[str] | None:
         resp = requests.request(
             "PROPFIND",
             NC_URL + dav + "/",
-            auth=(NC_USER, NC_PASSWORD),
+            auth=_dav_auth(),
             headers={"Depth": "1", "Content-Type": "application/xml"},
             data=body,
             timeout=_CATCHUP_TIMEOUT,
@@ -2458,7 +2502,7 @@ def catch_up_missed_files(now: float | None = None) -> dict:
         resp = requests.request(
             "PROPFIND",
             NC_URL + dav_path,
-            auth=(NC_USER, NC_PASSWORD),
+            auth=_dav_auth(),
             headers={"Depth": "infinity", "Content-Type": "application/xml"},
             data=_CATCHUP_PROPFIND_BODY,
             timeout=_CATCHUP_TIMEOUT,
@@ -3601,7 +3645,7 @@ async def scan_all(
     resp = requests.request(
         "PROPFIND",
         NC_URL + dav_path,
-        auth=(NC_USER, NC_PASSWORD),
+        auth=_dav_auth(),
         headers={"Depth": "infinity", "Content-Type": "application/xml"},
         data=propfind_body,
         timeout=300,

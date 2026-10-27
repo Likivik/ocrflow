@@ -1,6 +1,16 @@
 """Pytest config: slow marker, fixtures."""
 
+import os
+
 import pytest
+
+# `webhook_server` no longer invents a WebDAV user: production sets one
+# explicitly (`NC_OCR_NC_USER` in the NixOS aspect) and an unset value is now a
+# start-up error. The suite has always exercised DAV paths as a fixed user, so it
+# declares that user here instead of relying on a default that was really a
+# person's account. Set before any test module imports the server.
+os.environ.setdefault("NC_OCR_DAV_USER", "likivik")
+os.environ.setdefault("NC_OCR_NC_PASSWORD", "test-pass")
 
 
 def pytest_addoption(parser):
