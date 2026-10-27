@@ -2592,36 +2592,47 @@ def _catchup_on_startup() -> None:
         log.error("catch-up: startup pass failed (%s)", exc)
 
 
-# Run the reconciler once at startup so an operator does not have to
-# call the endpoint manually after every restart. The function is
-# idempotent and never raises, so this is safe even when the queue is
-# healthy.
-_reconcile_startup = reconcile_orphans()
-if _reconcile_startup.get("orphans_found"):
-    log.warning(
-        "startup: reconciler recovered %d / %d orphaned queued files",
-        _reconcile_startup["recovered"],
-        _reconcile_startup["orphans_found"],
-    )
-# C5: also run the stale-row reconciler once at startup so the 36
-# phantom-errors on production are not stuck for another deploy
-# cycle. The function is bounded, idempotent, and never raises —
-# it will simply return 0/0/0 on a healthy index.
-_reconcile_stale_startup = reconcile_stale_files()
-if _reconcile_stale_startup.get("marked_gone"):
-    log.warning(
-        "startup: stale-row reconciler marked %d / %d rows gone",
-        _reconcile_stale_startup["marked_gone"],
-        _reconcile_stale_startup["checked"],
-    )
-for _worker_idx in range(_WORKERS):
-    threading.Thread(target=_ocr_worker, daemon=True, name=f"ocr-worker-{_worker_idx}").start()
-log.info("started %d OCR worker(s) (NC_OCR_WORKERS)", _WORKERS)
+#: This module is a library as well as a server: `runner` imports `_process_file`
+#: from it. Import-time threads used to mean the new queue worker booted the
+#: legacy server's scheduler next to its own loop — two writers on one instance,
+#: plus a catch-up pass re-queuing files the queue had already handled. The
+#: scheduler therefore starts only when something asks for it: the old entry
+#: point leaves the default (on), the new worker sets NC_OCR_RUN_SCHEDULER=0.
+_SCHEDULER_ENABLED = os.environ.get("NC_OCR_RUN_SCHEDULER", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
 
-# Catch-up runs in its own thread: it does one WebDAV PROPFIND and must
-# never delay readiness. Workers are already up, so anything it enqueues
-# is picked up immediately.
-threading.Thread(target=_catchup_on_startup, daemon=True, name="ocr-catchup-startup").start()
+if _SCHEDULER_ENABLED:
+    # Run the reconciler once at startup so an operator does not have to call the
+    # endpoint manually after every restart. Idempotent and never raises.
+    _reconcile_startup = reconcile_orphans()
+    if _reconcile_startup.get("orphans_found"):
+        log.warning(
+            "startup: reconciler recovered %d / %d orphaned queued files",
+            _reconcile_startup["recovered"],
+            _reconcile_startup["orphans_found"],
+        )
+
+    # C5: also run the stale-row reconciler once at startup so phantom errors on
+    # production are not stuck for another deploy cycle. Bounded, idempotent.
+    _reconcile_stale_startup = reconcile_stale_files()
+    if _reconcile_stale_startup.get("marked_gone"):
+        log.warning(
+            "startup: stale-row reconciler marked %d / %d rows gone",
+            _reconcile_stale_startup["marked_gone"],
+            _reconcile_stale_startup["checked"],
+        )
+
+    for _worker_idx in range(_WORKERS):
+        threading.Thread(target=_ocr_worker, daemon=True, name=f"ocr-worker-{_worker_idx}").start()
+    log.info("started %d OCR worker(s) (NC_OCR_WORKERS)", _WORKERS)
+
+    # Catch-up runs in its own thread: it does one WebDAV PROPFIND and must never
+    # delay readiness. Workers are already up, so anything it enqueues is picked
+    # up immediately.
+    threading.Thread(target=_catchup_on_startup, daemon=True, name="ocr-catchup-startup").start()
 
 # G3: one-line announcement so an operator can tell at a glance whether
 # this build has the fingerprint-verified skip guard compiled in. The
@@ -2799,7 +2810,8 @@ def _vision_quota_loop() -> None:
         time.sleep(_VISION_QUOTA_INTERVAL)
 
 
-threading.Thread(target=_vision_quota_loop, name="vision-quota", daemon=True).start()
+if _SCHEDULER_ENABLED:
+    threading.Thread(target=_vision_quota_loop, name="vision-quota", daemon=True).start()
 
 
 def _vision_summary() -> dict:
