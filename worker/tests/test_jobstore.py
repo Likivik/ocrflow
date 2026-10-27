@@ -251,7 +251,11 @@ def test_usage_add_never_raises_on_broken_db(tmp_path: Path) -> None:
     bad = tmp_path / "not-a-dir"
     bad.write_text("file, not a directory")
     old = os.environ.get("NC_OCR_STATE_DIR")
+    old_strict = os.environ.get("NC_OCR_STATE_STRICT")
     os.environ["NC_OCR_STATE_DIR"] = str(bad)  # a FILE, not a directory
+    # This test is about the degraded contract a live worker relies on; the
+    # suite otherwise runs strict (conftest.py), where the same failure raises.
+    os.environ["NC_OCR_STATE_STRICT"] = "0"
     try:
         for name in ("nc_ocr_flow.jobstore", "nc_ocr_flow.webhook_server"):
             sys.modules.pop(name, None)
@@ -263,6 +267,10 @@ def test_usage_add_never_raises_on_broken_db(tmp_path: Path) -> None:
             os.environ.pop("NC_OCR_STATE_DIR", None)
         else:
             os.environ["NC_OCR_STATE_DIR"] = old
+        if old_strict is None:
+            os.environ.pop("NC_OCR_STATE_STRICT", None)
+        else:
+            os.environ["NC_OCR_STATE_STRICT"] = old_strict
         for name in ("nc_ocr_flow.jobstore", "nc_ocr_flow.webhook_server"):
             sys.modules.pop(name, None)
 
@@ -628,7 +636,9 @@ def test_broken_db_path_silent(tmp_path: Path) -> None:
     blocker = tmp_path / "blocker"
     blocker.write_text("not a directory")
     cache = tmp_path / "cache"
-    with _Env(NC_OCR_STATE_DIR=str(blocker), XDG_CACHE_HOME=str(cache)):
+    # The degraded contract is what this test is about; the suite elsewhere runs
+    # strict (conftest.py) and would turn the same path into a hard error.
+    with _Env(NC_OCR_STATE_DIR=str(blocker), XDG_CACHE_HOME=str(cache), NC_OCR_STATE_STRICT="0"):
         for mod_name in list(sys.modules):
             if mod_name == "nc_ocr_flow.jobstore":
                 del sys.modules[mod_name]
