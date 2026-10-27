@@ -102,6 +102,44 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+class JobStoreUnavailable(RuntimeError):
+    """The index cannot be read or written, and something asked for an answer.
+
+    Outside strict mode a failed statement degrades to a warning and an empty
+    result — right for a replacement worker that must keep serving documents, and
+    wrong for a test, where "the store is gone" and "the value is 300" are two
+    very different failures. CI paid for that ambiguity: a disk I/O error showed
+    up as ``assert 300 == 600``.
+    """
+
+
+def _strict() -> bool:
+    """True when a failed statement is a bug instead of a degradation."""
+    return os.environ.get("NC_OCR_STATE_STRICT", "").strip().lower() in ("1", "true", "yes")
+
+
+#: Contention, not corruption. Two connections can legitimately collide on a
+#: WAL file — a catch-up thread and a test both opening the index — and raising
+#: for that would turn a busy millisecond into a failed document.
+_TRANSIENT = ("database is locked", "database table is locked", "busy")
+
+
+def _is_transient(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and any(
+        marker in str(exc).lower() for marker in _TRANSIENT
+    )
+
+
+def _fail(op: str, exc: BaseException, *detail: object) -> None:
+    """Log a failed statement, or raise it. Never returns in strict mode."""
+    where = " ".join(str(d) for d in detail)
+    if _strict() and not _is_transient(exc):
+        raise JobStoreUnavailable(
+            f"jobstore: {op} failed ({exc}){(' — ' + where) if where else ''} at {db_path()}"
+        ) from exc
+    log.warning("jobstore: %s failed (%s)%s", op, exc, (" — " + where) if where else "")
+
+
 # --- Schema ----------------------------------------------------------------
 
 _SCHEMA_SQL = """
@@ -234,7 +272,8 @@ def init() -> None:
         _INITIALISED = True
         log.info("jobstore: schema ready at %s", db_path())
     except Exception as exc:
-        log.warning("jobstore: init failed (%s) — history will be a no-op", exc)
+        # "history will be a no-op" outside strict mode; a hard error inside it.
+        _fail("init", exc)
         _INITIALISED = False
 
 
@@ -691,7 +730,7 @@ def record_enqueue(job: dict[str, Any]) -> int | None:
         # not break because the history DB is unavailable) and just
         # log. The job is otherwise lost; the next ``/rescan`` or
         # webhook event will re-enqueue it.
-        log.warning("jobstore: record_enqueue failed for id=%s (%s)", explicit_id, exc)
+        _fail("record_enqueue", exc, explicit_id)
         return None  # type: ignore[return-value]
     job["id"] = assigned
     return assigned
@@ -728,7 +767,7 @@ def record_update(job: dict[str, Any]) -> None:
                 values,
             )
     except Exception as exc:
-        log.warning("jobstore: record_update failed for id=%s (%s)", job.get("id"), exc)
+        _fail("record_update", exc, job.get("id"))
 
 
 # --- Read API --------------------------------------------------------------
@@ -779,7 +818,7 @@ def claim_next() -> dict | None:
             job["started"] = started
             return job
     except Exception as exc:
-        log.warning("jobstore: claim_next failed (%s)", exc)
+        _fail("claim_next", exc)
         return None
 
 
@@ -798,7 +837,7 @@ def requeue_stale() -> int:
             )
             return cur.rowcount or 0
     except Exception as exc:
-        log.warning("jobstore: requeue_stale failed (%s)", exc)
+        _fail("requeue_stale", exc)
         return 0
 
 
@@ -839,7 +878,7 @@ def get(job_id: int) -> dict[str, Any] | None:
             row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         return _row_to_dict(row) if row is not None else None
     except Exception as exc:
-        log.warning("jobstore: get(%s) failed (%s)", job_id, exc)
+        _fail("get", exc, job_id)
         return None
 
 
@@ -889,7 +928,7 @@ def query(
             rows = conn.execute(sql, params).fetchall()
         return [_row_to_dict(r) for r in rows]
     except Exception as exc:
-        log.warning("jobstore: query failed (%s)", exc)
+        _fail("query", exc)
         return []
 
 
@@ -963,7 +1002,7 @@ def stats() -> dict[str, Any]:
             out["retries_queued"] = r_retry_queued["n"] if r_retry_queued is not None else 0
         return out
     except Exception as exc:
-        log.warning("jobstore: stats failed (%s)", exc)
+        _fail("stats", exc)
         return out
 
 
@@ -990,7 +1029,7 @@ def in_flight_job_for_path(nc_path: str) -> dict[str, Any] | None:
             ).fetchone()
         return _row_to_dict(row) if row is not None else None
     except Exception as exc:
-        log.warning("jobstore: in_flight_job_for_path failed (%s)", exc)
+        _fail("in_flight_job_for_path", exc)
         return None
 
 
@@ -1124,7 +1163,7 @@ def file_put(record: dict[str, Any]) -> None:
                 ),
             )
     except Exception as exc:
-        log.warning("jobstore: file_put failed for %s (%s)", record.get("path"), exc)
+        _fail("file_put", exc, record.get("path"))
 
 
 def file_get(path: str) -> dict[str, Any] | None:
@@ -1136,7 +1175,7 @@ def file_get(path: str) -> dict[str, Any] | None:
             row = conn.execute("SELECT * FROM files WHERE path = ?", (path,)).fetchone()
             return dict(row) if row is not None else None
     except Exception as exc:
-        log.warning("jobstore: file_get failed (%s)", exc)
+        _fail("file_get", exc)
         return None
 
 
@@ -1174,7 +1213,7 @@ def file_bump_foreign_rewrites(path: str) -> int | None:
             )
             return new
     except Exception as exc:
-        log.warning("jobstore: file_bump_foreign_rewrites(%s) failed (%s)", path, exc)
+        _fail("file_bump_foreign_rewrites(%s)", exc, path)
         return None
 
 
@@ -1201,7 +1240,7 @@ def file_reset_foreign_rewrites(path: str) -> None:
                 (path,),
             )
     except Exception as exc:
-        log.warning("jobstore: file_reset_foreign_rewrites(%s) failed (%s)", path, exc)
+        _fail("file_reset_foreign_rewrites(%s)", exc, path)
 
 
 def file_foreign_rewrites_total() -> int:
@@ -1225,7 +1264,7 @@ def file_foreign_rewrites_total() -> int:
             ).fetchone()
             return int(row["total"] or 0) if row else 0
     except Exception as exc:
-        log.warning("jobstore: file_foreign_rewrites_total failed (%s)", exc)
+        _fail("file_foreign_rewrites_total", exc)
         return 0
 
 
@@ -1238,7 +1277,7 @@ def file_done_paths() -> set[str]:
             rows = conn.execute("SELECT path FROM files WHERE status = 'done'").fetchall()
             return {r[0] for r in rows if r[0]}
     except Exception as exc:
-        log.warning("jobstore: file_done_paths failed (%s)", exc)
+        _fail("file_done_paths", exc)
         return set()
 
 
@@ -1250,7 +1289,7 @@ def file_all() -> dict[str, dict[str, Any]]:
         with _connect() as conn:
             return {r["path"]: dict(r) for r in conn.execute("SELECT * FROM files").fetchall()}
     except Exception as exc:
-        log.warning("jobstore: file_all failed (%s)", exc)
+        _fail("file_all", exc)
         return {}
 
 
@@ -1277,7 +1316,7 @@ def file_paths_by_status(statuses: list[str], limit: int = 500) -> list[str]:
             ).fetchall()
         return [r["path"] for r in rows if r["path"]]
     except Exception as exc:
-        log.warning("jobstore: file_paths_by_status failed (%s)", exc)
+        _fail("file_paths_by_status", exc)
         return []
 
 
@@ -1288,7 +1327,7 @@ def file_count() -> int:
         with _connect() as conn:
             return conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
     except Exception as exc:
-        log.warning("jobstore: file_count failed (%s)", exc)
+        _fail("file_count", exc)
         return 0
 
 
@@ -1300,7 +1339,7 @@ def file_forget(path: str) -> None:
         with _connect() as conn:
             conn.execute("DELETE FROM files WHERE path = ?", (path,))
     except Exception as exc:
-        log.warning("jobstore: file_forget failed (%s)", exc)
+        _fail("file_forget", exc)
 
 
 def orphaned_queued_paths() -> list[str]:
@@ -1342,7 +1381,7 @@ def orphaned_queued_paths() -> list[str]:
             ).fetchall()
         return [r[0] for r in rows if r[0]]
     except Exception as exc:
-        log.warning("jobstore: orphaned_queued_paths failed (%s)", exc)
+        _fail("orphaned_queued_paths", exc)
         return []
 
 
@@ -1366,7 +1405,7 @@ def file_reset_to(path: str, status: str = "") -> None:
                 (status, time.time() if status else None, path),
             )
     except Exception as exc:
-        log.warning("jobstore: file_reset_to failed (%s)", exc)
+        _fail("file_reset_to", exc)
 
 
 def file_import(mapping: dict[str, Any]) -> int:
@@ -1396,7 +1435,7 @@ def file_import(mapping: dict[str, Any]) -> int:
             )
         return len(mapping)
     except Exception as exc:
-        log.warning("jobstore: file_import failed (%s)", exc)
+        _fail("file_import", exc)
         return 0
 
 
@@ -1430,7 +1469,7 @@ def claim_node(node_id: int, ttl: float) -> bool:
             conn.execute("COMMIT")
             return True
     except Exception as exc:
-        log.warning("jobstore: claim_node failed (%s)", exc)
+        _fail("claim_node", exc)
         return True
 
 
@@ -1442,7 +1481,7 @@ def node_forget(node_id: int) -> None:
         with _connect() as conn:
             conn.execute("DELETE FROM processed WHERE node_id = ?", (node_id,))
     except Exception as exc:
-        log.warning("jobstore: node_forget failed (%s)", exc)
+        _fail("node_forget", exc)
 
 
 # --- Settings ---------------------------------------------------------------
@@ -1458,7 +1497,7 @@ def settings_all() -> dict[str, str]:
                 for r in conn.execute("SELECT key, value FROM settings").fetchall()
             }
     except Exception as exc:
-        log.warning("jobstore: settings_all failed (%s)", exc)
+        _fail("settings_all", exc)
         return {}
 
 
@@ -1471,7 +1510,7 @@ def setting_put(key: str, value: str) -> None:
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value))
             )
     except Exception as exc:
-        log.warning("jobstore: setting_put failed (%s)", exc)
+        _fail("setting_put", exc)
 
 
 def setting_delete(key: str) -> None:
@@ -1481,7 +1520,7 @@ def setting_delete(key: str) -> None:
         with _connect() as conn:
             conn.execute("DELETE FROM settings WHERE key = ?", (key,))
     except Exception as exc:
-        log.warning("jobstore: setting_delete failed (%s)", exc)
+        _fail("setting_delete", exc)
 
 
 # --- Billable usage ---------------------------------------------------------
@@ -1510,7 +1549,7 @@ def usage_add(engine: str | None, pages: int = 0, jobs: int = 1) -> None:
                 ),
             )
     except Exception as exc:
-        log.warning("jobstore: usage_add failed (%s)", exc)
+        _fail("usage_add", exc)
 
 
 def usage_summary(days: int = 7) -> list[dict[str, Any]]:
@@ -1525,7 +1564,7 @@ def usage_summary(days: int = 7) -> list[dict[str, Any]]:
             ).fetchall()
         return [{"day": r[0], "engine": r[1], "jobs": r[2], "pages": r[3]} for r in rows]
     except Exception as exc:
-        log.warning("jobstore: usage_summary failed (%s)", exc)
+        _fail("usage_summary", exc)
         return []
 
 
@@ -1544,7 +1583,7 @@ def usage_month(engine: str | None = None) -> dict[str, int]:
             row = conn.execute(sql, args).fetchone()
         return {"jobs": int(row[0] or 0), "pages": int(row[1] or 0)}
     except Exception as exc:
-        log.warning("jobstore: usage_month failed (%s)", exc)
+        _fail("usage_month", exc)
         return empty
 
 
