@@ -1,6 +1,9 @@
 """Pytest config: slow marker, fixtures."""
 
 import os
+import shutil
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -53,7 +56,14 @@ def _own_state_dir(tmp_path_factory):
     """
     from nc_ocr_flow import jobstore
 
-    directory = tmp_path_factory.mktemp("state")
+    # WAL on the runner's workspace filesystem is what produced
+    # `sqlite3.OperationalError: disk I/O error` — three CI runs, three different
+    # symptoms, one cause. /dev/shm is a real tmpfs there and WAL behaves.
+    shm = Path("/dev/shm")
+    if shm.is_dir() and os.access(shm, os.W_OK):
+        directory = Path(tempfile.mkdtemp(prefix="ncocr-state-", dir=shm))
+    else:
+        directory = tmp_path_factory.mktemp("state")
     previous = os.environ.get("NC_OCR_STATE_DIR")
     os.environ["NC_OCR_STATE_DIR"] = str(directory)
     jobstore._reset_for_tests()
@@ -65,3 +75,5 @@ def _own_state_dir(tmp_path_factory):
     else:
         os.environ["NC_OCR_STATE_DIR"] = previous
     jobstore._reset_for_tests()
+    if str(directory).startswith("/dev/shm"):
+        shutil.rmtree(directory, ignore_errors=True)

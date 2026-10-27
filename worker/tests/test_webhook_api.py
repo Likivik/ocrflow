@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1844,9 +1845,22 @@ def test_enqueue_same_path_no_duplicate_when_inflight(monkeypatch):
     reset at the start so leftover jobs from earlier tests don't
     race the new enqueue.
     """
-    monkeypatch.setattr(ws, "_run_job", lambda _job: None)
+    # Hold the worker inside `_run_job` until this test is done. A no-op stub
+    # returns instantly, so the claimed row goes queued → running → done in the
+    # microseconds between reading `stats()` and issuing the second `_enqueue`
+    # — and then the second enqueue is *correctly* allowed to insert, making the
+    # assertion fail on a fast machine and pass on a slow one. CI proved it: two
+    # red runs in a row, green locally.
+    release = threading.Event()
+    monkeypatch.setattr(ws, "_run_job", lambda _job: release.wait(10))
     ws.jobstore._reset_for_tests()
+    try:
+        _enqueue_while_inflight(ws, monkeypatch, release)
+    finally:
+        release.set()
 
+
+def _enqueue_while_inflight(ws, monkeypatch, release) -> None:
     nc_path = "/likivik/files/a.pdf"
     job1 = ws._enqueue(nc_path, node_id=42)
     assert job1.get("id") is not None

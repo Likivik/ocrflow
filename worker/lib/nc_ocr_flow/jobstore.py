@@ -278,10 +278,18 @@ def init() -> None:
 
 
 def _ready() -> bool:
-    """True if init() succeeded at some point. Re-runs init() if not."""
+    """True if init() succeeded at some point. Re-runs init() if not.
+
+    A predicate, so it answers even in strict mode: the repair path calls this
+    before deciding to rebuild, and a raise here turned one broken path left over
+    from an earlier test into 28 errors across the suite.
+    """
     global _INITIALISED
     if not _INITIALISED:
-        init()
+        try:
+            init()
+        except JobStoreUnavailable:
+            return False
     return _INITIALISED
 
 
