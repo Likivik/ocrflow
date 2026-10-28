@@ -28,6 +28,12 @@ let
     ps.img2pdf
     ps.numpy
     ps.onnxruntime
+    # `runner` imports `_process_file` from webhook_server, and that module
+    # imports FastAPI at load time. Omitting these two made every worker die at
+    # start with ModuleNotFoundError — found by the poweredge VM smoke, not by
+    # eval, which is the whole reason that smoke exists.
+    ps.fastapi
+    ps.uvicorn
     ps.pydantic
     ps.google-cloud-vision
     ps.google-cloud-storage
