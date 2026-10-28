@@ -45,6 +45,11 @@ let
     export NC_OCR_WORKER_NAME=${lib.escapeShellArg cfg.workerName}
     export NC_OCR_IDLE_SECONDS=${toString cfg.idleSeconds}
     ${lib.optionalString (cfg.engine != null) "export NC_OCR_ENGINE=${lib.escapeShellArg cfg.engine}"}
+    # Without a DAV identity the worker exits 2 at start-up (deliberate: the
+    # invented "likivik" default was removed). The username had no source at all —
+    # neither this module nor the host aspect ever set it, so a fresh boot
+    # crash-looped while every gate stayed green. Found by the poweredge VM smoke.
+    ${lib.optionalString (cfg.davUser != null) "export NC_OCR_DAV_USER=${lib.escapeShellArg cfg.davUser}"}
 ${lib.concatMapStrings (name: "    export ${name}=${lib.escapeShellArg cfg.extraEnvironment.${name}}\n") (lib.attrNames cfg.extraEnvironment)}
     exec ${python}/bin/python3 -m nc_ocr_flow.runner
   '';
@@ -98,6 +103,19 @@ in
         Installed via LoadCredential, so it never appears in the unit's command
         line or environment.
       '';
+    };
+
+    davUser = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Username the worker authenticates as over WebDAV.
+
+        No default on purpose: an invented one turns a misconfiguration into an
+        authentication failure. The module refuses to evaluate with a password and
+        no user, because the alternative is a unit that exits 2 on every restart.
+      '';
+      example = "ocr-service";
     };
 
     davPasswordFile = lib.mkOption {
@@ -191,6 +209,10 @@ in
         {
           assertion = !cfg.checkSecretFiles || builtins.pathExists cfg.secretFile;
           message = "services.ocrflow.secretFile does not exist: run `occ ocrflow:worker:secret` and point this at the file it wrote.";
+        }
+        {
+          assertion = cfg.davPasswordFile == null || cfg.davUser != null;
+          message = "services.ocrflow.davUser is unset but davPasswordFile is set: the worker exits 2 at start-up without a WebDAV username (no default, deliberately).";
         }
         {
           assertion = !cfg.checkSecretFiles || builtins.pathExists cfg.davPasswordFile;
