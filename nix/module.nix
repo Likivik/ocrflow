@@ -77,6 +77,20 @@ in
       description = "Force an engine; null lets the app's settings decide.";
     };
 
+    checkSecretFiles = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Assert at evaluation time that `secretFile` and `davPasswordFile` exist.
+
+        True on a host, where the files are provisioned before a deploy. False
+        where they are created later than evaluation: sops-nix renders secrets at
+        BOOT, so a builder that evaluates `nixos-rebuild build` or a VM test can
+        never satisfy the assertion, and the whole host fails to evaluate with a
+        message about a file the operator has in fact configured correctly.
+      '';
+    };
+
     secretFile = lib.mkOption {
       type = lib.types.path;
       description = ''
@@ -175,11 +189,11 @@ in
     (lib.mkIf cfg.enable {
       assertions = [
         {
-          assertion = builtins.pathExists cfg.secretFile;
+          assertion = !cfg.checkSecretFiles || builtins.pathExists cfg.secretFile;
           message = "services.ocrflow.secretFile does not exist: run `occ ocrflow:worker:secret` and point this at the file it wrote.";
         }
         {
-          assertion = builtins.pathExists cfg.davPasswordFile;
+          assertion = !cfg.checkSecretFiles || builtins.pathExists cfg.davPasswordFile;
           message = "services.ocrflow.davPasswordFile does not exist: the worker cannot download a single file without it.";
         }
       ];
