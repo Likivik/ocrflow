@@ -82,20 +82,6 @@ in
       description = "Force an engine; null lets the app's settings decide.";
     };
 
-    checkSecretFiles = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      description = ''
-        Assert at evaluation time that `secretFile` and `davPasswordFile` exist.
-
-        True on a host, where the files are provisioned before a deploy. False
-        where they are created later than evaluation: sops-nix renders secrets at
-        BOOT, so a builder that evaluates `nixos-rebuild build` or a VM test can
-        never satisfy the assertion, and the whole host fails to evaluate with a
-        message about a file the operator has in fact configured correctly.
-      '';
-    };
-
     secretFile = lib.mkOption {
       type = lib.types.path;
       description = ''
@@ -205,18 +191,17 @@ in
 
   config = lib.mkMerge [
     (lib.mkIf cfg.enable {
+      # Only STATIC facts belong here. Whether a secret FILE exists is a fact
+      # about the running host: `builtins.pathExists` reads the evaluator's
+      # filesystem, so asserting it makes the host evaluable on exactly one
+      # machine — sops-nix renders secrets at boot, so builders, VM tests and CI
+      # all fail about a file the operator configured correctly. It also forced
+      # every deploy of that host to be driven from the host itself. The two
+      # missing-file cases are checked at runtime by the preflight below.
       assertions = [
-        {
-          assertion = !cfg.checkSecretFiles || builtins.pathExists cfg.secretFile;
-          message = "services.ocrflow.secretFile does not exist: run `occ ocrflow:worker:secret` and point this at the file it wrote.";
-        }
         {
           assertion = cfg.davPasswordFile == null || cfg.davUser != null;
           message = "services.ocrflow.davUser is unset but davPasswordFile is set: the worker exits 2 at start-up without a WebDAV username (no default, deliberately).";
-        }
-        {
-          assertion = !cfg.checkSecretFiles || builtins.pathExists cfg.davPasswordFile;
-          message = "services.ocrflow.davPasswordFile does not exist: the worker cannot download a single file without it.";
         }
       ];
 
@@ -241,6 +226,24 @@ in
           ExecStart = workerBin;
           Restart = "always";
           RestartSec = 5;
+
+          # Runtime counterpart of the assertions that used to live above: the
+          # unit fails HERE, with the operator-facing message, when a secret file
+          # is absent. `+` runs the preflight privileged so a root-only sops file
+          # is readable before the unit drops to User=${cfg.user}.
+          ExecStartPre = [
+            "+${pkgs.writeShellScript "ocrflow-worker-preflight" ''
+              set -eu
+              if [ ! -e "${toString cfg.secretFile}" ]; then
+                echo "services.ocrflow.secretFile does not exist: run 'occ ocrflow:worker:secret' and point this at the file it wrote." >&2
+                exit 1
+              fi
+              if [ ! -e "${toString cfg.davPasswordFile}" ]; then
+                echo "services.ocrflow.davPasswordFile does not exist: the worker cannot download a single file without it." >&2
+                exit 1
+              fi
+            ''}"
+          ];
 
           # The two secrets, and nothing else about them in the unit's metadata.
           LoadCredential = [
