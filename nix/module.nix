@@ -86,13 +86,19 @@ in
       type = lib.types.bool;
       default = true;
       description = ''
-        Assert at evaluation time that `secretFile` and `davPasswordFile` exist.
+        Check at ACTIVATION time that `secretFile` and `davPasswordFile` exist,
+        by a privileged `ExecStartPre` guard on `ocrflow-worker`.
 
-        True on a host, where the files are provisioned before a deploy. False
-        where they are created later than evaluation: sops-nix renders secrets at
-        BOOT, so a builder that evaluates `nixos-rebuild build` or a VM test can
-        never satisfy the assertion, and the whole host fails to evaluate with a
-        message about a file the operator has in fact configured correctly.
+        This used to be an eval-time assertion (`builtins.pathExists`). That was
+        wrong for two measured reasons: sops-nix renders those files at BOOT, so
+        evaluation never sees them, and under pure evaluation `/run/secrets` is
+        not even in scope - so every `nix build`/`nixos-rebuild` of a correctly
+        configured host failed with a message about a file the operator had
+        configured properly. Making it a start-time guard moves the failure to
+        the unit that needs the file, where `systemctl --failed` and the journal
+        can say what is actually missing.
+
+        False is for VM tests and builders that start no worker.
       '';
     };
 
@@ -206,17 +212,12 @@ in
   config = lib.mkMerge [
     (lib.mkIf cfg.enable {
       assertions = [
-        {
-          assertion = !cfg.checkSecretFiles || builtins.pathExists cfg.secretFile;
-          message = "services.ocrflow.secretFile does not exist: run `occ ocrflow:worker:secret` and point this at the file it wrote.";
-        }
+        # Only what can be known without touching the filesystem: the secret
+        # files themselves are checked by the worker's ExecStartPre guard below,
+        # because they are rendered at boot and are invisible to evaluation.
         {
           assertion = cfg.davPasswordFile == null || cfg.davUser != null;
           message = "services.ocrflow.davUser is unset but davPasswordFile is set: the worker exits 2 at start-up without a WebDAV username (no default, deliberately).";
-        }
-        {
-          assertion = !cfg.checkSecretFiles || builtins.pathExists cfg.davPasswordFile;
-          message = "services.ocrflow.davPasswordFile does not exist: the worker cannot download a single file without it.";
         }
       ];
 
@@ -234,6 +235,13 @@ in
         after = [ "network-online.target" ];
         wants = [ "network-online.target" ];
 
+        unitConfig = {
+          # A missing secret must end as a red unit, not as an endless restart
+          # loop: three attempts, then systemd stops it with start-limit-hit.
+          StartLimitIntervalSec = 300;
+          StartLimitBurst = 3;
+        };
+
         serviceConfig = {
           Type = "simple";
           User = cfg.user;
@@ -241,6 +249,26 @@ in
           ExecStart = workerBin;
           Restart = "always";
           RestartSec = 5;
+
+          # The secret files are 0400 root (sops) and the worker runs as an
+          # unprivileged user, so the guard needs "+" (full privileges). Without
+          # this the failure would arrive as LoadCredential's terse
+          # "credential not found" long after the operator configured the host.
+          ExecStartPre = lib.mkIf cfg.checkSecretFiles (
+            "+${pkgs.writeShellScript "ocrflow-secret-guard" ''
+              set -eu
+              [ -e "${toString cfg.secretFile}" ] || {
+                echo "services.ocrflow.secretFile does not exist: run \`occ ocrflow:worker:secret\` and point this at the file it wrote." >&2
+                exit 1
+              }
+              ${lib.optionalString (cfg.davPasswordFile != null) ''
+                [ -e "${toString cfg.davPasswordFile}" ] || {
+                  echo "services.ocrflow.davPasswordFile does not exist: the worker cannot download a single file without it." >&2
+                  exit 1
+                }
+              ''}
+            ''}"
+          );
 
           # The two secrets, and nothing else about them in the unit's metadata.
           LoadCredential = [
