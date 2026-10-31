@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -36,6 +37,14 @@ class WorkerUnauthorized(RuntimeError):
 
 class QueueProtocolError(RuntimeError):
     """The server answered, but not with something we understand."""
+
+
+class FileGone(QueueProtocolError):
+    """The app says the file behind this job no longer exists.
+
+    Distinct from a transport failure: retrying cannot help, the job should be
+    closed with its reason recorded rather than burning attempts.
+    """
 
 
 @dataclass(frozen=True)
@@ -104,6 +113,59 @@ class QueueClient:
             f"queue/{job_id}/failure",
             data={"error": error[:500], "reason": reason or ""},
         )
+
+    def fetch_file(self, job_id: int, dest: Path) -> Path:
+        """Download a job's bytes into ``dest``.
+
+        This is what replaces the WebDAV download. The app opens the file as its
+        owner and streams it back over this same shared-secret channel, so the
+        worker needs no Nextcloud identity at all — and a container cannot read
+        anything the queue did not hand it.
+
+        A 404 here is a real answer, not a transport error: the file was moved or
+        deleted after it was queued, and the caller should close the job.
+        """
+        response = self.session.get(
+            f"{self.base_url}{API_PATH}/queue/{job_id}/file",
+            headers=self._headers(),
+            timeout=self.timeout,
+            stream=True,
+        )
+        if response.status_code in (401, 403):
+            raise WorkerUnauthorized(
+                f"the app rejected the worker secret ({response.status_code}) on the file endpoint"
+            )
+        if response.status_code == 404:
+            raise FileGone(f"job {job_id}: the app reports the file no longer exists")
+        if response.status_code >= 500:
+            raise QueueProtocolError(f"server error {response.status_code} fetching job {job_id}")
+        if response.status_code != 200:
+            raise QueueProtocolError(
+                f"unexpected {response.status_code} fetching job {job_id}"
+            )
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        written = 0
+        with open(dest, "wb") as handle:
+            for chunk in response.iter_content(chunk_size=256 * 1024):
+                if chunk:
+                    handle.write(chunk)
+                    written += len(chunk)
+        if written == 0:
+            # An empty body would be OCR'd as an empty document and reported as
+            # success — worse than an error, because the file would be skipped
+            # forever. Refuse it here.
+            dest.unlink(missing_ok=True)
+            raise QueueProtocolError(f"job {job_id}: the app streamed an empty file")
+        return dest
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "OCS-APIRequest": "true",
+            "Accept": "application/json",
+            SECRET_HEADER: self.secret,
+            WORKER_HEADER: self.worker_name,
+        }
 
     # -- plumbing --------------------------------------------------------
 

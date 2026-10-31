@@ -1,0 +1,107 @@
+name: image
+
+# Publishes the worker image the app store installs.
+#
+# Two tags from one Dockerfile: `latest` carries tesseract + Cloud Vision,
+# `latest-google` is kept as an explicit alias for older docs, and
+# `latest-local` is the same image without the Vision SDK (~58 MB lighter) for
+# deployments that never leave the box. All three share the code path, so a bug
+# cannot hide in one variant.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'docker/**'
+      - 'worker/**'
+      - '.github/workflows/image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: google
+            google: '1'
+          - variant: local
+            google: '0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ocrflow-worker"
+          if [ "${{ matrix.variant }}" = "google" ]; then
+            SUFFIX=""
+          else
+            SUFFIX="-local"
+          fi
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE}:sha-${GITHUB_SHA::12}${SUFFIX}"
+            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              echo "${IMAGE}:${GITHUB_REF_NAME}${SUFFIX}"
+            fi
+            if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+              echo "${IMAGE}:latest${SUFFIX}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          build-args: |
+            INSTALL_GOOGLE=${{ matrix.google }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha,scope=worker-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=worker-${{ matrix.variant }}
+
+      # A built image that cannot answer /heartbeat is worthless to AppAPI, so
+      # the arm64 image is smoke-tested through emulation when we push one.
+      - name: Smoke the image
+        if: github.event_name == 'pull_request'
+        run: |
+          docker build -f docker/Dockerfile \
+            --build-arg INSTALL_GOOGLE=${{ matrix.google }} \
+            -t ocrflow-worker:ci .
+          docker run -d --name w -e NC_OCR_URL=http://127.0.0.1 \
+            -e NC_OCR_WORKER_SECRET=$(head -c 32 /dev/urandom | base64) \
+            ocrflow-worker:ci
+          for i in $(seq 1 30); do
+            if docker exec w python -c \
+              "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/heartbeat', timeout=2)"; then
+              echo "heartbeat ok"; exit 0
+            fi
+            sleep 2
+          done
+          docker logs w; exit 1

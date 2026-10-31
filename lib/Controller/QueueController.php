@@ -12,7 +12,10 @@ use OCA\OcrFlow\Db\Queue;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\PublicPage;
 use OCP\AppFramework\Http\DataResponse;
+use OCP\AppFramework\Http\StreamResponse;
 use OCP\AppFramework\OCSController;
+use OCP\Files\IRootFolder;
+use OCP\Files\NotFoundException;
 use OCP\IConfig;
 use OCP\IRequest;
 use Psr\Log\LoggerInterface;
@@ -33,8 +36,70 @@ class QueueController extends OCSController
 		private Queue $queue,
 		private IConfig $config,
 		private LoggerInterface $logger,
+		private IRootFolder $rootFolder,
 	) {
 		parent::__construct($appName, $request);
+	}
+
+	/**
+	 * Hand a job's file to the worker, read as the user who owns it.
+	 *
+	 * This is the whole point of the endpoint: the worker never holds a
+	 * Nextcloud identity. It presents the shared secret, the app opens the file
+	 * in the owner's tree and streams the bytes back. A container therefore
+	 * cannot read anything the queue did not hand it, and no account password
+	 * exists to leak, rotate, or scope.
+	 */
+	#[PublicPage]
+	public function file(int $id): Http\Response|DataResponse
+	{
+		if (($denied = $this->denyIfNotWorker()) !== null) {
+			return $denied;
+		}
+
+		$job = $this->queue->getById($id);
+		if ($job === null) {
+			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
+		}
+
+		$split = self::splitPath((string) $job->getPath());
+		if ($split === null) {
+			return new DataResponse(['message' => 'job path is not <user>/files/<relative>'], Http::STATUS_UNPROCESSABLE_ENTITY);
+		}
+		[$owner, $relative] = $split;
+
+		try {
+			$folder = $this->rootFolder->getUserFolder($owner);
+			$node = $folder->get($relative);
+		} catch (NotFoundException) {
+			// The file was moved or deleted after the job was queued. Report it
+			// as gone so the worker stops retrying and the row can be closed.
+			return new DataResponse(['message' => 'file no longer exists'], Http::STATUS_NOT_FOUND);
+		}
+
+		$handle = $node->fopen('rb');
+		if ($handle === false) {
+			return new DataResponse(['message' => 'file is not readable'], Http::STATUS_INTERNAL_SERVER_ERROR);
+		}
+
+		$response = new StreamResponse($node->getName(), $handle, $node->getMimetype() ?: 'application/octet-stream');
+		$response->cacheFor(0);
+		return $response;
+	}
+
+	/**
+	 * `/<user>/files/<relative>` — the form Nextcloud itself stores.
+	 *
+	 * Public and static on purpose: the parsing rules are the one part of the
+	 * bytes path that can be tested without a filesystem.
+	 */
+	public static function splitPath(string $path): ?array
+	{
+		$parts = explode('/', ltrim($path, '/'), 3);
+		if (count($parts) !== 3 || $parts[0] === '' || $parts[1] !== 'files' || $parts[2] === '') {
+			return null;
+		}
+		return [$parts[0], $parts[2]];
 	}
 
 	#[PublicPage]

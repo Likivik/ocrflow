@@ -119,6 +119,18 @@ def main(argv: list[str] | None = None) -> int:
         worker_name=os.environ.get("NC_OCR_WORKER_NAME", "worker"),
     )
 
+    # Probe surface. Off unless NC_OCR_HEALTH_PORT is set, so native deployments
+    # keep their current behaviour. Started before the checks below: a container
+    # that is starting up must answer /heartbeat, otherwise AppAPI and Docker
+    # both read it as dead.
+    from .health import health_port_from_env, start_health_server
+
+    health_port = health_port_from_env()
+    if health_port is not None:
+        start_health_server(health_port, worker_name=os.environ.get("NC_OCR_WORKER_NAME", "worker"))
+        log.info("health probe on :%d (/heartbeat)", health_port)
+
+
     # Imported late so `--help`-ish paths and the unit tests do not need the
     # whole OCR stack (PyMuPDF, ONNX runtime, cloud SDKs) to be installed.
     #

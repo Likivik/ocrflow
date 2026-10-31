@@ -45,4 +45,15 @@ Behaviour worth knowing:
 	<background-jobs>
 		<job>OCA\OcrFlow\BackgroundJob\ReconcileJob</job>
 	</background-jobs>
+	<!-- AppAPI / ExApp metadata. The app works without AppAPI too: the same
+	     image runs under systemd, and the worker talks to this app's OCS
+	     endpoints with the shared secret either way. This block only tells
+	     AppAPI where to pull the container from. -->
+	<external-app>
+		<docker-install>
+			<registry>ghcr.io</registry>
+			<image>likivik/ocrflow-worker</image>
+			<image-tag>latest</image-tag>
+		</docker-install>
+	</external-app>
 </info>

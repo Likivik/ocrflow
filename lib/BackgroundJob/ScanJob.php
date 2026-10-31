@@ -87,7 +87,11 @@ class ScanJob extends QueuedJob
 		if ($path === '/' || $path === '') {
 			return $userFolder;
 		}
-		$node = $userFolder->getNode(ltrim($path, '/'));
+		// `getUserFolder()` returns a LazyFolder, which proxies only the Folder
+		// interface — it has `get()`, not `IRootFolder::getNode()`. Calling getNode()
+		// raises TypeError on NC 34 and the whole scan dies silently: the OCS
+		// endpoint still answers 200 queued:1 (measured on poweredge, 2026-10-31).
+		$node = $userFolder->get(ltrim($path, '/'));
 		if (!$node instanceof Folder) {
 			throw new NotFoundException('not a folder: ' . $path);
 		}
