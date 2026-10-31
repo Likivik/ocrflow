@@ -47,7 +47,6 @@ NOW = 1_800_000_000.0
 @pytest.fixture(autouse=True)
 def _repin_state_dir(monkeypatch):
     """Fresh DB per test: the watermark is durable state."""
-    os.environ["NC_OCR_STATE_DIR"] = _STATE_DIR
     monkeypatch.setattr(ws, "WEBHOOK_SECRET", SECRET)
     monkeypatch.setattr(ws, "NC_PASSWORD", "test-pass")
     ws.jobstore._reset_for_tests()

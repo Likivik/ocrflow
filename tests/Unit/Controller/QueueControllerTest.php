@@ -11,7 +11,7 @@ use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Queue;
 use OCP\AppFramework\Http;
-use OCP\Files\IRootFolder;
+use OCA\OcrFlow\Service\FileExchange;
 use OCP\IConfig;
 use OCP\IRequest;
 use PHPUnit\Framework\TestCase;
@@ -47,7 +47,7 @@ class QueueControllerTest extends TestCase
             $queue ?? $this->createMock(Queue::class),
             $config,
             $this->createMock(LoggerInterface::class),
-            $this->createMock(IRootFolder::class),
+            $this->createMock(FileExchange::class),
         );
     }
 
@@ -137,5 +137,69 @@ class QueueControllerTest extends TestCase
         ] as $bad) {
             $this->assertNull(QueueController::splitPath($bad), 'accepted: ' . $bad);
         }
+    }
+
+    public function testPutFileRejectsAWrongSecret(): void
+    {
+        $response = $this->controller('s3cret', 'nope')->putFile(1);
+
+        $this->assertSame(Http::STATUS_UNAUTHORIZED, $response->getStatus());
+    }
+
+    public function testPutFileReportsAMissingJob(): void
+    {
+        $queue = $this->createMock(Queue::class);
+        $queue->expects($this->once())->method('getById')->with(9)->willReturn(null);
+
+        $response = $this->controller('s3cret', 's3cret', $queue)->putFile(9);
+
+        $this->assertSame(Http::STATUS_NOT_FOUND, $response->getStatus());
+    }
+
+    public function testResultFileRejectsAWrongSecret(): void
+    {
+        $response = $this->controller('s3cret', 'nope')->resultFile(1);
+
+        $this->assertSame(Http::STATUS_UNAUTHORIZED, $response->getStatus());
+    }
+
+    public function testResultFileReportsAMissingJob(): void
+    {
+        $queue = $this->createMock(Queue::class);
+        $queue->method('getById')->willReturn(null);
+
+        $response = $this->controller('s3cret', 's3cret', $queue)->resultFile(3);
+
+        $this->assertSame(Http::STATUS_NOT_FOUND, $response->getStatus());
+    }
+
+    /**
+     * The collision rule is the part of resultFile worth pinning: it decides
+     * whether a second OCR overwrites the first, and it is pure.
+     */
+    public function testNextFreeNameTakesTheFirstGap(): void
+    {
+        $taken = ['scan.pdf' => true, 'scan (1).pdf' => true];
+
+        $this->assertSame(
+            'scan (2).pdf',
+            FileExchange::nextFreeName('scan.pdf', static fn (string $n): bool => isset($taken[$n])),
+        );
+    }
+
+    public function testNextFreeNameKeepsAFreeName(): void
+    {
+        $this->assertSame(
+            'scan.pdf',
+            FileExchange::nextFreeName('scan.pdf', static fn (string $n): bool => false),
+        );
+    }
+
+    public function testNextFreeNameHandlesNamesWithoutExtension(): void
+    {
+        $this->assertSame(
+            'notes (1)',
+            FileExchange::nextFreeName('notes', static fn (string $n): bool => $n === 'notes'),
+        );
     }
 }

@@ -175,7 +175,7 @@ def test_run_once_reports_a_skipped_file_as_skipped_not_done() -> None:
     )
     c = QueueClient(BASE, "s3cret", session=session)
 
-    handled = run_once(c, lambda path, file_id: {"skipped": True, "reason": "born_digital"})
+    handled = run_once(c, lambda path, file_id, **_: {"skipped": True, "reason": "born_digital"})
 
     assert handled is True
     assert session.calls[1]["data"]["status"] == "skipped"
@@ -193,7 +193,7 @@ def test_run_once_reports_a_raising_engine_as_a_failure() -> None:
     )
     c = QueueClient(BASE, "s3cret", session=session)
 
-    def boom(path, file_id):
+    def boom(path, file_id, **_):
         raise RuntimeError("vision quota exhausted")
 
     assert run_once(c, boom) is True
@@ -203,7 +203,7 @@ def test_run_once_reports_a_raising_engine_as_a_failure() -> None:
 
 def test_run_once_does_nothing_on_an_empty_queue() -> None:
     session = FakeSession([FakeResponse(204)])
-    assert run_once(QueueClient(BASE, "s3cret", session=session), lambda p, f: {}) is False
+    assert run_once(QueueClient(BASE, "s3cret", session=session), lambda p, f, **_: {}) is False
     assert len(session.calls) == 1
 
 

@@ -54,6 +54,13 @@ log = logging.getLogger(__name__)
 
 _DB_PATH: Path | None = None
 _INITIALISED: bool = False
+#: ``(st_dev, st_ino)`` of the file the schema was created in. A boolean is not
+#: enough: the path can be unlinked and re-created (restore from backup, an
+#: operator clearing the index, a test suite resetting between cases) and the
+#: stale latch then claims "ready" for a file with no tables — measured as
+#: `claim_next failed (no such table: jobs)` from a live worker that then never
+#: claimed anything again.
+_INITIALISED_FOR: tuple[str, int, int] | None = None
 
 
 def _resolve_db_path() -> Path:
@@ -79,11 +86,32 @@ def _resolve_db_path() -> Path:
 
 
 def db_path() -> Path:
-    """Return the currently configured DB path. Resolves lazily."""
+    """Return the currently configured DB path. Resolves lazily, once.
+
+    Production resolves at first use and never moves — systemd sets the state
+    directory once. Moving a live store is the test suite's job, and it goes
+    through :func:`repin`, the one function that moves path and schema state
+    together. Flipping the env under this cache instead left two live databases
+    in one process: the test wrote one file, the workers claimed from another.
+    """
     global _DB_PATH
     if _DB_PATH is None:
         _DB_PATH = _resolve_db_path()
     return _DB_PATH
+
+
+def repin(path: Path | None = None) -> None:
+    """Point the store at ``path`` (or re-resolve from env) and re-init.
+
+    The deliberate, single way to move an already-configured store. Call it only
+    while nothing holds the store — no scheduler running, no connection open.
+    The test suite calls it at module setup; production never does.
+    """
+    global _DB_PATH, _INITIALISED, _INITIALISED_FOR
+    _DB_PATH = Path(path) if path is not None else None
+    _INITIALISED = False
+    _INITIALISED_FOR = None
+    init()
 
 
 def _connect() -> sqlite3.Connection:
@@ -244,53 +272,98 @@ def init() -> None:
     Never raises — a broken DB path just logs a warning and leaves the
     module in a no-op state (subsequent calls also no-op silently).
     """
-    global _INITIALISED
-    try:
-        with _connect() as conn:
-            conn.executescript(_SCHEMA_SQL)
-            # C6: additive migration for the retry-related columns.
-            # Idempotent: the function checks ``PRAGMA table_info``
-            # before altering, so calling it on a fresh DB (where
-            # the columns do not exist yet but the schema created
-            # them) and on an upgraded production DB (where they
-            # already exist) are both no-ops beyond the second
-            # ``SELECT`` from ``PRAGMA table_info``. The index on
-            # ``next_run_at`` is created INSIDE this migration AFTER
-            # the ALTERs (PR #68 fixed the ordering bug that put it
-            # in the schema script).
-            _migrate_add_retry_columns(conn)
-            # G2: add the foreign_rewrites counter (idempotent; see
-            # ``_migrate_add_foreign_rewrites_column``).
-            _migrate_add_foreign_rewrites_column(conn)
-            # B1 backstop: enforce at-most-one queued/running row per
-            # path at the DB layer (idempotent; dedupes first). MUST
-            # run after every column-add it depends on. See
-            # ``_migrate_inflight_unique_index`` and PR #68's
-            # retry-index ordering lesson — a failing migration here
-            # leaves ``_ready() == False`` and the queue as a no-op.
-            _migrate_inflight_unique_index(conn)
-        _INITIALISED = True
-        log.info("jobstore: schema ready at %s", db_path())
-    except Exception as exc:
-        # "history will be a no-op" outside strict mode; a hard error inside it.
-        _fail("init", exc)
-        _INITIALISED = False
+    global _INITIALISED, _INITIALISED_FOR
+    # `database is locked` here is contention, not a broken index: the worker
+    # thread and the app can both hit a fresh file at the same moment (and on a
+    # busy instance, always). Giving up on the first collision left
+    # `_INITIALISED = False`, every read for that call a silent no-op, and the
+    # caller concluded "nothing is done yet" — measured as a file being re-OCR'd
+    # while it was already marked done. Retry transient locks, then give up.
+    for attempt in range(5):
+        try:
+            _init_schema()
+            st = db_path().stat()
+            _INITIALISED_FOR = (str(db_path()), st.st_dev, st.st_ino)
+            _INITIALISED = True
+            log.info("jobstore: schema ready at %s", db_path())
+            return
+        except Exception as exc:
+            if _is_transient(exc) and attempt < 4:
+                time.sleep(0.05 * (2**attempt))
+                continue
+            # "history will be a no-op" outside strict mode; a hard error inside it.
+            _fail("init", exc)
+            _INITIALISED = False
+            return
+
+
+def _init_schema() -> None:
+    """The DDL itself. Split out so :func:`init` can retry it cleanly."""
+    with _connect() as conn:
+        conn.executescript(_SCHEMA_SQL)
+        # C6: additive migration for the retry-related columns.
+        # Idempotent: the function checks ``PRAGMA table_info``
+        # before altering, so calling it on a fresh DB (where
+        # the columns do not exist yet but the schema created
+        # them) and on an upgraded production DB (where they
+        # already exist) are both no-ops beyond the second
+        # ``SELECT`` from ``PRAGMA table_info``. The index on
+        # ``next_run_at`` is created INSIDE this migration AFTER
+        # the ALTERs (PR #68 fixed the ordering bug that put it
+        # in the schema script).
+        _migrate_add_retry_columns(conn)
+        # G2: add the foreign_rewrites counter (idempotent; see
+        # ``_migrate_add_foreign_rewrites_column``).
+        _migrate_add_foreign_rewrites_column(conn)
+        # B1 backstop: enforce at-most-one queued/running row per
+        # path at the DB layer (idempotent; dedupes first). MUST
+        # run after every column-add it depends on. See
+        # ``_migrate_inflight_unique_index`` and PR #68's
+        # retry-index ordering lesson — a failing migration here
+        # leaves ``_ready() == False`` and the queue as a no-op.
+        _migrate_inflight_unique_index(conn)
 
 
 def _ready() -> bool:
-    """True if init() succeeded at some point. Re-runs init() if not.
+    """True if the schema exists in the file we are configured to use.
 
-    A predicate, so it answers even in strict mode: the repair path calls this
-    before deciding to rebuild, and a raise here turned one broken path left over
-    from an earlier test into 28 errors across the suite.
+    Re-runs ``init()`` when it does not. Two properties matter, both measured:
+
+    * A predicate must answer in strict mode instead of raising — one broken path
+      left over from an earlier test used to turn into 28 errors across the suite.
+    * ``_INITIALISED`` alone is a stale latch. The path can be unlinked and
+      re-created underneath a live process (a suite reset, an operator clearing
+      the index, a restore), and the latch then reports "ready" for a file with
+      no tables: `claim_next failed (no such table: jobs)` from a worker that
+      never claims again. Compare the file identity instead.
     """
     global _INITIALISED
-    if not _INITIALISED:
-        try:
+    try:
+        if not _INITIALISED:
             init()
-        except JobStoreUnavailable:
-            return False
-    return _INITIALISED
+            return _INITIALISED
+        try:
+            st = db_path().stat()
+        except OSError:
+            _INITIALISED = False
+            init()
+            return _INITIALISED
+        # Only a *recorded* identity can prove the schema is missing. With no
+        # record (a caller that set the latch directly) trust it: the strict
+        # contract is that the failing statement surfaces, not that a predicate
+        # quietly rebuilds the table underneath the caller.
+        recorded = _INITIALISED_FOR
+        replaced = (
+            recorded is not None
+            and recorded[0] == str(db_path())
+            and (recorded[1], recorded[2]) != (st.st_dev, st.st_ino)
+        )
+        if replaced:
+            _INITIALISED = False
+            init()
+        return _INITIALISED
+    except JobStoreUnavailable:
+        return False
 
 
 # --- Field normalisation ---------------------------------------------------
@@ -1011,7 +1084,17 @@ def stats() -> dict[str, Any]:
         return out
     except Exception as exc:
         _fail("stats", exc)
-        return out
+        # Claimable, as distinct from "queued": a retry waiting out its
+        # backoff window is queued but cannot be claimed, and a poller that
+        # treats the two as one waits forever for work that is, by design, not
+        # due yet. `claim_next` uses exactly this predicate.
+        r_claimable = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued'"
+            " AND COALESCE(next_run_at, 0) <= ?",
+            (time.time(),),
+        ).fetchone()
+        out["claimable"] = int(r_claimable["n"]) if r_claimable else 0
+    return out
 
 
 def in_flight_job_for_path(nc_path: str) -> dict[str, Any] | None:
@@ -1604,8 +1687,9 @@ def _reset_for_tests() -> None:
     `database disk image is malformed` or `file is not a database`, in a test that
     never touched the store. That was today's whole flake class on CI.
     """
-    global _INITIALISED, _DB_PATH
+    global _INITIALISED, _DB_PATH, _INITIALISED_FOR
     _INITIALISED = False
+    _INITIALISED_FOR = None
     _DB_PATH = None
     try:
         p = db_path()

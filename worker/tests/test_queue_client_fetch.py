@@ -25,16 +25,39 @@ class FakeResponse:
         self.status_code = status_code
         self._chunks = chunks or []
 
-    def iter_content(self, chunk_size: int = 0):  # noqa: ARG002 - signature parity
+    def iter_content(self, chunk_size: int = 0):
         yield from self._chunks
 
 
+class FakeResult:
+    """A response that carries an OCS envelope, like the real PUT does."""
+
+    def __init__(self, status_code: int, body: dict | None = None) -> None:
+        self.status_code = status_code
+        self._body = body or {}
+
+    def json(self):
+        return self._body
+
+
 class FakeSession:
-    def __init__(self, response: FakeResponse) -> None:
+    def __init__(self, response) -> None:
         self._response = response
         self.calls: list[tuple[str, dict]] = []
 
     def get(self, url: str, **kwargs):
+        self.calls.append((url, kwargs))
+        return self._response
+
+    def post(self, url: str, **kwargs):
+        self.post_body = kwargs["data"].read()
+        self.calls.append((url, kwargs))
+        return self._response
+
+    def put(self, url: str, **kwargs):
+        # The client closes the file handle once the call returns, so snapshot the
+        # body here — that is also what a real transport does with it.
+        self.put_body = kwargs["data"].read()
         self.calls.append((url, kwargs))
         return self._response
 
@@ -92,3 +115,90 @@ def test_empty_body_is_refused_and_leaves_nothing_behind(tmp_path: Path) -> None
         _client(FakeSession(FakeResponse(200, []))).fetch_file(3, dest)
 
     assert not dest.exists()
+
+
+# --- put_file: the write side of the same channel ---------------------------
+
+
+def _envelope(data: dict) -> dict:
+    return {"ocs": {"meta": {"statuscode": 200, "message": "OK"}, "data": data}}
+
+
+def test_put_file_streams_the_result(tmp_path: Path) -> None:
+    result = tmp_path / "out.pdf"
+    result.write_bytes(b"%PDF-1.7 processed")
+    session = FakeSession(FakeResult(200, _envelope({"id": 5, "size": 19})))
+
+    payload = _client(session).put_file(5, result)
+
+    assert payload["id"] == 5
+    url, kwargs = session.calls[0]
+    assert url.endswith("/queue/5/file")
+    assert kwargs["headers"]["Content-Type"] == "application/pdf"
+    assert session.put_body == b"%PDF-1.7 processed"
+
+
+def test_put_file_missing_local_result(tmp_path: Path) -> None:
+    with pytest.raises(QueueProtocolError):
+        _client(FakeSession(FakeResult(200, _envelope({})))).put_file(5, tmp_path / "nope.pdf")
+
+
+def test_put_file_rejected_secret(tmp_path: Path) -> None:
+    result = tmp_path / "out.pdf"
+    result.write_bytes(b"x")
+
+    with pytest.raises(WorkerUnauthorized):
+        _client(FakeSession(FakeResult(401))).put_file(5, result)
+
+
+def test_put_file_target_gone(tmp_path: Path) -> None:
+    result = tmp_path / "out.pdf"
+    result.write_bytes(b"x")
+
+    with pytest.raises(FileGone):
+        _client(FakeSession(FakeResult(404))).put_file(5, result)
+
+
+# --- result_file: a NEW file beside the job's file --------------------------
+
+
+def test_result_file_sends_a_name_never_a_path(tmp_path: Path) -> None:
+    result = tmp_path / "scan.pdf"
+    result.write_bytes(b"%PDF new")
+    session = FakeSession(FakeResult(200, _envelope({"name": "scan (1).pdf"})))
+
+    payload = _client(session).result_file(4, result, name="scan.pdf")
+
+    assert payload["name"] == "scan (1).pdf"
+    url, kwargs = session.calls[0]
+    assert url.endswith("/queue/4/result-file")
+    assert kwargs["params"] == {"name": "scan.pdf"}
+    assert session.post_body == b"%PDF new"
+
+
+def test_result_file_omits_the_name_when_not_given(tmp_path: Path) -> None:
+    # No name means "the app decides", which is the safest default: the worker
+    # has no path knowledge and should not imply any.
+    result = tmp_path / "scan.pdf"
+    result.write_bytes(b"x")
+    session = FakeSession(FakeResult(200, _envelope({"name": "scan.pdf"})))
+
+    _client(session).result_file(4, result)
+
+    assert session.calls[0][1]["params"] == {}
+
+
+def test_result_file_rejected_secret(tmp_path: Path) -> None:
+    result = tmp_path / "scan.pdf"
+    result.write_bytes(b"x")
+
+    with pytest.raises(WorkerUnauthorized):
+        _client(FakeSession(FakeResult(401))).result_file(4, result)
+
+
+def test_result_file_folder_gone(tmp_path: Path) -> None:
+    result = tmp_path / "scan.pdf"
+    result.write_bytes(b"x")
+
+    with pytest.raises(FileGone):
+        _client(FakeSession(FakeResult(404))).result_file(4, result)

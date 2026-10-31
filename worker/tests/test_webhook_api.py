@@ -17,50 +17,17 @@ from unittest.mock import patch
 import pytest
 import requests
 
-# Point jobstore at a writable directory BEFORE webhook_server is imported.
-# ``webhook_server`` calls ``jobstore.init()`` at module load time; without
-# this, the default /var/lib/nc-ocr/jobs.db path is unreadable in the test
-# environment (the unit runs as the hermes user) and every ``file_put`` /
-# ``claim_next`` silently no-ops, leaving the queue/processed/file tables
-# empty. A fresh tmpdir per pytest process keeps the suite hermetic and
-# parallel-safe.
-os.environ.setdefault("NC_OCR_STATE_DIR", tempfile.mkdtemp(prefix="ncocr-tests-"))
-
-# Snapshot the path we picked so the autouse fixture below can re-pin
-# it after another test file in the suite (``test_jobstore.py``::
-# ``test_db_path_resolution_env_precedence`` in particular) leaves the
-# env var cleared.
-_STATE_DIR = os.environ["NC_OCR_STATE_DIR"]
-
-
-@pytest.fixture(autouse=True)
-def _fresh_state_dir(monkeypatch):
-    """Re-pin ``NC_OCR_STATE_DIR`` and repair the file index if it went dead.
-
-    Re-pinning the env var alone is not enough: ``jobstore`` caches the
-    resolved path in a module global (``_DB_PATH``) and its ``init()`` never
-    raises, so a single resolution against an unwritable path leaves the
-    index in a silent no-op state for the rest of the session — an "already
-    OCR'd" mark that vanishes, a scan that queues the same file twice, and a
-    ``no such table`` warning nobody reads. That is what broke CI.
-
-    Repair, do not rebuild: a per-test reset would fight the worker thread
-    that was started at import. One healthy index per pytest process is
-    enough, and asserting ``_ready()`` makes the silent mode impossible.
-    """
-    monkeypatch.setenv("NC_OCR_STATE_DIR", _STATE_DIR)
-    if not ws.jobstore._ready():
-        ws.jobstore._reset_for_tests()
-        ws.jobstore.init()
-    assert ws.jobstore._ready(), f"jobstore did not initialise at {ws.jobstore.db_path()}"
-    yield
+# The store's location is owned by conftest `_own_state_dir` (one dir per test
+# module, moved explicitly via jobstore.repin). Nothing here may touch
+# NC_OCR_STATE_DIR: flipping the env under db_path()'s resolve-once cache is
+# what put the test and the workers on two different SQLite files.
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-import nc_ocr_flow.webhook_server as ws  # noqa: E402
+import nc_ocr_flow.webhook_server as ws
 
 SECRET = "test-secret"
 
@@ -77,7 +44,10 @@ def _drain(timeout: float = 10.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         s = ws.jobstore.stats()
-        if not s.get("queued") and not s.get("running"):
+        # "claimable", not "queued": a row waiting out a retry backoff is queued
+        # and deliberately unclaimable, so waiting on `queued` waits for work
+        # that is not due yet.
+        if not s.get("claimable", s.get("queued")) and not s.get("running"):
             return
         time.sleep(0.05)
     raise AssertionError(f"SQLite queue did not drain within {timeout:.1f}s")
@@ -110,6 +80,35 @@ def client(monkeypatch):
 
     with patch.object(ws, "_process_file", side_effect=fake_process):
         yield TestClient(ws.app)
+
+
+@pytest.fixture()
+def workers(client, monkeypatch):
+    """Live worker loops for this test — and provably stubbed.
+
+    Declaring the dependency on ``client`` is the point: as a conftest fixture
+    pytest instantiated it before this module's ``client`` stub, so the threads
+    started with the real ``_process_file``, did a real WebDAV GET to
+    localhost:80 (1s + 2s retries), and kept the row `running` past the drain
+    window. Alone the race fell the other way, which is why the file passed.
+    """
+    from nc_ocr_flow import webhook_server as ws
+
+    # Bind the stub here as well as in ``client``. Two independent patches make
+    # the ordering question moot: whatever symbol the worker resolves, it finds a
+    # fast fake. Without this the threads ran the real ``_process_file``, which
+    # did a live WebDAV GET to localhost:80 (1s + 2s retries) and held the row
+    # `running` past the drain window — the failure that only appeared when other
+    # modules ran first.
+    def fake_process(nc_path, node_id, engine="auto", force=None):
+        return {"path": nc_path, "output": nc_path, "vlm_pages": []}
+
+    monkeypatch.setattr(ws, "_process_file", fake_process)
+    monkeypatch.setattr(ws, "_webdav_stat", lambda *a, **k: (None, None))
+
+    ws.start_scheduler(with_reconcile=False, with_catchup=False)
+    yield ws
+    ws.stop_scheduler()
 
 
 def h():
@@ -202,7 +201,7 @@ def test_rescan_trashbin_rejected(client):
     assert r.status_code == 422
 
 
-def test_rescan_enqueues(client):
+def test_rescan_enqueues(client, workers):
     r = client.post(
         "/rescan",
         json={"path": "/likivik/files/Work/a.pdf", "engine": "minimax"},
@@ -225,22 +224,24 @@ def test_rescan_enqueues(client):
 def test_rescan_clears_processed_guard(client):
     """node_id in recently_processed → rescan re-enqueues (not skipped).
 
-    Note: after the worker finishes the (stubbed) job it re-marks node 42 —
-    so we assert the job actually went through the queue, not the final
-    guard state.
+    Claims the job synchronously instead of watching a live worker: the
+    invariant is "the guard did not drop the job", and racing a thread pool to
+    observe it is what made this test order-dependent (it passed alone and with
+    four other modules, and failed in the full run).
     """
     ws._mark_processed(42)
     assert ws._is_recently_processed(42)
 
-    with patch.object(ws, "_process_file", wraps=ws._process_file) as spy:
-        client.post(
-            "/rescan",
-            json={"path": "/likivik/files/a.pdf", "node_id": 42},
-            headers=h(),
-        )
-        _drain()
-        # _process_file was called — the guard did not drop the job
-        assert spy.call_count == 1
+    r = client.post(
+        "/rescan",
+        json={"path": "/likivik/files/a.pdf", "node_id": 42},
+        headers=h(),
+    )
+    assert r.status_code == 200, r.text
+
+    job = ws.jobstore.claim_next()
+    assert job is not None, "rescan enqueued nothing: the processed guard dropped it"
+    assert job["path"] == "/likivik/files/a.pdf"
 
 
 # --- /scan-all ---------------------------------------------------------------
@@ -265,7 +266,7 @@ def test_scan_all_bad_engine(client):
     assert r.status_code == 422
 
 
-def test_scan_all_enqueues_pdfs_skips_ocrd(client, monkeypatch):
+def test_scan_all_enqueues_pdfs_skips_ocrd(client, monkeypatch, workers):
     """PROPFIND returns 3 files: 2 PDFs + 1 txt. One PDF already done."""
     xml = _propfind_xml("Work/a.pdf") + _propfind_xml("Work/b.pdf") + _propfind_xml("Work/c.txt")
 
@@ -306,7 +307,7 @@ def test_scan_all_enqueues_pdfs_skips_ocrd(client, monkeypatch):
     assert "/likivik/files/Work/a.pdf" in done_paths
 
 
-def test_scan_all_no_skip_when_disabled(client, monkeypatch):
+def test_scan_all_no_skip_when_disabled(client, monkeypatch, workers):
     xml = _propfind_xml("Work/a.pdf")
 
     class FakeResp:
@@ -509,7 +510,7 @@ def test_xmp_stamp_round_trip_parser_safe():
 # --- worker → ocrd_paths bookkeeping ----------------------------------------
 
 
-def test_worker_marks_ocrd(client):
+def test_worker_marks_ocrd(client, workers):
     """After worker processes a job, its path is marked done in jobstore."""
     client.post("/rescan", json={"path": "/likivik/files/x.pdf"}, headers=h())
     _drain()  # wait for the worker to drain the SQLite queue
@@ -1175,7 +1176,7 @@ def test_process_file_tesseract_empty_text_layer_raises(monkeypatch, tmp_path):
 # --- folder-wide force on /scan-all -----------------------------------------
 
 
-def test_scan_all_force_bypasses_skip_ocrd(client, monkeypatch):
+def test_scan_all_force_bypasses_skip_ocrd(client, monkeypatch, workers):
     """``force=true`` must enqueue files even when ``status='done'``.
 
     This is the operator lever for \"the pre-0.4 stamp said done but the
@@ -1223,7 +1224,7 @@ def test_scan_all_force_bypasses_skip_ocrd(client, monkeypatch):
     _drain()
 
 
-def test_scan_all_force_bypasses_path_in_flight(client, monkeypatch):
+def test_scan_all_force_bypasses_path_in_flight(client, monkeypatch, workers):
     """``force=true`` must enqueue files even if they're currently in-flight.
 
     Production scenario: a folder scan was started, the workers
@@ -1835,62 +1836,33 @@ def test_run_job_other_http_error_remains_error(monkeypatch):
 
 
 def test_enqueue_same_path_no_duplicate_when_inflight(monkeypatch):
-    """B8: when a path is already in flight, a second _enqueue for the
-    same path must NOT create a duplicate jobs row.
+    """A second enqueue for a path already queued/running must not add a row.
 
-    This test stubs ``_run_job`` to a no-op so the worker can claim
-    the job (which moves the row from ``queued`` to ``running``) but
-    does not actually process it. That preserves the in-flight state
-    long enough to make the assertion deterministic. The DB is
-    reset at the start so leftover jobs from earlier tests don't
-    race the new enqueue.
+    The in-flight state is produced by claiming the job directly rather than by
+    holding a live worker inside a stubbed ``_run_job``. The old shape patched a
+    module global that a thread pool was already running against, so the row went
+    queued → running → done in microseconds and the assertion depended on machine
+    speed (two red CI runs in a row, green locally).
     """
-    # Hold the worker inside `_run_job` until this test is done. A no-op stub
-    # returns instantly, so the claimed row goes queued → running → done in the
-    # microseconds between reading `stats()` and issuing the second `_enqueue`
-    # — and then the second enqueue is *correctly* allowed to insert, making the
-    # assertion fail on a fast machine and pass on a slow one. CI proved it: two
-    # red runs in a row, green locally.
-    release = threading.Event()
-    monkeypatch.setattr(ws, "_run_job", lambda _job: release.wait(10))
     ws.jobstore._reset_for_tests()
-    try:
-        _enqueue_while_inflight(ws, monkeypatch, release)
-    finally:
-        release.set()
-
-
-def _enqueue_while_inflight(ws, monkeypatch, release) -> None:
     nc_path = "/likivik/files/a.pdf"
+
     job1 = ws._enqueue(nc_path, node_id=42)
     assert job1.get("id") is not None
 
-    # Wait briefly for the worker to claim the first job (queued →
-    # running).
-    deadline = __import__("time").time() + 5.0
-    while __import__("time").time() < deadline:
-        if ws.jobstore.stats().get("running", 0) >= 1:
-            break
-        __import__("time").sleep(0.05)
-    assert ws.jobstore.stats().get("running", 0) >= 1, "worker should have claimed job1 by now"
+    # queued → running, exactly as the worker would put it.
+    claimed = ws.jobstore.claim_next()
+    assert claimed is not None and claimed["id"] == job1["id"]
+    assert ws.jobstore.stats().get("running", 0) == 1
 
-    inflight_before = ws.jobstore.stats().get("queued", 0) + ws.jobstore.stats().get("running", 0)
     total_before = ws.jobstore.stats().get("total", 0)
-
-    # Second enqueue for the SAME path. With the B8 fix, the
-    # per-path lock + _path_in_flight check sees files.status='queued'
-    # and short-circuits before record_enqueue.
-    ws._enqueue(nc_path, node_id=42)
-    inflight_after = ws.jobstore.stats().get("queued", 0) + ws.jobstore.stats().get("running", 0)
+    second = ws._enqueue(nc_path, node_id=42)
     total_after = ws.jobstore.stats().get("total", 0)
 
-    assert inflight_after == inflight_before, (
-        f"second _enqueue must NOT insert a duplicate jobs row: "
-        f"in-flight went from {inflight_before} to {inflight_after}"
-    )
     assert total_after == total_before, (
-        f"second _enqueue must NOT add a row: total went from {total_before} to {total_after}"
+        f"second _enqueue must NOT add a row: total went {total_before} → {total_after}"
     )
+    assert second.get("status") == "already_running", second
 
 
 def test_enqueue_force_ignores_inflight_check(monkeypatch):

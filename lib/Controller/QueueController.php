@@ -14,7 +14,7 @@ use OCP\AppFramework\Http\Attribute\PublicPage;
 use OCP\AppFramework\Http\DataResponse;
 use OCP\AppFramework\Http\StreamResponse;
 use OCP\AppFramework\OCSController;
-use OCP\Files\IRootFolder;
+use OCA\OcrFlow\Service\FileExchange;
 use OCP\Files\NotFoundException;
 use OCP\IConfig;
 use OCP\IRequest;
@@ -36,7 +36,7 @@ class QueueController extends OCSController
 		private Queue $queue,
 		private IConfig $config,
 		private LoggerInterface $logger,
-		private IRootFolder $rootFolder,
+		private FileExchange $files,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -69,22 +69,130 @@ class QueueController extends OCSController
 		[$owner, $relative] = $split;
 
 		try {
-			$folder = $this->rootFolder->getUserFolder($owner);
-			$node = $folder->get($relative);
+			$opened = $this->files->open($owner, $relative);
 		} catch (NotFoundException) {
 			// The file was moved or deleted after the job was queued. Report it
 			// as gone so the worker stops retrying and the row can be closed.
 			return new DataResponse(['message' => 'file no longer exists'], Http::STATUS_NOT_FOUND);
 		}
 
-		$handle = $node->fopen('rb');
-		if ($handle === false) {
-			return new DataResponse(['message' => 'file is not readable'], Http::STATUS_INTERNAL_SERVER_ERROR);
-		}
-
-		$response = new StreamResponse($node->getName(), $handle, $node->getMimetype() ?: 'application/octet-stream');
+		$response = new StreamResponse($opened['name'], $opened['handle'], $opened['mime']);
 		$response->cacheFor(0);
 		return $response;
+	}
+
+	/**
+	 * Take the processed file back from the worker and store it as the owner.
+	 *
+	 * The write side of `file()`. Same rule: the worker proves it is the worker,
+	 * the app does the filesystem work in the owner's tree, so a container holds
+	 * no credentials and can only write paths the queue handed it.
+	 */
+	#[PublicPage]
+	public function putFile(int $id): DataResponse
+	{
+		if (($denied = $this->denyIfNotWorker()) !== null) {
+			return $denied;
+		}
+
+		$job = $this->queue->getById($id);
+		if ($job === null) {
+			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
+		}
+
+		$split = self::splitPath((string) $job->getPath());
+		if ($split === null) {
+			return new DataResponse(['message' => 'job path is not <user>/files/<relative>'], Http::STATUS_UNPROCESSABLE_ENTITY);
+		}
+		[$owner, $relative] = $split;
+
+		// php://input, not a framework parameter: an OCR'd scan can be tens of
+		// megabytes and buffering it into a PHP string doubles that in memory.
+		$body = fopen('php://input', 'rb');
+		if ($body === false) {
+			return new DataResponse(['message' => 'cannot read the request body'], Http::STATUS_INTERNAL_SERVER_ERROR);
+		}
+		try {
+			$written = $this->files->replace($owner, $relative, $body);
+		} catch (NotFoundException) {
+			return new DataResponse(['message' => 'file no longer exists'], Http::STATUS_NOT_FOUND);
+		} finally {
+			if (is_resource($body)) {
+				fclose($body);
+			}
+		}
+
+		return new DataResponse([
+			'id' => $id,
+			'size' => $written['size'],
+			'etag' => $written['etag'],
+		]);
+	}
+
+	/**
+	 * Store a *new* file next to the job's file, named by the worker.
+	 *
+	 * The worker never supplies a path — only a name — because a path from a
+	 * caller that holds nothing but a shared secret is exactly the bug class
+	 * Nextcloud fixed in GHSA-273v-9h7x-p68v (``newFile()`` creating paths
+	 * outside the user's own space). The directory comes from the job; the name
+	 * is validated here; the collision rule is ours, not the caller's.
+	 *
+	 * Used by the image -> PDF branch: the original photo stays untouched and
+	 * the searchable PDF appears beside it.
+	 */
+	#[PublicPage]
+	public function resultFile(int $id): DataResponse
+	{
+		if (($denied = $this->denyIfNotWorker()) !== null) {
+			return $denied;
+		}
+
+		$job = $this->queue->getById($id);
+		if ($job === null) {
+			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
+		}
+
+		$split = self::splitPath((string) $job->getPath());
+		if ($split === null) {
+			return new DataResponse(['message' => 'job path is not <user>/files/<relative>'], Http::STATUS_UNPROCESSABLE_ENTITY);
+		}
+		[$owner, $relative] = $split;
+
+		$directory = dirname($relative);
+		$directory = $directory === '.' ? '' : $directory . '/';
+
+		$requested = (string) $this->request->getParam('name', '');
+		if ($requested === '') {
+			$requested = pathinfo($relative, PATHINFO_FILENAME) . '.pdf';
+		}
+		// A name may not select a directory: separators are how a caller would
+		// walk out of the job's folder.
+		if (str_contains($requested, '/') || str_contains($requested, '\\')) {
+			return new DataResponse(['message' => 'name may not contain a path'], Http::STATUS_UNPROCESSABLE_ENTITY);
+		}
+		$body = fopen('php://input', 'rb');
+		if ($body === false) {
+			return new DataResponse(['message' => 'cannot read the request body'], Http::STATUS_INTERNAL_SERVER_ERROR);
+		}
+		try {
+			$stored = $this->files->createBeside($owner, $relative, $requested, $body);
+		} catch (NotFoundException) {
+			return new DataResponse(['message' => 'target folder no longer exists'], Http::STATUS_NOT_FOUND);
+		} catch (\InvalidArgumentException $exc) {
+			return new DataResponse(['message' => $exc->getMessage()], Http::STATUS_UNPROCESSABLE_ENTITY);
+		} finally {
+			if (is_resource($body)) {
+				fclose($body);
+			}
+		}
+
+		return new DataResponse([
+			'id' => $id,
+			'name' => $stored['name'],
+			'path' => $stored['path'],
+			'file_id' => $stored['file_id'],
+		]);
 	}
 
 	/**

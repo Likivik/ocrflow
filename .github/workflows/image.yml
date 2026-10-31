@@ -94,14 +94,27 @@ jobs:
           docker build -f docker/Dockerfile \
             --build-arg INSTALL_GOOGLE=${{ matrix.google }} \
             -t ocrflow-worker:ci .
-          docker run -d --name w -e NC_OCR_URL=http://127.0.0.1 \
+          # NC_OCR_TRANSPORT=api is the point of this image: the worker never
+          # holds a Nextcloud identity, so it must start and answer /heartbeat
+          # with no DAV credentials at all. Without the flag the worker applies
+          # its DAV gate at start-up and exits 1 — which is correct behaviour and
+          # exactly what made this smoke fail.
+          docker run -d --name ocrflow-ci \
+            -e NC_OCR_TRANSPORT=api \
+            -e NC_OCR_URL=http://127.0.0.1 \
             -e NC_OCR_WORKER_SECRET=$(head -c 32 /dev/urandom | base64) \
             ocrflow-worker:ci
+          # A crashed container cannot answer, so check the process before
+          # polling: 30 iterations of "container is not running" hides the cause.
           for i in $(seq 1 30); do
-            if docker exec w python -c \
+            running=$(docker inspect -f '{{.State.Running}}' ocrflow-ci 2>/dev/null || echo false)
+            if [ "$running" != "true" ]; then
+              echo "container exited during start-up"; docker logs ocrflow-ci; exit 1
+            fi
+            if docker exec ocrflow-ci python -c \
               "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/heartbeat', timeout=2)"; then
-              echo "heartbeat ok"; exit 0
+              echo "heartbeat ok"; docker logs ocrflow-ci | tail -5; exit 0
             fi
             sleep 2
           done
-          docker logs w; exit 1
+          docker logs ocrflow-ci; exit 1
