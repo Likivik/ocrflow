@@ -138,4 +138,21 @@ class QueueControllerTest extends TestCase
             $this->assertNull(QueueController::splitPath($bad), 'accepted: ' . $bad);
         }
     }
+
+    public function testPutFileRejectsAWrongSecret(): void
+    {
+        $response = $this->controller('s3cret', 'nope')->putFile(1);
+
+        $this->assertSame(Http::STATUS_UNAUTHORIZED, $response->getStatus());
+    }
+
+    public function testPutFileReportsAMissingJob(): void
+    {
+        $queue = $this->createMock(Queue::class);
+        $queue->expects($this->once())->method('getById')->with(9)->willReturn(null);
+
+        $response = $this->controller('s3cret', 's3cret', $queue)->putFile(9);
+
+        $this->assertSame(Http::STATUS_NOT_FOUND, $response->getStatus());
+    }
 }

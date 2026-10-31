@@ -159,6 +159,31 @@ class QueueClient:
             raise QueueProtocolError(f"job {job_id}: the app streamed an empty file")
         return dest
 
+    def put_file(self, job_id: int, source: Path) -> dict[str, Any]:
+        """Send the processed file back; the app stores it as the owner.
+
+        The counterpart to :meth:`fetch_file`, and the reason the worker can hold
+        no filesystem credentials at all — it never writes to Nextcloud direct.
+        """
+        if not source.is_file():
+            raise QueueProtocolError(f"result file {source} does not exist")
+        with open(source, "rb") as handle:
+            response = self.session.put(
+                f"{self.base_url}{API_PATH}/queue/{job_id}/file",
+                data=handle,
+                headers={**self._headers(), "Content-Type": "application/pdf"},
+                timeout=self.timeout,
+            )
+        if response.status_code in (401, 403):
+            raise WorkerUnauthorized(
+                f"the app rejected the worker secret ({response.status_code}) storing job {job_id}"
+            )
+        if response.status_code == 404:
+            raise FileGone(f"job {job_id}: the target file no longer exists")
+        if response.status_code >= 500:
+            raise QueueProtocolError(f"server error {response.status_code} storing job {job_id}")
+        return self._data(response)
+
     def _headers(self) -> dict[str, str]:
         return {
             "OCS-APIRequest": "true",

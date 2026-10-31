@@ -88,6 +88,56 @@ class QueueController extends OCSController
 	}
 
 	/**
+	 * Take the processed file back from the worker and store it as the owner.
+	 *
+	 * The write side of `file()`. Same rule: the worker proves it is the worker,
+	 * the app does the filesystem work in the owner's tree, so a container holds
+	 * no credentials and can only write paths the queue handed it.
+	 */
+	#[PublicPage]
+	public function putFile(int $id): DataResponse
+	{
+		if (($denied = $this->denyIfNotWorker()) !== null) {
+			return $denied;
+		}
+
+		$job = $this->queue->getById($id);
+		if ($job === null) {
+			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
+		}
+
+		$split = self::splitPath((string) $job->getPath());
+		if ($split === null) {
+			return new DataResponse(['message' => 'job path is not <user>/files/<relative>'], Http::STATUS_UNPROCESSABLE_ENTITY);
+		}
+		[$owner, $relative] = $split;
+
+		try {
+			$folder = $this->rootFolder->getUserFolder($owner);
+			$node = $folder->get($relative);
+		} catch (NotFoundException) {
+			return new DataResponse(['message' => 'file no longer exists'], Http::STATUS_NOT_FOUND);
+		}
+
+		// php://input, not a framework parameter: an OCR'd scan can be tens of
+		// megabytes and buffering it into a PHP string doubles that in memory.
+		$body = fopen('php://input', 'rb');
+		if ($body === false) {
+			return new DataResponse(['message' => 'cannot read the request body'], Http::STATUS_INTERNAL_SERVER_ERROR);
+		}
+		$node->putContent($body);
+		if (is_resource($body)) {
+			fclose($body);
+		}
+
+		return new DataResponse([
+			'id' => $id,
+			'size' => $node->getSize(),
+			'etag' => $node->getEtag(),
+		]);
+	}
+
+	/**
 	 * `/<user>/files/<relative>` — the form Nextcloud itself stores.
 	 *
 	 * Public and static on purpose: the parsing rules are the one part of the
