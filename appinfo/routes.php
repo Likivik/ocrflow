@@ -9,6 +9,13 @@ return [
     'ocs' => [
         // --- worker plane: called by the OCR ExApp, never by a browser ---------
         ['name' => 'queue#claim', 'url' => '/api/v1/queue/next', 'verb' => 'POST'],
+        // Bytes for the claimed job. The app reads the file as its owner; the
+        // worker only presents the shared secret, so no account credential
+        // exists for it to hold.
+        ['name' => 'queue#file', 'url' => '/api/v1/queue/{id}/file', 'verb' => 'GET'],
+        // The result, written back the same way. The worker never touches
+        // WebDAV: it hands the app bytes, the app stores them as the owner.
+        ['name' => 'queue#putFile', 'url' => '/api/v1/queue/{id}/file', 'verb' => 'PUT'],
         ['name' => 'queue#result', 'url' => '/api/v1/queue/{id}/result', 'verb' => 'POST'],
         ['name' => 'queue#failure', 'url' => '/api/v1/queue/{id}/failure', 'verb' => 'POST'],
 

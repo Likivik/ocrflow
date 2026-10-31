@@ -1,0 +1,12 @@
+.jj
+.git
+.github
+node_modules
+vendor
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+img
+docs
+tests

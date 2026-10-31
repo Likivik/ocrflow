@@ -11,6 +11,7 @@ use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Queue;
 use OCP\AppFramework\Http;
+use OCP\Files\IRootFolder;
 use OCP\IConfig;
 use OCP\IRequest;
 use PHPUnit\Framework\TestCase;
@@ -46,6 +47,7 @@ class QueueControllerTest extends TestCase
             $queue ?? $this->createMock(Queue::class),
             $config,
             $this->createMock(LoggerInterface::class),
+            $this->createMock(IRootFolder::class),
         );
     }
 
@@ -90,5 +92,67 @@ class QueueControllerTest extends TestCase
         $response = $this->controller('s3cret', 'nope')->failure(7);
 
         $this->assertSame(Http::STATUS_UNAUTHORIZED, $response->getStatus());
+    }
+
+    public function testFileEndpointRejectsAWrongSecret(): void
+    {
+        $response = $this->controller('s3cret', 'nope')->file(1);
+
+        $this->assertSame(Http::STATUS_UNAUTHORIZED, $response->getStatus());
+    }
+
+    public function testFileEndpointReportsAMissingJob(): void
+    {
+        $queue = $this->createMock(Queue::class);
+        $queue->expects($this->once())->method('getById')->with(42)->willReturn(null);
+
+        $response = $this->controller('s3cret', 's3cret', $queue)->file(42);
+
+        $this->assertSame(Http::STATUS_NOT_FOUND, $response->getStatus());
+    }
+
+    /**
+     * The path split is the contract with Nextcloud's own path format. A path
+     * that does not match must be refused rather than guessed at: guessing is
+     * how a worker ends up reading someone else's file.
+     */
+    public function testSplitPathAcceptsTheNextcloudForm(): void
+    {
+        $this->assertSame(
+            ['likivik', 'Work/scan.pdf'],
+            QueueController::splitPath('/likivik/files/Work/scan.pdf'),
+        );
+    }
+
+    public function testSplitPathRefusesForeignShapes(): void
+    {
+        foreach ([
+            '',
+            '/',
+            '/likivik',
+            '/likivik/files',
+            '/likivik/files/',
+            '//files/x.pdf',
+            '/likivik/other/x.pdf',
+        ] as $bad) {
+            $this->assertNull(QueueController::splitPath($bad), 'accepted: ' . $bad);
+        }
+    }
+
+    public function testPutFileRejectsAWrongSecret(): void
+    {
+        $response = $this->controller('s3cret', 'nope')->putFile(1);
+
+        $this->assertSame(Http::STATUS_UNAUTHORIZED, $response->getStatus());
+    }
+
+    public function testPutFileReportsAMissingJob(): void
+    {
+        $queue = $this->createMock(Queue::class);
+        $queue->expects($this->once())->method('getById')->with(9)->willReturn(null);
+
+        $response = $this->controller('s3cret', 's3cret', $queue)->putFile(9);
+
+        $this->assertSame(Http::STATUS_NOT_FOUND, $response->getStatus());
     }
 }
