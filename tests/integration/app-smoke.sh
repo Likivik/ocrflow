@@ -104,7 +104,7 @@ $ENGINE exec "$NAME" mkdir -p /var/www/html/custom_apps/ocrflow
 # Everything the app needs at run time, not just the PHP: the committed Vue
 # bundle in js/ and the icon in img/ are part of the app, not build artefacts of
 # the test.
-for part in appinfo lib templates js img; do
+for part in appinfo lib templates js img l10n; do
   if [ -d "${APP_DIR}/${part}" ]; then
     $ENGINE cp "${APP_DIR}/${part}" "$NAME:/var/www/html/custom_apps/ocrflow/${part}"
   fi
@@ -135,6 +135,18 @@ occ ocrflow:engine | tee /tmp/ocrflow-engine-now.log
 grep -q 'engine: tesseract' /tmp/ocrflow-engine-now.log || {
     echo "FAIL: engine did not stick"; exit 1; }
 ok "app enabled"
+
+# Nextcloud's own app linter. It had never been run against this app; making it
+# a CI assertion turns "we never checked" into a checked fact. Warnings are
+# printed but do not fail the build — Nextcloud's own apps ship with them —
+# errors do.
+echo "== occ app:check-code"
+occ app:check-code ocrflow >/tmp/ocrflow-check-code.log 2>&1 || true
+cat /tmp/ocrflow-check-code.log
+if grep -qE '^Checked for errors: [1-9]' /tmp/ocrflow-check-code.log; then
+    fail "app:check-code found errors"
+fi
+ok "app:check-code found no errors"
 
 echo "== the panel renders inside personal settings"
 code=$(curl -s -o /tmp/ocrflow-panel.html -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \

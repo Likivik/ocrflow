@@ -4,6 +4,12 @@
 			{{ intro }}
 		</p>
 
+		<div v-if="!engineConfigured" class="ocrflow-panel__notice">
+			<NcNoteCard type="warning">
+				{{ t('OCR is not configured on this instance yet, so nothing is queued. Ask an administrator to choose an engine.') }}
+			</NcNoteCard>
+		</div>
+
 		<div v-if="error" class="ocrflow-panel__error">
 			<NcNoteCard type="error">
 				{{ error }}
@@ -40,6 +46,20 @@
 			{{ lastScan }}
 		</p>
 
+		<h3 class="ocrflow-panel__heading">
+			{{ t('Automatic OCR') }}
+		</h3>
+		<p class="ocrflow-panel__intro">
+			{{ t('Uploads are processed automatically. Turn this off if you do not want your files sent for OCR.') }}
+		</p>
+		<NcCheckboxRadioSwitch
+			type="switch"
+			:checked.sync="autoOcrDisabled"
+			:disabled="busy"
+			@update:checked="setOptOut">
+			{{ t('Do not process my uploads automatically') }}
+		</NcCheckboxRadioSwitch>
+
 		<div class="ocrflow-panel__actions">
 			<NcButton :disabled="busy" @click="refresh">
 				{{ t('Refresh') }}
@@ -53,7 +73,9 @@
 
 <script>
 import axios from '@nextcloud/axios'
+import { t as translate } from '@nextcloud/l10n'
 import NcButton from '@nextcloud/vue/components/NcButton'
+import NcCheckboxRadioSwitch from '@nextcloud/vue/components/NcCheckboxRadioSwitch'
 import NcNoteCard from '@nextcloud/vue/components/NcNoteCard'
 import NcTextField from '@nextcloud/vue/components/NcTextField'
 
@@ -61,7 +83,7 @@ const BASE = '/ocs/v2.php/apps/ocrflow/api/v1'
 
 export default {
 	name: 'OcrFlowPanel',
-	components: { NcButton, NcNoteCard, NcTextField },
+	components: { NcButton, NcCheckboxRadioSwitch, NcNoteCard, NcTextField },
 	data() {
 		return {
 			intro: 'Files you upload are queued automatically. Counts below are for this instance, not this folder.',
@@ -71,6 +93,9 @@ export default {
 			error: '',
 			lastScan: '',
 			updatedAt: '',
+			engine: '',
+			engineConfigured: true,
+			autoOcrDisabled: false,
 		}
 	},
 	computed: {
@@ -82,10 +107,13 @@ export default {
 	},
 	mounted() {
 		this.refresh()
+		this.loadMe()
 	},
 	methods: {
-		t(text) {
-			return text
+		t(text, params) {
+			// The real translation function, not a passthrough: a passthrough
+			// makes the whole interface English in every locale, silently.
+			return translate(text, params)
 		},
 		async refresh() {
 			this.busy = true
@@ -96,6 +124,36 @@ export default {
 				this.updatedAt = new Date().toLocaleTimeString()
 			} catch (e) {
 				this.error = `Could not read the queue: ${e?.response?.status ?? e?.message ?? 'unknown error'}`
+			} finally {
+				this.busy = false
+			}
+		},
+		async loadMe() {
+			try {
+				const { data } = await axios.get(`${BASE}/me`, { headers: { 'OCS-APIRequest': 'true' } })
+				const me = data?.ocs?.data ?? {}
+				this.autoOcrDisabled = me.auto_ocr_disabled === true
+				this.engine = me.engine ?? ''
+				this.engineConfigured = me.engine_configured !== false
+			} catch (e) {
+				// Not being able to read the state must not hide the queue: the
+				// panel still works, it just cannot say whether OCR is on.
+				this.engineConfigured = true
+			}
+		},
+		async setOptOut(value) {
+			this.busy = true
+			this.error = ''
+			try {
+				await axios.put(
+					`${BASE}/me`,
+					{ auto_ocr_disabled: value === true },
+					{ headers: { 'OCS-APIRequest': 'true' } },
+				)
+				this.autoOcrDisabled = value === true
+			} catch (e) {
+				this.autoOcrDisabled = !value
+				this.error = `Could not save your choice: ${e?.response?.status ?? e?.message ?? 'unknown error'}`
 			} finally {
 				this.busy = false
 			}

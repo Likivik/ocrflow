@@ -107,6 +107,48 @@ final class AccessGate
 		return $value === '1';
 	}
 
+	/**
+	 * Replace the group list.
+	 *
+	 * An empty list means "everyone", so an administrator who wants to restrict
+	 * OCR must name the groups explicitly; there is no way to accidentally
+	 * switch everybody off.
+	 *
+	 * @param list<string> $groups
+	 */
+	public function setEnabledGroups(array $groups): void
+	{
+		$clean = [];
+		foreach ($groups as $group) {
+			if (is_string($group) && trim($group) !== '') {
+				$clean[] = trim($group);
+			}
+		}
+		$clean = array_values(array_unique($clean));
+
+		$this->config->setAppValue(
+			Application::APP_ID,
+			'enabled_groups',
+			$clean === [] ? '' : json_encode($clean, JSON_THROW_ON_ERROR),
+		);
+		// Drop the cached list, or the change is invisible until the process
+		// restarts — the classic "I saved it and nothing happened".
+		$this->groups = null;
+	}
+
+	/**
+	 * Turn automatic OCR off (or back on) for one user.
+	 */
+	public function setOptedOut(string $userId, bool $optedOut): void
+	{
+		$this->config->setUserValue(
+			$userId,
+			Application::APP_ID,
+			'auto_ocr_disabled',
+			$optedOut ? '1' : '0',
+		);
+	}
+
 	public function canProcess(?IUser $user): bool
 	{
 		if (!$this->isEnabledFor($user)) {

@@ -73,6 +73,22 @@ owner through `IRootFolder::getUserFolder()`, so Nextcloud's own permissions
 apply. The worker cannot ask for a different path — it receives bytes for the job
 it claimed and returns bytes for that same job.
 
+## Settings
+
+Two places, both in Nextcloud's own Settings app — no separate UI, no second web
+server.
+
+**Administration → OCR** (admins only): the OCR engine and the group list. The
+same values `occ ocrflow:engine` and `occ config:app:set ocrflow enabled_groups`
+set; the page is a view onto them, not a second source of truth. An empty group
+list means everyone may use OCR — a named list restricts it to those groups.
+
+**Personal settings**: a switch that turns automatic OCR off for your own
+uploads. It is per user and needs no administrator.
+
+The panel also says so when the instance has no engine chosen: "OCR is not
+configured on this instance yet, so nothing is queued."
+
 ## Layout
 
 ```

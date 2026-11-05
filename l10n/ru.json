@@ -1,0 +1,30 @@
+{
+    "translations": {
+        "Queue": "Очередь",
+        "Nothing has been queued yet.": "Пока ничего не поставлено в очередь.",
+        "Scan a folder": "Сканировать папку",
+        "Folder path, relative to your files": "Путь к папке относительно ваших файлов",
+        "Queueing…": "В очередь…",
+        "Scan": "Сканировать",
+        "Refresh": "Обновить",
+        "Updated {time}": "Обновлено {time}",
+        "OCR is not configured on this instance yet, so nothing is queued. Ask an administrator to choose an engine.": "OCR на этом сервере ещё не настроен, поэтому ничего не ставится в очередь. Попросите администратора выбрать движок.",
+        "Automatic OCR": "Автоматическое распознавание",
+        "Uploads are processed automatically. Turn this off if you do not want your files sent for OCR.": "Загруженные файлы обрабатываются автоматически. Отключите, если не хотите, чтобы ваши файлы отправлялись на распознавание.",
+        "Do not process my uploads automatically": "Не обрабатывать мои загрузки автоматически",
+        "OCR engine": "Движок OCR",
+        "The engine decides whether page images of documents leave this server. Nothing is queued until one is chosen.": "Движок определяет, уходят ли изображения страниц документов с этого сервера. Пока он не выбран, ничего не ставится в очередь.",
+        "Engine": "Движок",
+        "Google Cloud Vision receives a page image of every document. Files are not sent anywhere else.": "Google Cloud Vision получает изображение страницы каждого документа. Файлы больше никуда не отправляются.",
+        "Who may use OCR": "Кто может использовать OCR",
+        "Leave empty to allow everyone. Naming groups restricts OCR to their members.": "Оставьте пустым, чтобы разрешить всем. Указание групп ограничивает OCR их участниками.",
+        "Groups": "Группы",
+        "Saving…": "Сохранение…",
+        "Save": "Сохранить",
+        "Saved": "Сохранено",
+        "Enable JavaScript to see the OCR queue.": "Включите JavaScript, чтобы увидеть очередь OCR.",
+        "Enable JavaScript to change the OCR settings.": "Включите JavaScript, чтобы изменить настройки OCR.",
+        "OCR": "OCR"
+    },
+    "pluralForm": "nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);"
+}
