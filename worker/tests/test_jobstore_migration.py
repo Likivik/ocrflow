@@ -46,17 +46,16 @@ CREATE TABLE jobs (
 
 
 def _load_jobstore(db_dir: Path):
-    """Import nc_ocr_flow.jobstore against ``db_dir`` and run init()."""
-    for name in list(sys.modules):
-        if name == "nc_ocr_flow.jobstore":
-            del sys.modules[name]
+    """Point the store at ``db_dir`` and run init() on the legacy file."""
+    import nc_ocr_flow.jobstore as mod
+
     prev = os.environ.get("NC_OCR_STATE_DIR")
     os.environ["NC_OCR_STATE_DIR"] = str(db_dir)
     try:
-        mod = importlib.import_module("nc_ocr_flow.jobstore")
-        # NB: deliberately NOT mod._reset_for_tests() — it unlinks the DB
-        # file, which would destroy the legacy database we just built.
-        mod.init()
+        # NB: deliberately NOT _reset_for_tests() — it unlinks the DB file,
+        # which would destroy the legacy database we just built. repin points
+        # the module at the existing file and runs the schema migrations on it.
+        mod.repin(db_dir / "jobs.db")
     finally:
         if prev is None:
             os.environ.pop("NC_OCR_STATE_DIR", None)

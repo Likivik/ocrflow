@@ -57,17 +57,25 @@ class _Env:
         return False
 
 
+def _jobstore_mod():
+    """The one jobstore module object — sys.modules surgery is banned.
+
+    Tearing modules out of sys.modules orphaned every other holder of the old
+    object: the credential tests' importlib.reload then died with "module not
+    in sys.modules", and the suite carried two live module objects per import.
+    """
+    import nc_ocr_flow.jobstore as mod
+
+    return mod
+
+
 def _isolated_jobstore(tmp: Path, name: str = "jobstore"):
-    """Reload the jobstore module with a clean DB under ``tmp/name``."""
+    """Point the store at a clean DB under ``tmp/name``."""
     db_dir = tmp / name
     db_dir.mkdir(parents=True, exist_ok=True)
-    for mod_name in list(sys.modules):
-        if mod_name == "nc_ocr_flow.jobstore":
-            del sys.modules[mod_name]
+    mod = _jobstore_mod()
     with _Env(NC_OCR_STATE_DIR=str(db_dir)):
-        mod = importlib.import_module("nc_ocr_flow.jobstore")
-        mod._reset_for_tests()
-        mod.init()
+        mod.repin(db_dir / "jobs.db")
     return mod
 
 
@@ -257,9 +265,11 @@ def test_usage_add_never_raises_on_broken_db(tmp_path: Path) -> None:
     # suite otherwise runs strict (conftest.py), where the same failure raises.
     os.environ["NC_OCR_STATE_STRICT"] = "0"
     try:
-        for name in ("nc_ocr_flow.jobstore", "nc_ocr_flow.webhook_server"):
-            sys.modules.pop(name, None)
-        mod = importlib.import_module("nc_ocr_flow.jobstore")
+        mod = _jobstore_mod()
+        # repin re-resolves from the (broken) env: the degraded contract is
+        # that a store that cannot live at its configured path no-ops instead
+        # of raising — a live worker relies on this.
+        mod.repin()
         mod.usage_add("google", pages=1)  # must not raise
         assert mod.usage_month("google") == {"jobs": 0, "pages": 0}
     finally:
@@ -271,8 +281,9 @@ def test_usage_add_never_raises_on_broken_db(tmp_path: Path) -> None:
             os.environ.pop("NC_OCR_STATE_STRICT", None)
         else:
             os.environ["NC_OCR_STATE_STRICT"] = old_strict
-        for name in ("nc_ocr_flow.jobstore", "nc_ocr_flow.webhook_server"):
-            sys.modules.pop(name, None)
+        # Leave a healthy store behind: the next test must not inherit the
+        # broken path.
+        _jobstore_mod().repin()
 
 
 def test_claim_next_is_atomic_under_concurrency(tmp_path: Path) -> None:
@@ -639,11 +650,8 @@ def test_broken_db_path_silent(tmp_path: Path) -> None:
     # The degraded contract is what this test is about; the suite elsewhere runs
     # strict (conftest.py) and would turn the same path into a hard error.
     with _Env(NC_OCR_STATE_DIR=str(blocker), XDG_CACHE_HOME=str(cache), NC_OCR_STATE_STRICT="0"):
-        for mod_name in list(sys.modules):
-            if mod_name == "nc_ocr_flow.jobstore":
-                del sys.modules[mod_name]
-        mod = importlib.import_module("nc_ocr_flow.jobstore")
-        mod._reset_for_tests()
+        mod = _jobstore_mod()
+        mod.repin()
         try:
             mod.init()
             mod.record_enqueue(_make_job(1))
@@ -675,20 +683,14 @@ def test_db_path_resolution_env_precedence(tmp_path: Path) -> None:
     a.mkdir()
     b.mkdir()
     with _Env(NC_OCR_STATE_DIR=str(a), STATE_DIRECTORY=str(b)):
-        for mod_name in list(sys.modules):
-            if mod_name == "nc_ocr_flow.jobstore":
-                del sys.modules[mod_name]
-        mod = importlib.import_module("nc_ocr_flow.jobstore")
-        mod._reset_for_tests()
+        mod = _jobstore_mod()
+        mod.repin()
         p = mod.db_path()
         assert p.parent == a, f"NC_OCR_STATE_DIR should win, got {p}"
     os.environ.pop("NC_OCR_STATE_DIR", None)
     with _Env(STATE_DIRECTORY=str(b)):
-        for mod_name in list(sys.modules):
-            if mod_name == "nc_ocr_flow.jobstore":
-                del sys.modules[mod_name]
-        mod = importlib.import_module("nc_ocr_flow.jobstore")
-        mod._reset_for_tests()
+        mod = _jobstore_mod()
+        mod.repin()
         p = mod.db_path()
         assert p.parent == b, f"STATE_DIRECTORY: got {p}, expected under {b}"
 

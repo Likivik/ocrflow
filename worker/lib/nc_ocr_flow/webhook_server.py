@@ -19,6 +19,7 @@ import secrets
 import tempfile
 import threading
 import time
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import UTC
 from email.utils import parsedate_to_datetime
@@ -34,6 +35,8 @@ from . import jobstore
 from .classifier import ClassifierUnavailable, classify
 from .ocr import process_pdf
 from .pdf_classify import classify_pdf
+from .queue_client import QueueClient
+from .scheduler import scheduler
 
 log = logging.getLogger(__name__)
 
@@ -43,14 +46,13 @@ NC_URL = os.environ.get("NC_OCR_NC_URL", "http://localhost").rstrip("/")
 # authority over the whole instance — so an unset variable silently ran the
 # worker as a human instead of as the account it was given. A missing user is
 # now an error at start-up (see verify_dav_credentials) rather than a policy.
-NC_USER = (os.environ.get("NC_OCR_DAV_USER") or os.environ.get("NC_OCR_NC_USER") or "").strip()
 
 
 class DavCredentialsMissing(RuntimeError):
     """No WebDAV identity, so no file can be fetched or written."""
 
 
-def _read_secret(env_var: str) -> str:
+def _read_secret(env_var: str, env: Mapping[str, str] | None = None) -> str:
     """Read a secret: systemd credentials dir, then env (var + '_FILE') then var.
 
     `$CREDENTIALS_DIRECTORY` comes first because `LoadCredential=` is the only
@@ -58,7 +60,8 @@ def _read_secret(env_var: str) -> str:
     `/proc/<pid>/environ`. The `_FILE` form is kept for the deployments that
     already use it.
     """
-    cred_dir = os.environ.get("CREDENTIALS_DIRECTORY", "")
+    e = os.environ if env is None else env
+    cred_dir = e.get("CREDENTIALS_DIRECTORY", "")
     if cred_dir:
         # The unit names the file `ocrflow-dav-password`; accept the generic
         # spelling too so the module and a hand-written unit agree.
@@ -66,17 +69,30 @@ def _read_secret(env_var: str) -> str:
             candidate = Path(cred_dir) / name
             if candidate.is_file():
                 return candidate.read_text().strip()
-    val = os.environ.get(env_var)
+    val = e.get(env_var)
     if val:
         return val
     file_var = f"{env_var}_FILE"
-    path = os.environ.get(file_var)
+    path = e.get(file_var)
     if path:
         return Path(path).read_text().strip()
     return ""
 
 
-NC_PASSWORD = _read_secret("NC_OCR_NC_PASSWORD")
+def resolve_dav_credentials(env: Mapping[str, str] | None = None) -> tuple[str, str]:
+    """WebDAV user + password, in the documented precedence order.
+
+    A pure function of its input: the module resolves it once at import, and the
+    tests exercise the order by passing dicts. They used to re-import the whole
+    module with a doctored environment instead — `importlib.reload` games that
+    broke every later module touching `sys.modules`.
+    """
+    e = os.environ if env is None else env
+    user = (e.get("NC_OCR_DAV_USER") or e.get("NC_OCR_NC_USER") or "").strip()
+    return user, _read_secret("NC_OCR_NC_PASSWORD", env=e)
+
+
+NC_USER, NC_PASSWORD = resolve_dav_credentials()
 WEBHOOK_SECRET = _read_secret("NC_OCR_WEBHOOK_SECRET")
 
 
@@ -376,6 +392,63 @@ def _webdav_download(nc_path: str, dest: Path) -> None:
         return r
 
     _retry(_do_get, what=f"WebDAV GET {nc_path}")
+
+
+# --- Transport: WebDAV (legacy) or the app's own OCS channel ----------------
+#
+# The worker's whole point is that it holds no Nextcloud identity. WebDAV needs
+# one; the OCS channel needs only the shared secret, because the app opens the
+# file as its owner. Both transports stay implemented until the API path has run
+# in production — see the plan's Phase 6 gate — and `NC_OCR_TRANSPORT` picks one.
+TRANSPORT = os.environ.get("NC_OCR_TRANSPORT", "dav").strip().lower()
+
+_api_client_singleton: QueueClient | None = None
+
+
+def _api_client() -> QueueClient:
+    """The queue client for the API transport, built once from the environment."""
+    global _api_client_singleton
+    if _api_client_singleton is None:
+        from .runner import read_secret
+
+        secret = read_secret()
+        if not secret:
+            raise RuntimeError("NC_OCR_TRANSPORT=api needs the worker secret")
+        _api_client_singleton = QueueClient(
+            base_url=NC_URL,
+            secret=secret,
+            worker_name=os.environ.get("NC_OCR_WORKER_NAME", "worker"),
+        )
+    return _api_client_singleton
+
+
+def _transport_download(nc_path: str, dest: Path, job_id: int | None) -> None:
+    if TRANSPORT == "api":
+        if job_id is None:
+            raise RuntimeError("NC_OCR_TRANSPORT=api needs a job id to fetch bytes")
+        _api_client().fetch_file(job_id, dest)
+        return
+    _webdav_download(nc_path, dest)
+
+
+def _transport_upload(nc_path: str, src: Path, job_id: int | None, in_place: bool = True) -> str:
+    """Store the result. Returns the path it landed on (the API decides names)."""
+    if TRANSPORT == "api":
+        if job_id is None:
+            raise RuntimeError("NC_OCR_TRANSPORT=api needs a job id to store bytes")
+        client = _api_client()
+        if in_place:
+            client.put_file(job_id, src)
+            return nc_path
+        stored = client.result_file(job_id, src)
+        return str(stored.get("path") or nc_path)
+    # In place, DAV keeps the temp-PUT + atomic MOVE dance: a plain PUT that
+    # dies midway leaves a truncated PDF where the original used to be.
+    if in_place:
+        _webdav_replace_atomic(nc_path, src)
+    else:
+        _webdav_upload(nc_path, src)
+    return nc_path
 
 
 # --- Per-engine version stamping (used by _stamp_metadata) -----------------
@@ -1588,7 +1661,11 @@ def _assert_ocr_produced_blocks(result, nc_path: str) -> None:
 
 
 def _process_file(
-    nc_path: str, node_id: int, engine: str | None = None, force: bool = False
+    nc_path: str,
+    node_id: int,
+    engine: str | None = None,
+    force: bool = False,
+    job_id: int | None = None,
 ) -> dict:
     """Download, OCR, upload back. Returns result dict.
 
@@ -1608,7 +1685,7 @@ def _process_file(
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         local_file = tmp / filename
-        _webdav_download(nc_path, local_file)
+        _transport_download(nc_path, local_file, job_id)
 
         if ext in IMAGE_EXTS:
             log.info("classifying image: %s", nc_path)
@@ -1686,7 +1763,9 @@ def _process_file(
             # ``status=error``: the user now has a usable PDF, and
             # the leftover image is a cleanup problem, not a failed
             # job.
-            _webdav_upload(pdf_nc_path, Path(result.output_pdf))
+            pdf_nc_path = _transport_upload(
+                pdf_nc_path, Path(result.output_pdf), job_id, in_place=False
+            )
             kept_source = False
             delete_failed = False
             delete_error = None
@@ -1804,7 +1883,7 @@ def _process_file(
             # reset, timeout) left a truncated, corrupt PDF on disk
             # with no way to recover. We PUT to a sibling temp path
             # and then MOVE it atomically onto the target.
-            _webdav_replace_atomic(nc_path, Path(result.output_pdf))
+            _transport_upload(nc_path, Path(result.output_pdf), job_id, in_place=True)
 
             return {
                 "path": nc_path,
@@ -1962,11 +2041,8 @@ _SETTING_SPEC: dict[str, tuple[str, int]] = {
 #: the semaphores are built at import time).
 _RESTART_SETTINGS = {"workers"}
 
-# Open the store before reading any setting out of it. Clearing the
-# restart flag here is what makes "applied" mean applied: we only get
-# this far by having restarted.
-jobstore.init()
-jobstore.setting_delete("_restart_pending")
+# Opening the store belongs to start_scheduler, not to import: see
+# `_clear_restart_flag`.
 
 
 def _int_env(name: str, default: int) -> int:
@@ -1976,7 +2052,15 @@ def _int_env(name: str, default: int) -> int:
     worker pool without a redeploy; the nix value stays the default and
     is what a fresh database falls back to.
     """
-    raw = jobstore.settings_all().get(name)
+    # A settings read must never be fatal at import time: the panel values are
+    # optional, the environment is the documented source, and a host whose index
+    # is not writable yet (a fresh container, a read-only mount, a test process
+    # that has not pinned its state dir) should still be able to import the
+    # module and fall back to the defaults.
+    try:
+        raw = jobstore.settings_all().get(name)
+    except Exception:
+        raw = None
     if raw in (None, ""):
         raw = os.environ.get(name)
     if raw is None:
@@ -1995,7 +2079,10 @@ def _int_env_nonneg(name: str, default: int) -> int:
     is a valid operator choice when debugging the loop-prevention
     behaviour.
     """
-    raw = jobstore.settings_all().get(name)
+    try:
+        raw = jobstore.settings_all().get(name)
+    except Exception:
+        raw = None
     if raw in (None, ""):
         raw = os.environ.get(name)
     if raw is None:
@@ -2037,7 +2124,10 @@ def _setting_values() -> tuple[dict[str, int], dict[str, int], dict[str, str]]:
 
 
 def _pending_restart() -> bool:
-    return bool(jobstore.settings_all().get("_restart_pending"))
+    try:
+        return bool(jobstore.settings_all().get("_restart_pending"))
+    except Exception:
+        return False
 
 
 #: How many worker threads pull from the work list.
@@ -2242,7 +2332,7 @@ def _run_job(job: dict) -> None:
             jobstore.usage_add(engine_used or job.get("engine"), pages=_pages)
 
 
-def _ocr_worker() -> None:
+def _ocr_worker(gen: int) -> None:
     """Worker loop: claim a job from the SQLite work list and run it.
 
     The backlog lives in the DB, not in this process, so any number of
@@ -2250,7 +2340,7 @@ def _ocr_worker() -> None:
     ``_work_available`` with a timeout, which also covers a signal that
     was set while a job was being processed.
     """
-    while True:
+    while scheduler.is_current(gen):
         try:
             job = jobstore.claim_next()
         except Exception as exc:
@@ -2260,14 +2350,39 @@ def _ocr_worker() -> None:
             _work_available.wait(timeout=_IDLE_POLL_SECONDS)
             _work_available.clear()
             continue
-        _run_job(job)
+        # A failure inside one document must not end the loop. Before this, an
+        # exception here killed the thread silently (daemon, no restart, no log
+        # line anyone reads), and from then on the queue was simply never
+        # drained — the job that caused it looked like a queue that "stopped".
+        try:
+            _run_job(job)
+        except Exception:
+            log.exception("worker: job %s crashed the run loop", job.get("id"))
+            if scheduler.shutdown.wait(0.25):
+                return
 
 
-# Jobs left 'running' by a crash or restart go back in the queue before
-# any worker starts.
-_requeued = jobstore.requeue_stale()
-if _requeued:
-    log.info("startup: re-queued %d job(s) abandoned by a restart", _requeued)
+def _clear_restart_flag() -> None:
+    """Clearing the restart flag is what makes "applied" mean applied.
+
+    We only get this far by having restarted. Startup work, and it used to run at
+    import — which opened the index for every importer of this module.
+    """
+    jobstore.setting_delete("_restart_pending")
+
+
+def _requeue_abandoned() -> None:
+    """Jobs left 'running' by a crash or restart go back in the queue.
+
+    Startup work, and it used to run when this module was imported — which meant
+    importing the server (any test, any tool, any `from nc_ocr_flow.webhook_server
+    import _process_file`) opened the index, and on a host where that path is not
+    writable the import itself failed. Importing a module must not touch a
+    database.
+    """
+    requeued = jobstore.requeue_stale()
+    if requeued:
+        log.info("startup: re-queued %d job(s) abandoned by a restart", requeued)
 
 
 def reconcile_orphans() -> dict:
@@ -2585,7 +2700,7 @@ def catch_up_missed_files(now: float | None = None) -> dict:
     return result
 
 
-def _catchup_on_startup() -> None:
+def _catchup_on_startup(_gen: int = 0) -> None:
     try:
         catch_up_missed_files()
     except Exception as exc:
@@ -2603,8 +2718,49 @@ _SCHEDULER_ENABLED = os.environ.get("NC_OCR_RUN_SCHEDULER", "1").strip().lower()
     "false",
     "no",
 )
+#: The quota loop is part of the scheduler: same switch, decided once here so
+#: start_scheduler can consult it long before that function is defined.
+_VISION_QUOTA_ENABLED = _SCHEDULER_ENABLED
 
-if _SCHEDULER_ENABLED:
+#: Wake an idle worker. Lives here because the server owns the queue; the
+#: scheduler owns the threads and is handed this event on stop.
+_work_available = threading.Event()
+
+
+def start_scheduler(with_reconcile: bool = True, with_catchup: bool = True) -> None:
+    """Start the background loops. Idempotent.
+
+    Threads are a lifecycle, not an import side effect — see
+    :mod:`nc_ocr_flow.scheduler` for what that cost when it was the other way
+    round. The legacy entry point still calls this at import when
+    ``NC_OCR_RUN_SCHEDULER`` is not 0, so production behaviour is unchanged.
+    """
+    loops: dict[str, Callable[[int], None]] = {
+        f"ocr-worker-{i}": _ocr_worker for i in range(_WORKERS)
+    }
+    if with_catchup:
+        # A one-shot dressed as a loop: the thread runs it once and exits. The
+        # lambda is what keeps the registry's element type honest.
+        loops["ocr-catchup-startup"] = lambda _gen: _catchup_on_startup()
+    if _VISION_QUOTA_ENABLED:
+        loops["vision-quota"] = _vision_quota_loop
+    scheduler.start(loops, before=_startup_work if with_reconcile else None)
+
+
+def _startup_work() -> None:
+    """The one-shot reconcilers, plus the flags that record a restart happened."""
+    _clear_restart_flag()
+    _requeue_abandoned()
+    _reconcile_at_startup()
+
+
+def stop_scheduler(timeout: float = 3.0) -> None:
+    """Stop the loops. See :meth:`nc_ocr_flow.scheduler.Scheduler.stop`."""
+    scheduler.stop(timeout=timeout, wake=_work_available)
+
+
+def _reconcile_at_startup() -> None:
+    """The one-shot reconcilers that used to run at import."""
     # Run the reconciler once at startup so an operator does not have to call the
     # endpoint manually after every restart. Idempotent and never raises.
     _reconcile_startup = reconcile_orphans()
@@ -2625,14 +2781,6 @@ if _SCHEDULER_ENABLED:
             _reconcile_stale_startup["checked"],
         )
 
-    for _worker_idx in range(_WORKERS):
-        threading.Thread(target=_ocr_worker, daemon=True, name=f"ocr-worker-{_worker_idx}").start()
-    log.info("started %d OCR worker(s) (NC_OCR_WORKERS)", _WORKERS)
-
-    # Catch-up runs in its own thread: it does one WebDAV PROPFIND and must never
-    # delay readiness. Workers are already up, so anything it enqueues is picked
-    # up immediately.
-    threading.Thread(target=_catchup_on_startup, daemon=True, name="ocr-catchup-startup").start()
 
 # G3: one-line announcement so an operator can tell at a glance whether
 # this build has the fingerprint-verified skip guard compiled in. The
@@ -2804,14 +2952,13 @@ def _vision_quota_once() -> None:
         log.warning("vision quota read failed: %s", exc)
 
 
-def _vision_quota_loop() -> None:
-    while True:
+def _vision_quota_loop(gen: int) -> None:
+    while scheduler.is_current(gen):
         _vision_quota_once()
         time.sleep(_VISION_QUOTA_INTERVAL)
 
 
-if _SCHEDULER_ENABLED:
-    threading.Thread(target=_vision_quota_loop, name="vision-quota", daemon=True).start()
+_VISION_QUOTA_ENABLED = _SCHEDULER_ENABLED
 
 
 def _vision_summary() -> dict:
@@ -2862,7 +3009,6 @@ except Exception as exc:
     log.warning("index migration failed: %s", exc)
 # Open the SQLite job history. ``init()`` is a no-op if the DB is
 # unreachable; every later ``record_*`` call stays silent in that case.
-jobstore.init()
 
 
 # B1 + B5 fix: per-path enqueue lock + bounded cache.
@@ -3852,3 +3998,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+if _SCHEDULER_ENABLED:
+    start_scheduler()

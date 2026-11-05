@@ -21,6 +21,14 @@ os.environ.setdefault("NC_OCR_NC_PASSWORD", "test-pass")
 # gone, the assertion blamed the value.
 os.environ.setdefault("NC_OCR_STATE_STRICT", "1")
 
+# No background threads at import, suite-wide. The server used to start its worker
+# loops when the module was imported, so they claimed jobs across test boundaries
+# (~1 failing run in 5, a different test each time) and every module that imports
+# the server inherited a running scheduler it never asked for. Production is
+# unchanged: `start_scheduler()` still runs for real at the bottom of the module
+# when this variable is unset. A test that needs live workers asks for `workers`.
+os.environ.setdefault("NC_OCR_RUN_SCHEDULER", "0")
+
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -66,8 +74,10 @@ def _own_state_dir(tmp_path_factory):
         directory = tmp_path_factory.mktemp("state")
     previous = os.environ.get("NC_OCR_STATE_DIR")
     os.environ["NC_OCR_STATE_DIR"] = str(directory)
-    jobstore._reset_for_tests()
-    jobstore.init()
+    # repin, not env-flip: db_path() resolves once, so only an explicit move
+    # keeps the cached path and the env in agreement. This fixture is the one
+    # place in the suite allowed to move the store.
+    jobstore.repin(directory / "jobs.db")
     assert jobstore._ready(), f"jobstore did not initialise at {jobstore.db_path()}"
     yield directory
     if previous is None:
@@ -77,3 +87,13 @@ def _own_state_dir(tmp_path_factory):
     jobstore._reset_for_tests()
     if str(directory).startswith("/dev/shm"):
         shutil.rmtree(directory, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _no_stray_workers():
+    """Nothing is running between tests; the `workers` fixture starts what a test needs."""
+    from nc_ocr_flow import webhook_server as ws
+
+    ws.stop_scheduler()
+    yield
+    ws.stop_scheduler()

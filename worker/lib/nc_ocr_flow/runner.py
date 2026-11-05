@@ -82,7 +82,7 @@ def run_once(
 
     log.info("claimed job %s for %s (attempt %s)", job.id, job.path, job.attempts)
     try:
-        outcome = process(job.path, job.file_id or 0)
+        outcome = process(job.path, job.file_id or 0, job_id=job.id)
     except Exception as exc:
         log.warning("job %s failed: %s", job.id, exc)
         client.failure(job.id, error=f"{type(exc).__name__}: {exc}", reason="worker_error")
@@ -119,6 +119,17 @@ def main(argv: list[str] | None = None) -> int:
         worker_name=os.environ.get("NC_OCR_WORKER_NAME", "worker"),
     )
 
+    # Probe surface. Off unless NC_OCR_HEALTH_PORT is set, so native deployments
+    # keep their current behaviour. Started before the checks below: a container
+    # that is starting up must answer /heartbeat, otherwise AppAPI and Docker
+    # both read it as dead.
+    from .health import health_port_from_env, start_health_server
+
+    health_port = health_port_from_env()
+    if health_port is not None:
+        start_health_server(health_port, worker_name=os.environ.get("NC_OCR_WORKER_NAME", "worker"))
+        log.info("health probe on :%d (/heartbeat)", health_port)
+
     # Imported late so `--help`-ish paths and the unit tests do not need the
     # whole OCR stack (PyMuPDF, ONNX runtime, cloud SDKs) to be installed.
     #
@@ -127,15 +138,27 @@ def main(argv: list[str] | None = None) -> int:
     # this loop — two writers on one instance. This process owns the queue; the
     # old server does not run here.
     os.environ.setdefault("NC_OCR_RUN_SCHEDULER", "0")
-    from .webhook_server import DavCredentialsMissing, _process_file, verify_dav_credentials
+    from .webhook_server import (
+        TRANSPORT,
+        DavCredentialsMissing,
+        _process_file,
+        verify_dav_credentials,
+    )
 
-    # Before claiming anything: a worker with no WebDAV identity would claim a
+    # Before claiming anything: a worker with no way to reach files would claim a
     # job, fail to fetch it, and blame the document. Refuse to start instead.
-    try:
-        verify_dav_credentials()
-    except DavCredentialsMissing as exc:
-        log.error("%s", exc)
-        return 2
+    #
+    # On NC_OCR_TRANSPORT=api there is nothing to verify: the app reads and writes
+    # the file as its owner, and the worker only presents the shared secret — no
+    # Nextcloud identity exists to be missing.
+    if TRANSPORT == "api":
+        log.info("transport: api (no Nextcloud credentials needed)")
+    else:
+        try:
+            verify_dav_credentials()
+        except DavCredentialsMissing as exc:
+            log.error("%s", exc)
+            return 2
 
     log.info("worker started: %s, idle %ss", base_url, idle)
     while True:
