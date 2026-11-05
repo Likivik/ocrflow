@@ -122,15 +122,24 @@ def start_health_server(
 
 
 def health_port_from_env(env: dict[str, str] | None = None) -> int | None:
-    """``NC_OCR_HEALTH_PORT`` or nothing — unset means "no HTTP server"."""
-    env = env if env is not None else dict(os.environ)
-    raw = (env.get("NC_OCR_HEALTH_PORT") or "").strip()
-    if not raw:
-        return None
-    try:
-        port = int(raw)
-    except ValueError:
-        return None
-    if not 0 < port < 65536:
-        return None
-    return port
+    """The port to listen on, or ``None`` to serve no probe at all.
+
+    ``NC_OCR_HEALTH_PORT`` is ours: native deployments set it when they want a
+    probe. ``APP_PORT`` is AppAPI's, and it is authoritative in ExApp mode —
+    AppAPI picks the port and passes it in, so reading only our variable would
+    make the container unreachable to the thing that deployed it.
+    """
+    import os as _os
+
+    e = _os.environ if env is None else env
+    for name in ("NC_OCR_HEALTH_PORT", "APP_PORT"):
+        raw = (e.get(name) or "").strip()
+        if not raw:
+            continue
+        try:
+            port = int(raw)
+        except ValueError:
+            continue
+        if 0 < port < 65536:
+            return port
+    return None
