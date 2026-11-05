@@ -4,9 +4,11 @@
     "type": "nextcloud-app",
     "license": "AGPL-3.0-or-later",
     "require-dev": {
-        "nextcloud/ocp": "^34.0",
+        "doctrine/dbal": "^3.9",
+        "nextcloud/ocp": "^34",
+        "phpstan/phpstan": "^2.0",
         "phpunit/phpunit": "^11.5",
-        "doctrine/dbal": "^3.9"
+        "symfony/console": "^6.0"
     },
     "autoload": {
         "psr-4": {

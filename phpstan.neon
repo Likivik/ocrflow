@@ -1,0 +1,16 @@
+# Static analysis for the PHP side.
+#
+# Nextcloud 34 no longer ships `occ app:check-code` — the app checker was
+# removed from core — so the check that actually protects the code is a real
+# analyser against the official OCP stubs. Level 1 catches undefined classes,
+# undefined methods and unknown arguments; those are the mistakes a human
+# reviewer skims past and a unit test never notices.
+parameters:
+	level: 1
+	paths:
+		- lib
+	bootstrapFiles:
+		- vendor/autoload.php
+	scanDirectories:
+		- vendor/nextcloud/ocp
+	treatPhpDocTypesAsCertain: false
