@@ -8,6 +8,7 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Listener;
 
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\Candidate;
 use OCP\EventDispatcher\Event;
 use OCP\EventDispatcher\IEventListener;
@@ -30,6 +31,7 @@ class FileListener implements IEventListener
 	public function __construct(
 		private Queue $queue,
 		private Candidate $candidate,
+		private AccessGate $access,
 		private LoggerInterface $logger,
 	) {
 	}
@@ -48,6 +50,13 @@ class FileListener implements IEventListener
 			return;
 		}
 		if (!$this->candidate->isProcessable($node->getName())) {
+			return;
+		}
+		// Group list and per-user opt-out decide whose uploads are processed at
+		// all. Checked here rather than in the worker: the worker holds no
+		// session, so it could only guess whose file this is.
+		$owner = $node->getOwner();
+		if ($owner !== null && !$this->access->canProcess($owner)) {
 			return;
 		}
 

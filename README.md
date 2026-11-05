@@ -41,6 +41,36 @@ ExApp gives you a container that AppAPI can start and probe but whose queue call
 it will reject. Native and manual container deployments are unaffected — they use
 the worker secret.
 
+## Engines, and what leaves the server
+
+Three engines, selected by `NC_OCR_ENGINE` (or per job by the API):
+
+| Engine | Where the page image goes |
+| --- | --- |
+| `tesseract` | nowhere — local binary, offline, no network |
+| `google` | Google Cloud Vision (`google.cloud.vision`), per page |
+| `minimax` | `https://api.minimax.io/v1` (override with `NC_OCR_MINIMAX_URL`) |
+
+**The default is `google`.** A fresh install that is never configured sends page
+images of the user's documents to a third party. That is documented here because
+it is easy to miss, and it is the reason the container and the deployment docs
+set `NC_OCR_ENGINE=tesseract`.
+
+For an instance that must not talk to third parties, set:
+
+```bash
+occ config:app:set ocrflow engine --value=tesseract
+```
+
+or pass `NC_OCR_ENGINE=tesseract` to the worker. Nothing else in the app phones
+home: the queue, the settings and the file channel are all instance-local, and the
+worker's only outbound call on the `api` transport is to this Nextcloud.
+
+Scope of what the app can touch: a job names one file, the app opens it as the
+owner through `IRootFolder::getUserFolder()`, so Nextcloud's own permissions
+apply. The worker cannot ask for a different path — it receives bytes for the job
+it claimed and returns bytes for that same job.
+
 ## Layout
 
 ```
