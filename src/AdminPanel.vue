@@ -17,6 +17,7 @@
 			v-model="engine"
 			class="ocrflow-admin__field"
 			:options="engineOptions"
+			:reduce="(option) => option.value"
 			:disabled="busy"
 			:clearable="false"
 			:label="t('Engine')" />
@@ -36,6 +37,7 @@
 			class="ocrflow-admin__field"
 			multiple
 			:options="groupOptions"
+			:reduce="(option) => option.value"
 			:disabled="busy"
 			:label="t('Groups')"
 			:clearable="true" />

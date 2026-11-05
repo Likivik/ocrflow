@@ -57,7 +57,7 @@ class SettingsControllerTest extends TestCase
         $session->method('getUser')->willReturn($user);
 
         $groupManager = $this->createMock(IGroupManager::class);
-        $groupManager->method('isInGroup')->willReturn($isAdmin);
+        $groupManager->method('isAdmin')->willReturn($isAdmin);
         $groupManager->method('search')->willReturn(array_map(function (string $gid) {
             $group = $this->createMock(IGroup::class);
             $group->method('getGID')->willReturn($gid);
@@ -149,7 +149,7 @@ class SettingsControllerTest extends TestCase
         $session = $this->createMock(IUserSession::class);
         $session->method('getUser')->willReturn($this->user());
         $groupManager = $this->createMock(IGroupManager::class);
-        $groupManager->method('isInGroup')->willReturn(true);
+        $groupManager->method('isAdmin')->willReturn(true);
 
         $controller = new SettingsController(
             'ocrflow',
@@ -180,7 +180,7 @@ class SettingsControllerTest extends TestCase
         $session = $this->createMock(IUserSession::class);
         $session->method('getUser')->willReturn($this->user());
         $groupManager = $this->createMock(IGroupManager::class);
-        $groupManager->method('isInGroup')->willReturn(true);
+        $groupManager->method('isAdmin')->willReturn(true);
 
         $controller = new SettingsController(
             'ocrflow',

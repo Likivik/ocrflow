@@ -202,4 +202,83 @@ class QueueControllerTest extends TestCase
             FileExchange::nextFreeName('notes', static fn (string $n): bool => $n === 'notes'),
         );
     }
+
+    /**
+     * The job is closed by the worker that holds the claim, and only that one.
+     *
+     * `finish()` takes the caller's name, so a worker whose stale claim was
+     * recovered and re-claimed elsewhere cannot write its late result over the
+     * new claimant's row. The name comes from the same header `claim()` uses;
+     * if these two disagreed, every result would be silently discarded.
+     */
+    public function testResultPassesTheClaimingWorkerNameToFinish(): void
+    {
+        $queue = $this->createMock(Queue::class);
+        $queue->expects($this->once())
+            ->method('finish')
+            ->with(7, $this->isType('array'), 'worker-7')
+            ->willReturn(true);
+
+        $request = $this->createMock(IRequest::class);
+        $request->method('getHeader')->willReturnCallback(
+            static fn (string $name): string => match ($name) {
+                Application::WORKER_SECRET_HEADER => 'the-secret',
+                'X-OcrFlow-Worker' => 'worker-7',
+                default => '',
+            },
+        );
+        $request->method('getParam')->willReturnCallback(
+            static fn (string $key, mixed $default = null): mixed => $key === 'status' ? 'done' : $default,
+        );
+
+        $config = $this->createMock(IConfig::class);
+        $config->method('getAppValue')
+            ->with(Application::APP_ID, 'worker_secret', '')
+            ->willReturn('the-secret');
+
+        $controller = new QueueController(
+            Application::APP_ID,
+            $request,
+            $queue,
+            $config,
+            $this->createMock(LoggerInterface::class),
+            $this->createMock(FileExchange::class),
+        );
+
+        $data = $controller->result(7)->getData();
+        $this->assertTrue($data['applied'], 'a claim holder\'s result must be applied');
+    }
+
+    public function testAWorkerThatLostTheClaimIsToldTheResultWasDiscarded(): void
+    {
+        $queue = $this->createMock(Queue::class);
+        $queue->method('finish')->willReturn(false);
+
+        $request = $this->createMock(IRequest::class);
+        $request->method('getHeader')->willReturnCallback(
+            static fn (string $name): string => $name === Application::WORKER_SECRET_HEADER ? 'the-secret' : '',
+        );
+        $request->method('getParam')->willReturnCallback(
+            static fn (string $key, mixed $default = null): mixed => $key === 'status' ? 'done' : $default,
+        );
+
+        $config = $this->createMock(IConfig::class);
+        $config->method('getAppValue')
+            ->with(Application::APP_ID, 'worker_secret', '')
+            ->willReturn('the-secret');
+
+        $controller = new QueueController(
+            Application::APP_ID,
+            $request,
+            $queue,
+            $config,
+            $this->createMock(LoggerInterface::class),
+            $this->createMock(FileExchange::class),
+        );
+
+        // Not an error status: the job simply belongs to someone else now.
+        $response = $controller->result(7);
+        $this->assertSame(Http::STATUS_OK, $response->getStatus());
+        $this->assertFalse($response->getData()['applied']);
+    }
 }

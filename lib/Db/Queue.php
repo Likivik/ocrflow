@@ -213,11 +213,11 @@ class Queue extends QBMapper
 	 *              chars?: ?int, stamp_version?: ?string, error?: ?string} $result
 	 * @throws Exception
 	 */
-	public function finish(int $id, array $result): void
+	public function finish(int $id, array $result, string $worker): bool
 	{
 		$job = $this->getById($id);
 		if ($job === null) {
-			return;
+			return false;
 		}
 
 		$status = $result['status'];
@@ -230,10 +230,21 @@ class Queue extends QBMapper
 			->set('chars', $qb->createNamedParameter($result['chars'] ?? null, IQueryBuilder::PARAM_INT))
 			->set('error', $qb->createNamedParameter($result['error'] ?? null))
 			->set('finished_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
-			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)));
-		$qb->executeStatement();
+			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
+			// Only the worker holding the claim may finish it. A stale claim
+			// older than the recovery window is requeued and can be re-claimed
+			// by another worker while the first is still processing (a very
+			// large PDF); the late worker's result must then be discarded,
+			// not written over the new claimant's row.
+			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
+			->andWhere($qb->expr()->eq('claimed_by', $qb->createNamedParameter($worker)));
+		$updated = $qb->executeStatement() === 1;
 
-		$this->recordFile($job, $status, $result);
+		if ($updated) {
+			$this->recordFile($job, $status, $result);
+		}
+
+		return $updated;
 	}
 
 	/**

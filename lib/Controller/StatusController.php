@@ -18,6 +18,7 @@ use OCP\AppFramework\OCS\OCSForbiddenException;
 use OCP\AppFramework\OCSController;
 use OCP\BackgroundJob\IJobList;
 use OCP\IRequest;
+use OCP\IUser;
 use OCP\IUserSession;
 
 /**
@@ -56,8 +57,14 @@ class StatusController extends OCSController
 	#[NoAdminRequired]
 	public function job(int $id): DataResponse
 	{
+		$user = $this->userSession->getUser();
+		if ($user === null) {
+			throw new OCSForbiddenException('no session');
+		}
 		$job = $this->queue->getById($id);
-		if ($job === null) {
+		// "Does not exist" and "not yours" must be the same answer: a guessed
+		// id must not tell an attacker which is which.
+		if ($job === null || !$this->ownsPath($user, $job->getPath())) {
 			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
 		}
 		return new DataResponse($job->toApi());
@@ -99,6 +106,19 @@ class StatusController extends OCSController
 	}
 
 	/**
+	 * Whether this path belongs to this user.
+	 *
+	 * Every queued path is `<uid>/files/<rel>` — the shape
+	 * QueueController::splitPath() defines. Job metadata (its path, its error
+	 * text, its page count) belongs to the file's owner.
+	 */
+	private function ownsPath(IUser $user, string $path): bool
+	{
+		$parts = QueueController::splitPath($path);
+		return $parts !== null && $parts[0] === $user->getUID();
+	}
+
+	/**
 	 * Per-file answer for the sidebar. `status` is this app's opinion of the
 	 * file, not the file's own metadata — the sidebar must not have to download
 	 * a 40 MB scan to render a label.
@@ -109,6 +129,12 @@ class StatusController extends OCSController
 		$path = (string) $this->request->getParam('path', '');
 		if ($path === '') {
 			return new DataResponse(['message' => 'path is required'], Http::STATUS_BAD_REQUEST);
+		}
+		$user = $this->userSession->getUser();
+		// Not yours → the same answer as "never queued": probing foreign paths
+		// must learn nothing about other users' documents.
+		if ($user === null || !$this->ownsPath($user, $path)) {
+			return new DataResponse(['path' => $path, 'status' => 'unknown']);
 		}
 		$job = $this->queue->findByPath($path);
 		if ($job === null) {
