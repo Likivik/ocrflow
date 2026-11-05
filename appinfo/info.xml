@@ -39,6 +39,8 @@ Behaviour worth knowing:
 	<settings>
 		<personal>OCA\OcrFlow\Settings\Personal</personal>
 		<personal-section>OCA\OcrFlow\Settings\PersonalSection</personal-section>
+		<admin>OCA\OcrFlow\Settings\Admin</admin>
+		<admin-section>OCA\OcrFlow\Settings\AdminSection</admin-section>
 	</settings>
 	<commands>
 		<command>OCA\OcrFlow\Command\WorkerSecret</command>
