@@ -9,6 +9,7 @@ namespace OCA\OcrFlow\BackgroundJob;
 
 use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\Candidate;
+use OCA\OcrFlow\Service\EnginePolicy;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\QueuedJob;
 use OCP\Files\Folder;
@@ -32,6 +33,7 @@ class ScanJob extends QueuedJob
 		private IRootFolder $rootFolder,
 		private Queue $queue,
 		private Candidate $candidate,
+		private EnginePolicy $engine,
 		private LoggerInterface $logger,
 	) {
 		parent::__construct($time);
@@ -46,6 +48,14 @@ class ScanJob extends QueuedJob
 		$path = (string) ($argument['path'] ?? '/');
 		if ($user === '') {
 			$this->logger->warning('ocrflow: ScanJob without a user, nothing to do');
+			return;
+		}
+
+		// Walking 20 000 files to enqueue nothing is the wrong way to find out
+		// that no engine has been chosen.
+		$engine = $this->engine->engineForJob();
+		if ($engine === null) {
+			$this->logger->info('ocrflow: scan skipped: no OCR engine configured (occ ocrflow:engine)');
 			return;
 		}
 
@@ -72,7 +82,7 @@ class ScanJob extends QueuedJob
 				if (!$this->candidate->isProcessable($current->getName())) {
 					continue;
 				}
-				if ($this->queue->enqueue($current->getPath(), $current->getId(), $current->getSize(), $current->getEtag()) !== null) {
+				if ($this->queue->enqueue($current->getPath(), $current->getId(), $current->getSize(), $current->getEtag(), $engine) !== null) {
 					$queued++;
 				}
 			}

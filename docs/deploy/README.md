@@ -55,6 +55,16 @@ curl -s localhost:8080/heartbeat
 `status` is `degraded` when the worker cannot use its index — that is the case
 worth alerting on. `jobs_depth` is claimable plus running.
 
+Set the engine once, in Nextcloud — the app stamps it on every job it queues, so
+the worker needs no engine variable of its own here:
+
+```bash
+occ ocrflow:engine tesseract
+```
+
+Until that is set, nothing is queued: the app reports `engine: none` and the
+sidebar says so.
+
 In this shape the worker needs **no Nextcloud identity**: the app opens the file
 as its owner and streams it back over `GET /ocs/v2.php/apps/ocrflow/api/v1/queue/{id}/file`,
 and the result returns the same way.

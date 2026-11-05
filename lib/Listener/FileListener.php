@@ -10,6 +10,7 @@ namespace OCA\OcrFlow\Listener;
 use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\Candidate;
+use OCA\OcrFlow\Service\EnginePolicy;
 use OCP\EventDispatcher\Event;
 use OCP\EventDispatcher\IEventListener;
 use OCP\Files\Events\Node\NodeCreatedEvent;
@@ -32,6 +33,7 @@ class FileListener implements IEventListener
 		private Queue $queue,
 		private Candidate $candidate,
 		private AccessGate $access,
+		private EnginePolicy $engine,
 		private LoggerInterface $logger,
 	) {
 	}
@@ -59,6 +61,12 @@ class FileListener implements IEventListener
 		if ($owner !== null && !$this->access->canProcess($owner)) {
 			return;
 		}
+		// No engine chosen means no OCR. Queueing anyway fills the queue with
+		// jobs nobody can run, and hides "not configured" behind a backlog.
+		$engine = $this->engine->engineForJob();
+		if ($engine === null) {
+			return;
+		}
 
 		try {
 			$this->queue->enqueue(
@@ -66,6 +74,7 @@ class FileListener implements IEventListener
 				$node->getId(),
 				$node->getSize(),
 				$node->getEtag(),
+				$engine,
 			);
 		} catch (\Throwable $e) {
 			// Never break the upload. The reconciler will find the file again

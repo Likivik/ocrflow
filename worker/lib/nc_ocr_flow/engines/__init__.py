@@ -10,7 +10,8 @@ Three engines, one process_pdf signature each:
 Engine selection:
 
   - Explicit ``process_pdf(pdf, engine='google')``
-  - Default resolves ``NC_OCR_ENGINE`` env var (defaults to ``"google"``)
+  - Otherwise ``NC_OCR_ENGINE``; **there is no default engine** — an
+              instance that has not chosen raises ``EngineNotConfigured``
   - Anything else → ``ValueError("invalid engine: ...")``
 
 Each engine module exposes:
@@ -38,8 +39,15 @@ MINIMAX = "minimax"
 
 VALID_ENGINES: tuple[str, ...] = (GOOGLE, TESSERACT, MINIMAX)
 
-# Default when env NC_OCR_ENGINE is unset or empty.
-DEFAULT_ENGINE = GOOGLE
+# Deliberately empty: the engine decides whether page images leave the server,
+# so an instance must choose one (``occ ocrflow:engine tesseract``). It used to
+# default to ``google``, which meant a fresh install silently uploaded scans.
+NONE = "none"
+DEFAULT_ENGINE = ""
+
+
+class EngineNotConfigured(RuntimeError):
+    """No engine has been chosen for this instance."""
 
 
 def resolve_engine(name: str | None = None) -> str:
@@ -54,6 +62,11 @@ def resolve_engine(name: str | None = None) -> str:
     """
     raw = name if name is not None else os.environ.get("NC_OCR_ENGINE", "")
     chosen = (raw or DEFAULT_ENGINE).strip().lower()
+    if chosen in ("", NONE):
+        raise EngineNotConfigured(
+            "no OCR engine configured: set NC_OCR_ENGINE to one of "
+            f"{', '.join(VALID_ENGINES)} (or run `occ ocrflow:engine <name>`)"
+        )
     if chosen not in VALID_ENGINES:
         raise ValueError(f"invalid engine: {raw!r} (expected one of {VALID_ENGINES})")
     return chosen

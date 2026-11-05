@@ -51,18 +51,20 @@ Three engines, selected by `NC_OCR_ENGINE` (or per job by the API):
 | `google` | Google Cloud Vision (`google.cloud.vision`), per page |
 | `minimax` | `https://api.minimax.io/v1` (override with `NC_OCR_MINIMAX_URL`) |
 
-**The default is `google`.** A fresh install that is never configured sends page
-images of the user's documents to a third party. That is documented here because
-it is easy to miss, and it is the reason the container and the deployment docs
-set `NC_OCR_ENGINE=tesseract`.
+**There is no default engine.** An instance that has not chosen one queues
+nothing: uploads are ignored, folder scans are skipped with a log line, and the
+sidebar reports `engine: none`. The engine decides whether page images of users'
+documents leave the server, so it has to be a decision someone made — it used to
+default to `google`, which meant a fresh install silently uploaded scans.
 
-For an instance that must not talk to third parties, set:
+Choose one:
 
 ```bash
-occ config:app:set ocrflow engine --value=tesseract
-```
-
-or pass `NC_OCR_ENGINE=tesseract` to the worker. Nothing else in the app phones
+occ ocrflow:engine tesseract    # offline, nothing leaves the server
+occ ocrflow:engine google       # Cloud Vision; prints the consequence before it applies
+occ ocrflow:engine minimax
+occ ocrflow:engine              # what is configured now
+``` Nothing else in the app phones
 home: the queue, the settings and the file channel are all instance-local, and the
 worker's only outbound call on the `api` transport is to this Nextcloud.
 

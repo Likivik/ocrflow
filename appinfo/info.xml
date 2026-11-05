@@ -42,6 +42,7 @@ Behaviour worth knowing:
 	</settings>
 	<commands>
 		<command>OCA\OcrFlow\Command\WorkerSecret</command>
+		<command>OCA\OcrFlow\Command\Engine</command>
 	</commands>
 	<background-jobs>
 		<job>OCA\OcrFlow\BackgroundJob\ReconcileJob</job>
