@@ -243,6 +243,11 @@ def test_rescan_clears_processed_guard(client):
     assert job is not None, "rescan enqueued nothing: the processed guard dropped it"
     assert job["path"] == "/likivik/files/a.pdf"
 
+    # The fix under test is `node_forget`, and "a row exists" does not prove it:
+    # _enqueue never consults the processed guard, so a row appears either way.
+    # Without this line the test stays green when node_forget is disabled.
+    assert not ws._is_recently_processed(42), "rescan must clear the processed guard"
+
 
 # --- /scan-all ---------------------------------------------------------------
 

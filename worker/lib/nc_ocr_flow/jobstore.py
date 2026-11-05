@@ -1050,6 +1050,10 @@ def stats() -> dict[str, Any]:
         ``_maybe_schedule_retry`` bumps ``attempts`` ONLY on the
         queued retry row, never on the failed row that spawned the
         retry, so this count never double-counts one retry as two).
+      * ``claimable``: rows that can be claimed *now* — ``status='queued'``
+      and ``next_run_at`` in the past. A retry inside its backoff window is
+      ``queued`` but not ``claimable``, and conflating the two is how a poller
+      waits forever on work that is not due.
       * ``retries_queued``: the subset of ``retries_total`` whose
         ``status='queued'`` (i.e. currently waiting on a backoff
         window — the work the operator is most likely to be
@@ -1081,19 +1085,20 @@ def stats() -> dict[str, Any]:
                 out["total"] += r["n"]
             out["retries_total"] = r_retry_total["n"] if r_retry_total is not None else 0
             out["retries_queued"] = r_retry_queued["n"] if r_retry_queued is not None else 0
+            # Claimable, as distinct from "queued": a retry waiting out its
+            # backoff window is queued but cannot be claimed. A poller that
+            # treats the two as one waits forever for work that is, by design,
+            # not due yet — and a healthy queue then looks like a stuck one.
+            # `claim_next` uses exactly this predicate.
+            r_claimable = conn.execute(
+                "SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued'"
+                " AND COALESCE(next_run_at, 0) <= ?",
+                (time.time(),),
+            ).fetchone()
+            out["claimable"] = int(r_claimable["n"]) if r_claimable else 0
         return out
     except Exception as exc:
         _fail("stats", exc)
-        # Claimable, as distinct from "queued": a retry waiting out its
-        # backoff window is queued but cannot be claimed, and a poller that
-        # treats the two as one waits forever for work that is, by design, not
-        # due yet. `claim_next` uses exactly this predicate.
-        r_claimable = conn.execute(
-            "SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued'"
-            " AND COALESCE(next_run_at, 0) <= ?",
-            (time.time(),),
-        ).fetchone()
-        out["claimable"] = int(r_claimable["n"]) if r_claimable else 0
     return out
 
 
