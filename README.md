@@ -16,7 +16,7 @@ database. The worker is stateless: it claims a job, does it, reports the result.
 Nothing durable lives in it, so it can be killed, restarted or replaced at any
 moment without losing work.
 
-## Why not a single ExApp
+## Why the app is not an ExApp
 
 Considered and rejected. An ExApp can do the whole job — its Events Listener API
 covers uploads (`node_event` → `NodeCreatedEvent`/`NodeWrittenEvent`) and its
@@ -25,8 +25,21 @@ invisible to `occ maintenance:backup`, gone with the container, and after a lost
 volume every already-processed file looks new. In the database the same rows are
 part of the instance, and `file_id` survives a rename or a move.
 
-The worker is therefore **not** an ExApp and does not speak AppAPI: it is a
-plain HTTP client of this app's own OCS endpoints.
+The **worker**, by contrast, is container-shaped on purpose: it holds no durable
+state, it already answers the AppAPI lifecycle endpoints (`/init`, `/heartbeat`,
+`/enabled`), and it takes its port and secret from the environment
+(`APP_PORT`, `APP_SECRET`) as well as from ours (`NC_OCR_HEALTH_PORT`,
+`NC_OCR_WORKER_SECRET`). So the same image runs under systemd or as a container,
+and AppAPI can deploy it.
+
+What is **not** done yet: AppAPI's own request authentication. An ExApp reaches
+Nextcloud with `AUTHORIZATION-APP-API: base64(userid:secret)` and AppAPI validates
+that header; these endpoints instead require the app's own worker secret
+(`X-OcrFlow-Secret`, `hash_equals`, fails closed when unset). Until the controller
+accepts an AppAPI-authenticated caller as the worker, registering this image as an
+ExApp gives you a container that AppAPI can start and probe but whose queue calls
+it will reject. Native and manual container deployments are unaffected — they use
+the worker secret.
 
 ## Layout
 

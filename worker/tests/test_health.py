@@ -107,3 +107,11 @@ def test_default_probe_reads_the_real_index() -> None:
 
     assert body["status"] == "ok", body
     assert isinstance(body["jobs_depth"], int)
+
+
+def test_appapi_port_is_used_when_ours_is_absent() -> None:
+    """AppAPI picks the port and passes APP_PORT; ignoring it makes the container
+    unreachable to the only thing that deployed it."""
+    assert health_port_from_env({"APP_PORT": "8123"}) == 8123
+    # ours wins when both exist: a native operator who set it meant it
+    assert health_port_from_env({"NC_OCR_HEALTH_PORT": "8080", "APP_PORT": "8123"}) == 8080

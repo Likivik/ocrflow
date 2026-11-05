@@ -224,3 +224,13 @@ def test_secret_falls_back_to_the_environment(tmp_path: Path) -> None:
 def test_an_empty_secret_is_refused_at_construction() -> None:
     with pytest.raises(ValueError, match="empty"):
         QueueClient(BASE, "")
+
+
+def test_appapi_secret_is_accepted_as_the_worker_secret():
+    """In ExApp mode AppAPI generates APP_SECRET and passes it in; a worker that
+    read only NC_OCR_WORKER_SECRET would start without credentials."""
+    from nc_ocr_flow.runner import read_secret
+
+    assert read_secret({"APP_SECRET": "from-appapi"}) == "from-appapi"
+    assert read_secret({"NC_OCR_WORKER_SECRET": "explicit", "APP_SECRET": "x"}) == "explicit"
+    assert read_secret({}) == ""
