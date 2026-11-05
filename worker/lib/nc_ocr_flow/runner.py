@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import sys
 import time
 from collections.abc import Callable
@@ -92,6 +93,69 @@ def run_once(
     return True
 
 
+def _default_stop():
+    """The scheduler stop, resolved late so importing runner stays cheap.
+
+    Resolved through a function rather than a module-level import: runner is
+    imported by tests that never load the OCR stack, and an import cycle at call
+    time is the price of keeping start-up fast. The identity of this callable is
+    asserted in tests, so the wiring cannot drift silently.
+    """
+    from .webhook_server import stop_scheduler
+
+    return stop_scheduler
+
+
+def _default_requeue():
+    """Hand back jobs this process claimed. Late import, same reason."""
+    from . import jobstore
+
+    return jobstore.requeue_stale
+
+
+def _graceful_shutdown(signum: int, *, stop=None, requeue=None) -> None:
+    """Stop the loops and hand back the job this process was holding.
+
+    Without this a SIGTERM killed the process mid-job: the row stayed 'running'
+    until the *next* start requeued it, so an expensive cloud call could be made
+    and billed twice. Bounded by design — a shutdown that waits on a slow network
+    call is how a container gets killed anyway.
+
+    Collaborators are parameters so the ordering and the failure isolation can be
+    tested without a live scheduler: a test that has to patch module globals
+    behind a running thread pool is testing the patch, not the shutdown.
+    """
+    log.info("signal %s: stopping the scheduler", signum)
+    try:
+        (stop or _default_stop())()
+    except Exception:
+        log.exception("shutdown: stop_scheduler failed")
+    try:
+        requeued = (requeue or _default_requeue())()
+        if requeued:
+            log.info("shutdown: requeued %d in-flight job(s)", requeued)
+    except Exception:
+        log.exception("shutdown: requeue failed")
+
+
+def _install_signal_handlers() -> None:
+    """SIGTERM/SIGINT -> :func:`_graceful_shutdown`, then exit 0.
+
+    Installing handlers is only legal in the main thread, which is where this
+    process runs; the guard keeps library use (tests, imports) quiet.
+    """
+
+    def _handler(signum: int, _frame) -> None:
+        _graceful_shutdown(signum)
+        raise SystemExit(0)
+
+    try:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, _handler)
+    except ValueError:  # not the main thread
+        log.debug("signal handlers not installed (not the main thread)")
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=os.environ.get("NC_OCR_LOG_LEVEL", "INFO").upper(),
@@ -129,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     if health_port is not None:
         start_health_server(health_port, worker_name=os.environ.get("NC_OCR_WORKER_NAME", "worker"))
         log.info("health probe on :%d (/heartbeat)", health_port)
+
+    _install_signal_handlers()
 
     # Imported late so `--help`-ish paths and the unit tests do not need the
     # whole OCR stack (PyMuPDF, ONNX runtime, cloud SDKs) to be installed.

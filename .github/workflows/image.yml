@@ -113,7 +113,24 @@ jobs:
             fi
             if docker exec ocrflow-ci python -c \
               "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/heartbeat', timeout=2)"; then
-              echo "heartbeat ok"; docker logs ocrflow-ci | tail -5; exit 0
+              # Answering once is not the claim. The health server starts BEFORE
+              # the start-up gates, so a worker that then exits 2 still answered
+              # /heartbeat first — this smoke passed on a broken image for that
+              # reason. Give the gates time to run, then require the process to
+              # be alive AND the log to say which transport it took.
+              sleep 3
+              if [ "$(docker inspect -f '{{.State.Running}}' ocrflow-ci)" != "true" ]; then
+                echo "heartbeat answered, then the worker exited:"; docker logs ocrflow-ci; exit 1
+              fi
+              # `docker logs` forwards the container's stderr to *our* stderr, and
+              # Python logging writes there — piping it into tee captured an empty
+              # file, so the grep below always failed.
+              docker logs ocrflow-ci >/tmp/ocrflow-ci.log 2>&1
+              grep -q "transport: api (no Nextcloud credentials needed)" /tmp/ocrflow-ci.log || {
+                echo "the worker did not take the credential-free transport"; exit 1; }
+              if grep -qi "no WebDAV credentials" /tmp/ocrflow-ci.log; then
+                echo "the worker demanded a Nextcloud identity"; exit 1; fi
+              echo "heartbeat ok, worker alive, transport=api"; exit 0
             fi
             sleep 2
           done

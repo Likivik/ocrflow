@@ -1,10 +1,13 @@
 """The worker's HTTP surface: just enough for probes and AppAPI.
 
-Nothing here touches the queue. AppAPI requires an ExApp to answer a
-Nextcloud -> ExApp connection check (it records ``last_check_time``), and the
-lifecycle endpoints are ``/init`` and ``/enabled`` alongside ``/heartbeat``.
-The same server gives native deployments a health check that systemd,
-Docker, or a monitoring probe can use.
+AppAPI requires an ExApp to answer a Nextcloud -> ExApp connection check (it
+records ``last_check_time``), and the lifecycle endpoints are ``/init`` and
+``/enabled`` alongside ``/heartbeat``. The same server gives native deployments a
+health check that systemd, Docker, or a monitoring probe can use.
+
+``/heartbeat`` reads the store. A probe that only proves the process is alive is
+not worth polling: this one reported ``ok`` while the index was unwritable, so a
+wedged worker and a healthy worker looked identical to AppAPI and to a human.
 
 Deliberately dependency-light: FastAPI is already a worker dependency, and the
 module is importable without PyMuPDF/ONNX so tests stay fast.
@@ -21,7 +24,28 @@ from fastapi import FastAPI
 _STARTED = time.monotonic()
 
 
-def create_app(worker_name: str | None = None, version: str | None = None) -> FastAPI:
+def _store_state(probe=None) -> dict[str, object]:
+    """Ask the store whether it is usable. Never raises: a probe reports."""
+    try:
+        state = (
+            probe()
+            if probe is not None
+            else __import__("nc_ocr_flow.jobstore", fromlist=["health"]).health()
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"ready": False, "jobs_depth": None, "error": f"{type(exc).__name__}: {exc}"}
+    return {
+        "ready": bool(state.get("ready")),
+        "jobs_depth": state.get("jobs_depth"),
+        "error": state.get("error"),
+    }
+
+
+def create_app(
+    worker_name: str | None = None,
+    version: str | None = None,
+    probe=None,
+) -> FastAPI:
     """Build the probe app. Pure function: no side effects, easy to test."""
     name = worker_name or os.environ.get("NC_OCR_WORKER_NAME", "worker")
     ver = version or os.environ.get("NC_OCR_VERSION", "dev")
@@ -35,12 +59,21 @@ def create_app(worker_name: str | None = None, version: str | None = None) -> Fa
 
     @app.get("/heartbeat")
     def heartbeat() -> dict[str, object]:
-        """Liveness. AppAPI polls this; monitoring can too."""
+        """Liveness plus queue visibility. AppAPI polls this; monitoring can too.
+
+        ``degraded`` means the process is up but cannot do its job: the index is
+        missing, unwritable, or broken. ``jobs_depth`` is claimable plus running,
+        so an operator sees a backlog without querying the database.
+        """
+        store = _store_state(probe)
         return {
-            "status": "ok",
+            "status": "ok" if store["ready"] else "degraded",
             "worker": name,
             "version": ver,
             "uptime_s": round(time.monotonic() - _STARTED, 1),
+            "store_ready": store["ready"],
+            "jobs_depth": store["jobs_depth"],
+            "error": store["error"],
         }
 
     @app.get("/init")
