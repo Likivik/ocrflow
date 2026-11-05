@@ -29,6 +29,7 @@ Behaviour worth knowing:
 	<author mail="likivik@likivik.com" homepage="https://likivik.com">Likivik</author>
 	<namespace>OcrFlow</namespace>
 	<category>files</category>
+	<category>tools</category>
 	<website>https://github.com/Likivik/ocrflow</website>
 	<bugs>https://github.com/Likivik/ocrflow/issues</bugs>
 	<repository type="git">https://github.com/Likivik/ocrflow</repository>

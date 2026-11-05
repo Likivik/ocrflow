@@ -9,6 +9,7 @@ namespace OCA\OcrFlow\Controller;
 
 use OCA\OcrFlow\BackgroundJob\ScanJob;
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Service\AccessGate;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\NoAdminRequired;
 use OCP\AppFramework\Http\DataResponse;
@@ -33,6 +34,7 @@ class StatusController extends OCSController
 		private Queue $queue,
 		private IJobList $jobs,
 		private IUserSession $userSession,
+		private AccessGate $access,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -68,6 +70,11 @@ class StatusController extends OCSController
 		$user = $this->userSession->getUser();
 		if ($user === null) {
 			throw new OCSForbiddenException('no session');
+		}
+		// Group list + per-user opt-out. Empty group list means everyone, so
+		// this is a no-op for an instance that never configured it.
+		if (!$this->access->canProcess($user)) {
+			throw new OCSForbiddenException('OCR is not enabled for your account');
 		}
 
 		$path = (string) $this->request->getParam('path', '/');
