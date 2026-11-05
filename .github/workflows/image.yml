@@ -122,7 +122,10 @@ jobs:
               if [ "$(docker inspect -f '{{.State.Running}}' ocrflow-ci)" != "true" ]; then
                 echo "heartbeat answered, then the worker exited:"; docker logs ocrflow-ci; exit 1
               fi
-              docker logs ocrflow-ci | tee /tmp/ocrflow-ci.log
+              # `docker logs` forwards the container's stderr to *our* stderr, and
+              # Python logging writes there — piping it into tee captured an empty
+              # file, so the grep below always failed.
+              docker logs ocrflow-ci >/tmp/ocrflow-ci.log 2>&1
               grep -q "transport: api (no Nextcloud credentials needed)" /tmp/ocrflow-ci.log || {
                 echo "the worker did not take the credential-free transport"; exit 1; }
               if grep -qi "no WebDAV credentials" /tmp/ocrflow-ci.log; then
