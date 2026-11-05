@@ -125,6 +125,15 @@ until occ app:enable ocrflow >/tmp/ocrflow-enable.log 2>&1 \
   fi
   sleep 3
 done
+
+# The engine is instance policy and has no default: until one is chosen the
+# listener queues nothing, which is correct and would make every upload test fail
+# for the wrong reason. Choose the offline engine, as the deployment docs do.
+occ ocrflow:engine tesseract >/tmp/ocrflow-engine.log 2>&1 || {
+    echo "FAIL: could not set the OCR engine"; cat /tmp/ocrflow-engine.log; exit 1; }
+occ ocrflow:engine | tee /tmp/ocrflow-engine-now.log
+grep -q 'engine: tesseract' /tmp/ocrflow-engine-now.log || {
+    echo "FAIL: engine did not stick"; exit 1; }
 ok "app enabled"
 
 echo "== the panel renders inside personal settings"

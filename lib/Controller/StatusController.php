@@ -10,6 +10,7 @@ namespace OCA\OcrFlow\Controller;
 use OCA\OcrFlow\BackgroundJob\ScanJob;
 use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\AccessGate;
+use OCA\OcrFlow\Service\EnginePolicy;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\NoAdminRequired;
 use OCP\AppFramework\Http\DataResponse;
@@ -35,6 +36,7 @@ class StatusController extends OCSController
 		private IJobList $jobs,
 		private IUserSession $userSession,
 		private AccessGate $access,
+		private EnginePolicy $engine,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -44,6 +46,10 @@ class StatusController extends OCSController
 	{
 		return new DataResponse([
 			'queue' => $this->queue->counts(),
+			// Whether the instance will do OCR at all. The sidebar can say
+			// "not configured" instead of offering a button that queues nothing.
+			'engine' => $this->engine->current(),
+			'engine_configured' => $this->engine->isConfigured(),
 		]);
 	}
 
@@ -75,6 +81,15 @@ class StatusController extends OCSController
 		// this is a no-op for an instance that never configured it.
 		if (!$this->access->canProcess($user)) {
 			throw new OCSForbiddenException('OCR is not enabled for your account');
+		}
+
+		// Not configured is not forbidden: 409 says "ask your administrator",
+		// which is true, and keeps the distinction visible to the client.
+		if (!$this->engine->isConfigured()) {
+			return new DataResponse([
+				'message' => 'No OCR engine is configured',
+				'engine' => EnginePolicy::NONE,
+			], Http::STATUS_CONFLICT);
 		}
 
 		$path = (string) $this->request->getParam('path', '/');

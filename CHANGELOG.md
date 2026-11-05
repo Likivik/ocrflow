@@ -5,6 +5,15 @@ written.
 
 ## Unreleased
 
+### Changed (breaking)
+
+- **The OCR engine has no default.** It used to default to `google` inside the
+  worker, so an instance nobody configured sent a page image of every document to
+  Google Cloud Vision. The engine is now instance policy: set it with
+  `occ ocrflow:engine tesseract|google|minimax` (or `none`). Until it is set,
+  uploads are not queued and folder scans are skipped rather than failing later.
+  Existing installations must choose an engine after upgrading.
+
 ### Added
 
 - `AccessGate`: an admin group list (`occ config:app:set ocrflow enabled_groups

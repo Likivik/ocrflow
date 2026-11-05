@@ -21,6 +21,13 @@ os.environ.setdefault("NC_OCR_NC_PASSWORD", "test-pass")
 # gone, the assertion blamed the value.
 os.environ.setdefault("NC_OCR_STATE_STRICT", "1")
 
+# The engine is instance policy and has **no default** in production: an
+# instance that has not chosen refuses to run rather than uploading page images
+# to a provider nobody picked. The suite is about engine-agnostic plumbing, so it
+# declares the offline engine once here — the absence of one is a test of its own
+# (test_engine_required.py), not an accident of the environment.
+os.environ.setdefault("NC_OCR_ENGINE", "tesseract")
+
 # No background threads at import, suite-wide. The server used to start its worker
 # loops when the module was imported, so they claimed jobs across test boundaries
 # (~1 failing run in 5, a different test each time) and every module that imports
