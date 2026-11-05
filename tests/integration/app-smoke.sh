@@ -104,7 +104,7 @@ $ENGINE exec "$NAME" mkdir -p /var/www/html/custom_apps/ocrflow
 # Everything the app needs at run time, not just the PHP: the committed Vue
 # bundle in js/ and the icon in img/ are part of the app, not build artefacts of
 # the test.
-for part in appinfo lib templates js img; do
+for part in appinfo lib templates js img l10n; do
   if [ -d "${APP_DIR}/${part}" ]; then
     $ENGINE cp "${APP_DIR}/${part}" "$NAME:/var/www/html/custom_apps/ocrflow/${part}"
   fi
@@ -136,6 +136,17 @@ grep -q 'engine: tesseract' /tmp/ocrflow-engine-now.log || {
     echo "FAIL: engine did not stick"; exit 1; }
 ok "app enabled"
 
+# Nextcloud 34 has no `occ app:check-code`: the app checker was removed from
+# core. An earlier version of this smoke called it anyway, and the assertion
+# passed because the failure output did not match the pattern it grepped for —
+# a check that cannot fail is not a check. The replacement is PHPStan in the
+# php job; what this smoke can still prove is that the shipped app carries its
+# translations, which the copy list above used to drop.
+if ! $ENGINE exec "$NAME" test -f /var/www/html/custom_apps/ocrflow/l10n/ru.json; then
+    fail "the app in the container has no l10n/ru.json"
+fi
+ok "the app ships its translations"
+
 echo "== the panel renders inside personal settings"
 code=$(curl -s -o /tmp/ocrflow-panel.html -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
   "$BASE/settings/user/ocrflow")
@@ -143,6 +154,28 @@ code=$(curl -s -o /tmp/ocrflow-panel.html -w '%{http_code}' -u "${ADMIN_USER}:${
 grep -q 'id="ocrflow-panel"' /tmp/ocrflow-panel.html || fail "the Vue mount point is missing from the page"
 grep -q 'ocrflow-panel\.js' /tmp/ocrflow-panel.html || fail "the bundle was not added to the page (Util::addScript)"
 ok "panel page serves the mount point and the bundle"
+
+# The admin page is a second mount point in the same bundle. A section with no
+# form renders an empty tab with no error, so assert both the mount point and the
+# fact that the section appears in the admin settings navigation.
+echo "== the admin page renders"
+code=$(curl -s -o /tmp/ocrflow-admin.html -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  "$BASE/settings/admin/ocrflow-admin")
+[ "$code" = "200" ] || fail "settings/admin/ocrflow-admin should be 200, got $code"
+grep -q 'id="ocrflow-admin-panel"' /tmp/ocrflow-admin.html || fail "the admin mount point is missing"
+grep -q 'ocrflow-panel\.js' /tmp/ocrflow-admin.html || fail "the bundle was not added to the admin page"
+ok "admin page serves the mount point and the bundle"
+
+# The admin endpoints are admin-only. A non-admin must be refused; the same
+# session must be allowed to read its own settings.
+echo "== settings endpoints are admin-only"
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' "$BASE/ocs/v2.php/apps/ocrflow/api/v1/settings")
+[ "$code" = "200" ] || fail "admin should read /settings, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' "$BASE/ocs/v2.php/apps/ocrflow/api/v1/me")
+[ "$code" = "200" ] || fail "a normal user should read /me, got $code"
+ok "settings and me answer the admin session"
 
 echo "== migration landed on the real database"
 for table in "$JOBS" "$FILES" "$SETTINGS"; do

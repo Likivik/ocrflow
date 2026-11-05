@@ -103,16 +103,60 @@ def workers(client, monkeypatch):
     def fake_process(nc_path, node_id, engine="auto", force=None):
         return {"path": nc_path, "output": nc_path, "vlm_pages": []}
 
-    monkeypatch.setattr(ws, "_process_file", fake_process)
     monkeypatch.setattr(ws, "_webdav_stat", lambda *a, **k: (None, None))
 
-    ws.start_scheduler(with_reconcile=False, with_catchup=False)
-    yield ws
-    ws.stop_scheduler()
+    # Patch ``_process_file`` the same way ``client`` does — as a context
+    # manager, not with ``monkeypatch``. The two patch mechanisms have
+    # different teardown orders, and mixing them leaks:
+    #
+    #   * ``client`` installs a ``patch.object`` stub. Its ``__exit__``
+    #     restores whatever it found — the real function.
+    #   * ``monkeypatch.setattr`` here would snapshot the value present at
+    #     *its* setup time, which is already ``client``'s stub, and
+    #     ``monkeypatch`` is the outermost fixture, so its undo runs LAST —
+    #     after ``client`` has restored the real function. The undo would
+    #     then reinstate the stub, leaving ``ws._process_file`` permanently
+    #     faked for every later test in this module.
+    #
+    # That leak is invisible while the endpoint tests dominate, and fatal for
+    # the ``_process_file`` tests that follow: they call ``ws._process_file``
+    # directly and got the stub instead, so no ``process_pdf`` ran, no
+    # ``skipped`` key appeared, and no ``RuntimeError`` was raised.
+    #
+    # ``patch.object`` nests correctly: this ``__exit__`` restores ``client``'s
+    # stub, then ``client``'s ``__exit__`` restores the real function.
+    with patch.object(ws, "_process_file", side_effect=fake_process):
+        ws.start_scheduler(with_reconcile=False, with_catchup=False)
+        yield ws
+        ws.stop_scheduler()
 
 
 def h():
     return {"X-Webhook-Secret": SECRET}
+
+
+# The genuine ``_process_file``, captured at import time. A fixture that
+# leaves a stub behind is invisible in the endpoint tests (the stub answers
+# them fine) and fatal in the ``_process_file`` tests that follow (they call
+# the real thing directly). The guard below turns that silent leak into a
+# failure at the next test, instead of twelve confusing ones.
+_REAL_PROCESS_FILE = ws._process_file
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_process_file_stub():
+    """No fixture may leave ``ws._process_file`` stubbed behind it.
+
+    Autouse, so it runs before the per-test fixtures — it therefore observes
+    the state left behind by the *previous* test, which is exactly where the
+    leak shows up. ``patch.object`` and ``monkeypatch`` tear down in
+    different orders; combining them on the same attribute made the stub
+    outlive the test that installed it.
+    """
+    assert ws._process_file is _REAL_PROCESS_FILE, (
+        f"ws._process_file is still stubbed from an earlier test: {ws._process_file!r}"
+    )
+    yield
 
 
 # --- /status ---------------------------------------------------------------

@@ -130,6 +130,12 @@ jobs:
         run: composer install --no-interaction --prefer-dist
       - name: PHPUnit
         run: vendor/bin/phpunit --no-coverage
+      - name: PHPStan (static analysis)
+        # Nextcloud 34 removed `occ app:check-code` from core — the app checker
+        # is no longer in the product — so the check that actually protects the
+        # PHP is an analyser against the official OCP stubs. Level 1 catches
+        # undefined classes, undefined methods and unknown arguments.
+        run: vendor/bin/phpstan analyse --no-progress
 
   integration:
     name: integration (real Nextcloud)
