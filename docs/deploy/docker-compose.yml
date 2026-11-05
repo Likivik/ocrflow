@@ -1,0 +1,95 @@
+# OCR Flow — container deployment with HaRP
+#
+# Reference layout for a Nextcloud instance on Docker. It is documentation, not a
+# tested installer: read the notes in README.md, especially the section on what
+# does and does not work yet.
+#
+# Verified against nextcloud/HaRP and docs.nextcloud.com on 2026-11-05:
+# HaRP listens on 8780 (ExApp HTTP), 8781 (HTTPS, only when /certs/cert.pem
+# exists) and 8782 (FRP tunnel). It needs the Docker socket and must be able to
+# reach NC_INSTANCE_URL.
+
+services:
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    command: --transaction-isolation=READ-COMMITTED --binlog-format=ROW
+    volumes:
+      - db:/var/lib/mysql
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: nextcloud
+      MARIADB_USER: nextcloud
+      MARIADB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  nextcloud:
+    image: nextcloud:34-apache
+    restart: unless-stopped
+    depends_on: [db, redis]
+    ports:
+      - "8080:80"
+    volumes:
+      - nc:/var/www/html
+    environment:
+      MYSQL_HOST: db
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+      REDIS_HOST: redis
+      NEXTCLOUD_ADMIN_USER: ${NC_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NC_ADMIN_PASSWORD:?set NC_ADMIN_PASSWORD}
+      NEXTCLOUD_TRUSTED_DOMAINS: ${NC_DOMAIN:-localhost}
+
+  # The AppAPI deploy daemon. Keep the shared key in a .env file or a secret, not
+  # in this file: `occ app_api:daemon:register` prints configuration back.
+  harp:
+    image: ghcr.io/nextcloud/nextcloud-appapi-harp:release
+    restart: unless-stopped
+    depends_on: [nextcloud]
+    ports:
+      - "8780:8780"
+      - "8782:8782"
+    volumes:
+      # The socket is how HaRP starts and stops ExApp containers. Treat write
+      # access to it as root on this host.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - harp-certs:/certs
+    environment:
+      HP_SHARED_KEY: ${HP_SHARED_KEY:?set HP_SHARED_KEY}
+      NC_INSTANCE_URL: ${NC_INSTANCE_URL:-http://nextcloud:80}
+      HP_LOG_LEVEL: ${HP_LOG_LEVEL:-info}
+      HP_TRUSTED_PROXY_IPS: ${HP_TRUSTED_PROXY_IPS:-}
+
+  # The OCR worker. Stateless on purpose: it holds no durable state, so it can be
+  # replaced at any time. NC_OCR_STATE_DIR is scratch space for its SQLite index,
+  # not a backup target.
+  #
+  # Native deployments (systemd, no Docker) use the same image with the same
+  # variables, minus APP_*.
+  worker:
+    image: ghcr.io/likivik/ocrflow-worker:latest
+    restart: unless-stopped
+    depends_on: [nextcloud]
+    volumes:
+      - worker-state:/state
+    environment:
+      # api transport: the app opens and writes the file as its owner, so the
+      # worker needs no Nextcloud account at all.
+      NC_OCR_TRANSPORT: api
+      NC_OCR_URL: ${NC_INTERNAL_URL:-http://nextcloud:80}
+      NC_OCR_WORKER_NAME: compose-worker
+      NC_OCR_STATE_DIR: /state
+      NC_OCR_WORKER_SECRET: ${NC_OCR_WORKER_SECRET:?set NC_OCR_WORKER_SECRET}
+      NC_OCR_HEALTH_PORT: "8080"
+      NC_OCR_ENGINE: ${NC_OCR_ENGINE:-tesseract}
+      NC_OCR_LOG_LEVEL: ${NC_OCR_LOG_LEVEL:-INFO}
+
+volumes:
+  db:
+  nc:
+  harp-certs:
+  worker-state:
