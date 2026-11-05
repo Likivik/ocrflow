@@ -27,5 +27,11 @@ return [
         ['name' => 'status#job', 'url' => '/api/v1/jobs/{id}', 'verb' => 'GET'],
         ['name' => 'status#scan', 'url' => '/api/v1/scan', 'verb' => 'POST'],
         ['name' => 'status#file', 'url' => '/api/v1/file', 'verb' => 'GET'],
+
+        // --- settings: instance policy (admin) and the user's own opt-out ---
+        ['name' => 'settings#index', 'url' => '/api/v1/settings', 'verb' => 'GET'],
+        ['name' => 'settings#update', 'url' => '/api/v1/settings', 'verb' => 'PUT'],
+        ['name' => 'me#index', 'url' => '/api/v1/me', 'verb' => 'GET'],
+        ['name' => 'me#update', 'url' => '/api/v1/me', 'verb' => 'PUT'],
     ],
 ];

@@ -5,6 +5,16 @@ written.
 
 ## Unreleased
 
+### Added
+
+- **Administration → OCR**: a settings page for the engine and the group list,
+  and a per-user switch that turns automatic OCR off for your own uploads.
+  Both were reachable only through `occ`; the values are the same ones the
+  commands set.
+- Russian translation (`l10n/ru.json`), and the panel now uses the real
+  translation function instead of a passthrough that made the interface English
+  in every locale.
+
 ### Changed (breaking)
 
 - **The OCR engine has no default.** It used to default to `google` inside the

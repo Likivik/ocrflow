@@ -4,8 +4,17 @@
  */
 import { createApp } from 'vue'
 import Panel from './Panel.vue'
+import AdminPanel from './AdminPanel.vue'
 
-const el = document.getElementById('ocrflow-panel')
-if (el) {
-	createApp(Panel).mount(el)
+// One bundle, two mount points: the personal settings panel and the admin
+// policy page. The same script is added on both pages; whichever element is
+// present gets mounted.
+const panel = document.getElementById('ocrflow-panel')
+if (panel) {
+	createApp(Panel).mount(panel)
+}
+
+const admin = document.getElementById('ocrflow-admin-panel')
+if (admin) {
+	createApp(AdminPanel).mount(admin)
 }
