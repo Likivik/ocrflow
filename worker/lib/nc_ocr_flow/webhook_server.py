@@ -1670,7 +1670,8 @@ def _process_file(
     """Download, OCR, upload back. Returns result dict.
 
     ``engine`` defaults to ``None`` → orchestrator resolves via
-    ``NC_OCR_ENGINE`` env var (default: "google").
+    ``NC_OCR_ENGINE`` env var. There is no default: an instance without an engine
+    refuses the job instead of guessing a provider.
     ``force`` (default False): bypass the born-digital skip decision
     AND the recently-processed guard. The user invokes this from the
     NC app's "Re-OCR anyway" action to force a re-OCR even on files
@@ -2158,7 +2159,13 @@ def _path_in_flight(nc_path: str) -> bool:
 
 def _engine_slot(engine: str | None):
     """Concurrency ceiling for this job's engine."""
-    key = (engine or os.environ.get("NC_OCR_ENGINE") or "google").lower()
+    key = (engine or os.environ.get("NC_OCR_ENGINE") or "").lower()
+    if not key or key == "none":
+        # No engine: the job should never have been queued. Refuse loudly rather
+        # than picking a slot and a provider nobody chose.
+        from .engines import EngineNotConfigured
+
+        raise EngineNotConfigured("no OCR engine configured for this job")
     return _ENGINE_SLOTS.get(key, _DEFAULT_SLOT)
 
 

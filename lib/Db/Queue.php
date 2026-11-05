@@ -50,8 +50,13 @@ class Queue extends QBMapper
 	 *
 	 * @throws Exception
 	 */
-	public function enqueue(string $path, ?int $fileId, ?int $size, ?string $etag): ?int
-	{
+	public function enqueue(
+		string $path,
+		?int $fileId,
+		?int $size,
+		?string $etag,
+		?string $engine = null,
+	): ?int {
 		if ($fileId !== null) {
 			if ($this->jobForVersion($fileId, $etag) !== null) {
 				return null;
@@ -74,6 +79,10 @@ class Queue extends QBMapper
 				'created_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
 				'size' => $qb->createNamedParameter($size, IQueryBuilder::PARAM_INT),
 				'etag' => $qb->createNamedParameter($etag),
+				// Chosen by the instance, not the worker: it decides whether page
+				// images leave the server. Stamped here so a policy change does not
+				// alter a job that is already queued.
+				'engine' => $qb->createNamedParameter($engine),
 			]);
 		try {
 			$qb->executeStatement();

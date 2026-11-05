@@ -117,6 +117,28 @@ def _default_requeue():
     return jobstore.requeue_stale
 
 
+def _engine_gate(transport: str) -> str | None:
+    """Why the worker must not start, or ``None`` when it may.
+
+    On the api transport the app stamps the engine on every job it queues, so the
+    worker needs no opinion of its own — demanding one would refuse to start a
+    correctly configured instance. On the dav transport the worker does pick, and
+    an unconfigured worker used to default to `google`: it uploaded page images of
+    user documents to a provider nobody chose. That is the defect this refuses.
+    """
+    if transport == "api":
+        return None
+    # Late import: the engine registry pulls in the OCR stack, and `runner` is
+    # imported by things that only want read_secret().
+    from .engines import EngineNotConfigured, resolve_engine
+
+    try:
+        resolve_engine()
+    except EngineNotConfigured as exc:
+        return str(exc)
+    return None
+
+
 def _graceful_shutdown(signum: int, *, stop=None, requeue=None) -> None:
     """Stop the loops and hand back the job this process was holding.
 
@@ -221,6 +243,16 @@ def main(argv: list[str] | None = None) -> int:
     # On NC_OCR_TRANSPORT=api there is nothing to verify: the app reads and writes
     # the file as its owner, and the worker only presents the shared secret — no
     # Nextcloud identity exists to be missing.
+    # Same doctrine as the credential gate above: a worker with no engine would
+    # claim a job, download the file and only then discover it cannot process it.
+    # Refuse to start instead, and name the knob.
+    engine_error = _engine_gate(TRANSPORT)
+    if engine_error is not None:
+        log.error("%s", engine_error)
+        return 2
+    log.info("engine: %s", "decided per job by the app" if TRANSPORT == "api" else "from NC_OCR_ENGINE")
+
+
     if TRANSPORT == "api":
         log.info("transport: api (no Nextcloud credentials needed)")
     else:
