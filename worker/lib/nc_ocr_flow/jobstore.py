@@ -1102,6 +1102,28 @@ def stats() -> dict[str, Any]:
     return out
 
 
+def health() -> dict[str, Any]:
+    """Cheap answer for the probe: can this process use its store right now?
+
+    Separate from :func:`stats` because a probe must never raise and must not
+    walk the history — it answers "is the index there" plus how much work is
+    waiting. Before this existed, /heartbeat reported ok while the index was
+    unwritable, so neither AppAPI nor a human could tell a wedged worker from a
+    healthy one.
+    """
+    out: dict[str, Any] = {"ready": False, "jobs_depth": 0, "error": None}
+    try:
+        if not _ready():
+            out["error"] = f"index not usable at {db_path()}"
+            return out
+        counted = stats()
+        out["ready"] = True
+        out["jobs_depth"] = int(counted.get("claimable", 0)) + int(counted.get("running", 0))
+    except Exception as exc:  # a probe reports, it does not propagate
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
 def in_flight_job_for_path(nc_path: str) -> dict[str, Any] | None:
     """The currently-queued-or-running job for ``nc_path``, else ``None``.
 
