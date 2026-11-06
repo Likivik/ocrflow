@@ -48,6 +48,7 @@ The embedded text layer is built from the words in Google's order.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tempfile
@@ -642,11 +643,34 @@ def _cleanup_bucket(name: str | None) -> None:
         log.warning("vision: bucket cleanup failed: %s", exc)
 
 
-def _project_id(client) -> str | None:
-    """Resolve the active GCP project id."""
-    if hasattr(client, "_channel") and hasattr(client, "_transport"):
-        return None  # client doesn't expose project directly; SDK handles
-    return os.environ.get("NC_OCR_GOOGLE_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+def _project_id(client=None) -> str | None:
+    """Resolve the active GCP project id.
+
+    Order: ``NC_OCR_GOOGLE_PROJECT``, ``GOOGLE_CLOUD_PROJECT``, then the
+    ``project_id`` inside the service-account file that
+    ``GOOGLE_APPLICATION_CREDENTIALS`` points at.
+
+    The old body returned ``None`` whenever the client exposed ``_transport``
+    — i.e. for every real client — so the documented "overrides the one in the
+    credential file" fallback never existed. Batch OCR then built a storage
+    client with ``project=None`` and bucket creation failed with
+    ``400 Required parameter: project``.
+    """
+    explicit = os.environ.get("NC_OCR_GOOGLE_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if explicit:
+        return explicit
+
+    path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if path:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                project = json.load(fh).get("project_id")
+            if project:
+                return str(project)
+        except (OSError, ValueError) as exc:
+            log.warning("google: cannot read project_id from %s: %s", path, exc)
+
+    return getattr(client, "project", None) or None
 
 
 # --- Long-running operation poll -------------------------------------------
