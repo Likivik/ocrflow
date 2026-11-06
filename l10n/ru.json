@@ -24,7 +24,11 @@
         "Saved": "Сохранено",
         "Enable JavaScript to see the OCR queue.": "Включите JavaScript, чтобы увидеть очередь OCR.",
         "Enable JavaScript to change the OCR settings.": "Включите JavaScript, чтобы изменить настройки OCR.",
-        "OCR": "OCR"
+        "OCR": "OCR",
+        "tesseract (offline, nothing leaves the server)": "tesseract (офлайн, ничего не покидает сервер)",
+        "google (Cloud Vision, page images are sent)": "google (Cloud Vision, изображения страниц отправляются)",
+        "minimax (API, page images are sent)": "minimax (API, изображения страниц отправляются)",
+        "none (nothing is queued)": "none (ничего не ставится в очередь)"
     },
     "pluralForm": "nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);"
 }

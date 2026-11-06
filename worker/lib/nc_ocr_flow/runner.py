@@ -85,9 +85,15 @@ def run_once(
     if job is None:
         return False
 
-    log.info("claimed job %s for %s (attempt %s)", job.id, job.path, job.attempts)
+    log.info(
+        "claimed job %s for %s (attempt %s, engine=%s)",
+        job.id,
+        job.path,
+        job.attempts,
+        job.engine,
+    )
     try:
-        outcome = process(job.path, job.file_id or 0, job_id=job.id)
+        outcome = process(job.path, job.file_id or 0, engine=job.engine, job_id=job.id)
     except Exception as exc:
         log.warning("job %s failed: %s", job.id, exc)
         client.failure(job.id, error=f"{type(exc).__name__}: {exc}", reason="worker_error")

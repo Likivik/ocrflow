@@ -66,11 +66,17 @@ def create_app(
         so an operator sees a backlog without querying the database.
         """
         store = _store_state(probe)
+        # Which engine this worker would use for a job of its own. On the api
+        # transport the app decides per job, so ``null`` here is normal, not a
+        # fault — the field exists so an operator can tell "decided per job"
+        # from "unconfigured" without reading the source.
+        engine = (os.environ.get("NC_OCR_ENGINE") or "").strip().lower() or None
         return {
             "status": "ok" if store["ready"] else "degraded",
             "worker": name,
             "version": ver,
             "uptime_s": round(time.monotonic() - _STARTED, 1),
+            "engine": engine,
             "store_ready": store["ready"],
             "jobs_depth": store["jobs_depth"],
             "error": store["error"],

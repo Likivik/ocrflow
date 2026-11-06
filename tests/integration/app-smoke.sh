@@ -184,6 +184,14 @@ for table in "$JOBS" "$FILES" "$SETTINGS"; do
 done
 ok "tables exist: ${JOBS} ${FILES} ${SETTINGS}"
 
+# The engine column was first added by editing an already-shipped migration, so
+# an instance that installed before it has a jobs table without the column and
+# dies on the first insert. A fresh install gets it from Version001000; assert
+# it either way, so schema drift fails here and not on a user's instance.
+engcol=$(sqlite "SELECT COALESCE((SELECT 1 FROM pragma_table_info('${JOBS}') WHERE name='engine'),0)")
+[ "$engcol" = "1" ] || fail "${JOBS} has no engine column (upgrade path broken)"
+ok "jobs table has the engine column"
+
 echo "== the constraint that makes 'do the work once' true"
 indexes=$(sqlite "SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='index' AND tbl_name='${JOBS}'")
 echo "$indexes" | grep -qiE 'file_id.*etag' || fail "no unique index on (file_id, etag); got: $indexes"
@@ -216,7 +224,10 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' 
 ok "wrong secret -> 401"
 
 claim() {
-  curl -s -X POST -H 'OCS-APIRequest: true' -H "X-OcrFlow-Secret: ${secret}" \
+  # Accept: application/json — the worker sends it (queue_client), and without
+  # it OCS answers XML, which would make a JSON-shaped assertion below lie.
+  curl -s -X POST -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+    -H "X-OcrFlow-Secret: ${secret}" \
     -o /tmp/ocrflow-claim-body -w '%{http_code}' "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/next"
 }
 
@@ -245,6 +256,34 @@ ok "no level-3+ log lines mentioning ocrflow"
 code=$(claim)
 [ "$code" = "200" ] || fail "claim on a non-empty queue should be 200, got $code"
 ok "claim -> 200 with a job"
+
+# The claim payload must carry the engine: an earlier build dropped it, and the
+# worker then used its own env — on the api transport that is unset, so every
+# job died with "no engine configured" no matter what the admin chose.
+eng=$(sqlite "SELECT COALESCE(engine,'') FROM ${JOBS} ORDER BY id DESC LIMIT 1")
+[ "$eng" = "tesseract" ] || fail "the claimed job carries engine='${eng}', expected tesseract"
+ok "claimed job carries engine: tesseract"
+
+# The claim RESPONSE must say so too: the row is not what the worker reads, the
+# payload is. An earlier build wrote the column but never returned it, and the
+# worker then used its own env — the exact break this asserts against.
+grep -q '"engine"' /tmp/ocrflow-claim-body || fail "claim response has no engine field"
+grep -q 'tesseract' /tmp/ocrflow-claim-body || fail "claim response does not carry the engine"
+ok "claim response carries engine: tesseract"
+
+# Only the worker holding the claim may close a job. A stale claim is requeued
+# after the recovery window and can be re-claimed while the first worker is
+# still on a huge PDF; its late result must be discarded, not written over the
+# new claimant's row (that row is what the UI and the billing read).
+echo "== only the claim holder may finish a job"
+jobid=$(sqlite "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
+  -H "X-OcrFlow-Secret: ${secret}" -H 'X-OcrFlow-Worker: someone-else' \
+  -d 'status=done' "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result")
+[ "$code" = "200" ] || fail "a non-claimant's result should still be 200, got $code"
+status=$(sqlite "SELECT status FROM ${JOBS} WHERE id=${jobid}")
+[ "$status" = "claimed" ] || fail "a non-claimant's result changed the row to ${status}"
+ok "a non-claimant's result is discarded"
 
 echo "== the queue does not hand the same version out twice"
 code=$(claim)

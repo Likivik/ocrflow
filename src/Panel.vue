@@ -54,7 +54,7 @@
 		</p>
 		<NcCheckboxRadioSwitch
 			type="switch"
-			:checked.sync="autoOcrDisabled"
+			:checked="autoOcrDisabled"
 			:disabled="busy"
 			@update:checked="setOptOut">
 			{{ t('Do not process my uploads automatically') }}
@@ -142,6 +142,9 @@ export default {
 			}
 		},
 		async setOptOut(value) {
+			// One-way binding: the switch shows what the server last confirmed.
+			// Inverting on failure would show the opposite of the truth — the
+			// state is the server's answer, not the click.
 			this.busy = true
 			this.error = ''
 			try {
@@ -152,7 +155,6 @@ export default {
 				)
 				this.autoOcrDisabled = value === true
 			} catch (e) {
-				this.autoOcrDisabled = !value
 				this.error = `Could not save your choice: ${e?.response?.status ?? e?.message ?? 'unknown error'}`
 			} finally {
 				this.busy = false

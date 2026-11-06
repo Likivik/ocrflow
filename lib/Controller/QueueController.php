@@ -217,8 +217,7 @@ class QueueController extends OCSController
 			return $denied;
 		}
 
-		$worker = (string) $this->request->getHeader('X-OcrFlow-Worker');
-		$job = $this->queue->claim($worker === '' ? 'worker' : substr($worker, 0, 64));
+		$job = $this->queue->claim($this->workerName());
 		if ($job === null) {
 			return new DataResponse(null, Http::STATUS_NO_CONTENT);
 		}
@@ -242,15 +241,18 @@ class QueueController extends OCSController
 			$status = Queue::STATUS_DONE;
 		}
 
-		$this->queue->finish($id, [
+		$applied = $this->queue->finish($id, [
 			'status' => $status,
 			'reason' => $this->nullableString('reason'),
 			'engine' => $this->nullableString('engine'),
 			'pages' => $this->nullableInt('pages'),
 			'chars' => $this->nullableInt('chars'),
 			'stamp_version' => $this->nullableString('stamp_version'),
-		]);
-		return new DataResponse(['id' => $id, 'status' => $status]);
+		], $this->workerName());
+		// ``applied: false`` means this worker no longer holds the claim (its
+		// claim was recovered and re-claimed elsewhere). Not an error: the job
+		// is someone else's now, and the result was correctly discarded.
+		return new DataResponse(['id' => $id, 'status' => $status, 'applied' => $applied]);
 	}
 
 	#[PublicPage]
@@ -261,12 +263,27 @@ class QueueController extends OCSController
 		}
 		$error = (string) $this->request->getParam('error', '');
 		$this->logger->warning('ocrflow: job ' . $id . ' failed: ' . $error);
-		$this->queue->finish($id, [
+		$applied = $this->queue->finish($id, [
 			'status' => Queue::STATUS_ERROR,
 			'reason' => $this->nullableString('reason'),
 			'error' => $error === '' ? null : $error,
+		], $this->workerName());
+		return new DataResponse([
+			'id' => $id,
+			'status' => Queue::STATUS_ERROR,
+			'applied' => $applied,
 		]);
-		return new DataResponse(['id' => $id, 'status' => Queue::STATUS_ERROR]);
+	}
+
+	/**
+	 * The name this caller claims as. Claim and finish must agree, or a worker
+	 * whose stale claim was recovered cannot finish the job it lost — which is
+	 * the point of the guard in Queue::finish().
+	 */
+	private function workerName(): string
+	{
+		$worker = (string) $this->request->getHeader('X-OcrFlow-Worker');
+		return $worker === '' ? 'worker' : substr($worker, 0, 64);
 	}
 
 	/**

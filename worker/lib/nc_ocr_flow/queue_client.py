@@ -57,6 +57,10 @@ class Job:
     etag: str | None
     size: int | None
     attempts: int
+    # The engine the app stamped when it queued the job. Optional because an
+    # older app build does not send it; None then means "decide as before"
+    # (the worker's own env, and fail closed when that is unset too).
+    engine: str | None = None
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> Job:
@@ -72,6 +76,7 @@ class Job:
                 etag=None if data["etag"] is None else str(data["etag"]),
                 size=None if data.get("size") is None else int(data["size"]),
                 attempts=int(data.get("attempts") or 0),
+                engine=None if data.get("engine") is None else str(data["engine"]),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise QueueProtocolError(f"claim returned a job we cannot read: {data!r}") from exc

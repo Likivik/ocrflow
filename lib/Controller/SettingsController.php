@@ -46,7 +46,10 @@ class SettingsController extends OCSController
 		if ($user === null) {
 			throw new OCSForbiddenException('no session');
 		}
-		if (!$this->groupManager->isInGroup($user->getUID(), 'admin')) {
+		// The framework's own admin check, not membership in a group literally
+		// named "admin": Nextcloud can have several admin groups, and a renamed
+		// or additional one would lock out exactly the people this page is for.
+		if (!$this->groupManager->isAdmin($user->getUID())) {
 			throw new OCSForbiddenException('admin only');
 		}
 	}
