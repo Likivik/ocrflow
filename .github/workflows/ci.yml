@@ -88,8 +88,16 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Install ruff (pinned — the lint result must not drift with a release)
-        run: python -m pip install ruff==0.16.10
+      # The version comes from worker/pyproject.toml, which is what Dependabot
+      # bumps. Hardcoding it here as well meant a bump would leave CI linting
+      # with a different ruff than the manifest — a version skew that silently
+      # changes the result of the check it exists to guarantee.
+      - name: Install ruff (version read from worker/pyproject.toml)
+        working-directory: worker
+        run: |
+          spec=$(python -c 'import tomllib; d = tomllib.load(open("pyproject.toml","rb")); print(next(x for x in d["dependency-groups"]["dev"] if x.startswith("ruff")))')
+          echo "installing $spec"
+          python -m pip install "$spec"
       - name: ruff check
         working-directory: worker
         run: ruff check lib tests
