@@ -95,7 +95,12 @@ class Queue extends QBMapper
 			throw $e;
 		}
 
-		return (int) $this->db->getLastInsertId(self::JOBS);
+		// `IDBConnection::getLastInsertId()` was removed in Nextcloud 34; the
+		// query builder owns it now. Calling it on the connection threw
+		// "Call to undefined method ConnectionAdapter::getLastInsertId()" on every
+		// upload — the row landed, the listener logged a failure and returned no
+		// id, so nothing downstream could tell the job it had just created.
+		return $qb->getLastInsertId();
 	}
 
 	/**
