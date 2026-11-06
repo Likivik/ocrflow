@@ -76,7 +76,14 @@ class QueueController extends OCSController
 			return new DataResponse(['message' => 'file no longer exists'], Http::STATUS_NOT_FOUND);
 		}
 
-		$response = new StreamResponse($opened['name'], $opened['handle'], $opened['mime']);
+		// StreamResponse takes (pathOrHandle, int $status, array $headers). Passing
+		// the handle second put a resource where an int belongs and every fetch
+		// answered 500 "Argument #2 ($status) must be of type int, resource given".
+		$response = new StreamResponse($opened['handle'], Http::STATUS_OK, ['Content-Type' => $opened['mime']]);
+		$response->addHeader(
+			'Content-Disposition',
+			'attachment; filename="' . rawurlencode($opened['name']) . '"',
+		);
 		$response->cacheFor(0);
 		return $response;
 	}

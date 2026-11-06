@@ -245,8 +245,32 @@ jobs=$(sqlite "SELECT count(*) FROM ${JOBS}")
 [ "${jobs:-0}" -ge 1 ] || fail "an upload produced no job (listener or enqueue is broken)"
 ok "upload produced ${jobs} job(s)"
 
+# The api transport has the app serve the bytes, so the worker never holds a
+# Nextcloud credential. A build once passed the file handle as StreamResponse's
+# $status: every fetch answered 500 and every job died with "server error 500
+# fetching job N", while the claim itself stayed green — the failure was only
+# visible to a byte-level fetch.
+echo "== the worker can fetch a job's bytes from the app"
+jobfile=$(sqlite "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
+code=$(curl -s -o /tmp/ocrflow-bytes -w '%{http_code}' -H 'OCS-APIRequest: true' -H "X-OcrFlow-Secret: ${secret}" \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobfile}/file")
+[ "$code" = "200" ] || fail "file fetch should be 200, got $code"
+[ -s /tmp/ocrflow-bytes ] || fail "file fetch returned an empty body"
+ok "job bytes served by the app ($(wc -c < /tmp/ocrflow-bytes) bytes)"
+
 echo "== the instance logged no error while handling our events"
 log_errors=$($ENGINE exec "$NAME" sh -c 'grep -i ocrflow /var/www/html/data/nextcloud.log 2>/dev/null | grep -E "\"level\":(3|4)"' 2>/dev/null | tail -3 || true)
+# A queueing failure logs at level 2, not 3, so the level filter above cannot
+# see it: `enqueue()` asked the connection for the insert id, Nextcloud 34 moved
+# that method to the query builder, and every upload warned "could not queue"
+# while the row still landed.
+warn_errors=$($ENGINE exec "$NAME" sh -c 'grep -i ocrflow /var/www/html/data/nextcloud.log 2>/dev/null | grep -E "could not queue|QueueProtocolError"' 2>/dev/null | tail -3 || true)
+if [ -n "$warn_errors" ]; then
+  echo "$warn_errors" | cut -c1-400
+  fail "the instance logged a queueing failure (see above)"
+fi
+ok "no queueing failures in the log"
+
 if [ -n "$log_errors" ]; then
   echo "$log_errors" | cut -c1-500
   fail "the instance logged an error while handling our events (see above)"
