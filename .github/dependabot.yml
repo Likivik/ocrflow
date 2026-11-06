@@ -17,6 +17,17 @@ updates:
       prefix: "ci"
     labels:
       - dependencies
+    # CodeQL refuses to run when its steps disagree on a version: `init` writes
+    # a config stamped 4.39.1 and `analyze` still on 4.39.0 dies with "Loaded a
+    # configuration file for version X, but running version Y". The two bumps
+    # therefore cannot land as separate PRs — the first one alone turns the
+    # branch red. Group them; every other action stays one PR per action,
+    # because bumping an action is a trust event and batching hides which
+    # upstream moved.
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
 
   # Python runtime dependencies: floors live in pyproject.toml, so a bump here
   # surfaces upstream drift (and security advisories) instead of staying
