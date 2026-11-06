@@ -362,8 +362,10 @@ in
         wantedBy = [ "multi-user.target" ];
         serviceConfig = {
           # occ refuses to run as root: "Console has to be executed with the user
-          # that owns config/config.php".
-          User = config.services.nextcloud.user;
+          # that owns config/config.php". nixpkgs hardcodes that user as
+          # "nextcloud" (five places, no option), so there is nothing to read from
+          # config here — `services.nextcloud.user` does not exist.
+          User = "nextcloud";
           Type = "oneshot";
           RemainAfterExit = true;
           # `nextcloud-occ` requires EVERY declared Nextcloud secret credential,
