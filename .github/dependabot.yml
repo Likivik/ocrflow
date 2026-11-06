@@ -29,11 +29,16 @@ updates:
         patterns:
           - "github/codeql-action*"
 
-  # Python runtime dependencies: floors live in pyproject.toml, so a bump here
-  # surfaces upstream drift (and security advisories) instead of staying
+  # Python runtime dependencies: floors live in worker/pyproject.toml, so a bump
+  # here surfaces upstream drift (and security advisories) instead of staying
   # invisible until something breaks.
+  #
+  # The directory is /worker, not /: the only Python manifest in the repo is
+  # worker/pyproject.toml. With `/` the updater found no manifest and every run
+  # ended in "Dependabot encountered an error performing the update" — a
+  # permanently red job, which is a permanently ignored job.
   - package-ecosystem: pip
-    directory: /
+    directory: /worker
     schedule:
       interval: weekly
     commit-message:
