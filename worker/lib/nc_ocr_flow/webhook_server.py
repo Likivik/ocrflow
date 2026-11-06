@@ -1801,6 +1801,7 @@ def _process_file(
                     "output": pdf_nc_path,
                     "engine": result.engine_used,
                     "vlm_pages": result.vlm_pages,
+                    **_page_stats_keys(result.output_pdf),
                     "kept_source": True,
                     "reason": SKIP_REASON_SOURCE_KEPT,
                 }
@@ -1811,6 +1812,7 @@ def _process_file(
                     "output": pdf_nc_path,
                     "engine": result.engine_used,
                     "vlm_pages": result.vlm_pages,
+                    **_page_stats_keys(result.output_pdf),
                     # Distinct reason so the panel and /stats show
                     # the real cause. Operator's job: clean up the
                     # leftover image manually (it cannot be safely
@@ -1825,6 +1827,7 @@ def _process_file(
                 "output": pdf_nc_path,
                 "engine": result.engine_used,
                 "vlm_pages": result.vlm_pages,
+                **_page_stats_keys(result.output_pdf),
             }
 
         if ext in PDF_EXTS:
@@ -1891,9 +1894,40 @@ def _process_file(
                 "output": nc_path,
                 "engine": result.engine_used,
                 "vlm_pages": result.vlm_pages,
+                **_page_stats_keys(result.output_pdf),
             }
 
     return {"path": nc_path, "skipped": True, "reason": "unknown"}
+
+
+def _page_stats_keys(pdf_path, /) -> dict:
+    """`pages` and `chars` for the queue row, measured on the produced PDF.
+
+    The app stores exactly what the worker reports, and the worker reported
+    neither: every successful job left both columns NULL, so the panel and
+    `/stats` had no page or character counts to show. Measuring the output PDF
+    is the one place both numbers are certainly correct — the OCR text is in it,
+    whatever engine wrote it.
+    """
+    try:
+        import pymupdf
+
+        doc = pymupdf.open(str(pdf_path))
+        try:
+            return {
+                "pages": doc.page_count,
+                # Indexed, not iterated: pymupdf's Document has no __iter__ in
+                # its own typing, so `for page in doc` fails mypy while working
+                # at runtime — the kind of thing a type gate exists to catch.
+                "chars": sum(
+                    len(doc.load_page(i).get_text().strip()) for i in range(doc.page_count)
+                ),
+            }
+        finally:
+            doc.close()
+    except Exception as exc:  # a missing output PDF must not fail the job
+        log.warning("page stats failed for %s: %s", pdf_path, exc)
+        return {}
 
 
 # --- Job tracking (for /status panel + NC app) ---
