@@ -237,6 +237,22 @@ def _ocr_pdf(pdf_path: str) -> list[tuple[int, OcrResult]]:
     return out
 
 
+def _annotation_has_text(full) -> bool:
+    """Whether Vision's annotation actually carries text.
+
+    ``full_text_annotation`` is NOT a reliable "there is text" signal: measured on
+    a stamp image, Vision returned an annotation object with page dimensions
+    (496x565) and no words at all. Checking only ``full is None`` therefore
+    missed every text-free page, and those jobs failed with "produced 0 blocks".
+
+    ``.text`` is the annotation's whole UTF-8 text, so an empty string is the
+    engine saying "I read nothing here".
+    """
+    if full is None:
+        return False
+    return bool((getattr(full, "text", "") or "").strip())
+
+
 def _aggregate_json_results(
     bucket: str, prefix: str, pdf_path: str | None = None
 ) -> list[tuple[int, OcrResult]]:
@@ -308,10 +324,13 @@ def _aggregate_json_results(
             continue
 
         full = getattr(parsed, "full_text_annotation", None)
-        if full is None:
-            # Vision answered for this page and returned no annotation: the
-            # page holds no text (a stamp, a blank sheet, a photo). Record that
-            # as evidence, so the caller can skip instead of failing the job.
+        if not _annotation_has_text(full):
+            # Vision answered for this page and read no words (a stamp, a blank
+            # sheet, a photo). Record that as evidence, so the caller can skip
+            # instead of failing the job. Note it is NOT enough to check
+            # `full is None`: a text-free page still comes back with an
+            # annotation object carrying page dimensions (measured: 0 blocks,
+            # dims 496x565 on a stamp image).
             # The unparsable-JSON branch above deliberately keeps the default
             # True: a response we could not read is a bug, not an empty page.
             out.append(

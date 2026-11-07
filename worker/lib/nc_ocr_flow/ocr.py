@@ -100,6 +100,48 @@ class ProcessResult:
 # --- Main entry point -----------------------------------------------------
 
 
+def _save_finalized(doc, out_pdf) -> None:
+    """Write the text layer back, rewriting the file when appending is refused.
+
+    ``saveIncr`` appends a revision to the file PyMuPDF opened, which is the
+    right write for a user's live document. It is refused for documents that had
+    to be repaired on open, and the old fallback here — ``doc.save(out_pdf)`` —
+    could not work either: saving non-incrementally onto the file you opened
+    raises ``ValueError("save to original must be incremental")``. That refusal
+    killed production jobs *after* the engine had been paid, three in one folder
+    run.
+
+    So the fallback writes a sibling temp file and replaces the original
+    atomically, and it checks the page count before the swap: losing pages here
+    would mean handing the user a damaged scan.
+    """
+    import fitz
+
+    try:
+        doc.saveIncr()
+        return
+    except Exception as exc:
+        log.warning("finalize: incremental save failed (%s); rewriting", exc)
+
+    tmp_path = Path(out_pdf).with_name(Path(out_pdf).name + ".finalize.tmp")
+    try:
+        doc.save(str(tmp_path), garbage=4, deflate=True)
+        rebuilt = fitz.open(str(tmp_path))
+        try:
+            pages_after = rebuilt.page_count
+        finally:
+            rebuilt.close()
+        if pages_after != doc.page_count:
+            raise RuntimeError(
+                f"finalize rewrite changed the page count for {out_pdf}: "
+                f"{doc.page_count} -> {pages_after}; refusing to replace it"
+            )
+        os.replace(tmp_path, out_pdf)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 def process_pdf(
     input_path: str | Path,
     output_path: str | Path | None = None,
@@ -298,10 +340,7 @@ def _finalize(
         # saveIncr writes a new revision to the same file (PyMuPDF's
         # standard "save incrementally" path). If the file didn't exist
         # before, fall back to a full save.
-        try:
-            doc.saveIncr()
-        except Exception:
-            doc.save(out_pdf, garbage=4, deflate=True)
+        _save_finalized(doc, out_pdf)
     finally:
         doc.close()
 
