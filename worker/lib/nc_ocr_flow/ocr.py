@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .ocr_models import OcrResult
+from .pdfio import write_in_place
 
 log = logging.getLogger(__name__)
 
@@ -101,45 +102,15 @@ class ProcessResult:
 
 
 def _save_finalized(doc, out_pdf) -> None:
-    """Write the text layer back, rewriting the file when appending is refused.
+    """Write the text layer back through the one PDF writer.
 
-    ``saveIncr`` appends a revision to the file PyMuPDF opened, which is the
-    right write for a user's live document. It is refused for documents that had
-    to be repaired on open, and the old fallback here — ``doc.save(out_pdf)`` —
-    could not work either: saving non-incrementally onto the file you opened
-    raises ``ValueError("save to original must be incremental")``. That refusal
-    killed production jobs *after* the engine had been paid, three in one folder
-    run.
-
-    So the fallback writes a sibling temp file and replaces the original
-    atomically, and it checks the page count before the swap: losing pages here
-    would mean handing the user a damaged scan.
+    Kept as the embed-path call site; the write rules — incremental fast path,
+    verified atomic rewrite, fsync, mode inheritance, no temp on any failure —
+    live in :func:`nc_ocr_flow.pdfio.write_in_place`. This function previously
+    carried its own copy of that algorithm, which drifted from the stamp's copy:
+    #54 fixed one, #57 the other, and the file was written twice per job.
     """
-    import fitz
-
-    try:
-        doc.saveIncr()
-        return
-    except Exception as exc:
-        log.warning("finalize: incremental save failed (%s); rewriting", exc)
-
-    tmp_path = Path(out_pdf).with_name(Path(out_pdf).name + ".finalize.tmp")
-    try:
-        doc.save(str(tmp_path), garbage=4, deflate=True)
-        rebuilt = fitz.open(str(tmp_path))
-        try:
-            pages_after = rebuilt.page_count
-        finally:
-            rebuilt.close()
-        if pages_after != doc.page_count:
-            raise RuntimeError(
-                f"finalize rewrite changed the page count for {out_pdf}: "
-                f"{doc.page_count} -> {pages_after}; refusing to replace it"
-            )
-        os.replace(tmp_path, out_pdf)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
+    write_in_place(doc, Path(out_pdf), garbage=4)
 
 
 def process_pdf(

@@ -97,7 +97,7 @@ def test_finalize_never_replaces_the_file_with_a_short_rewrite(tmp_path):
     original = pdf.read_bytes()
     doc = pymupdf.open(str(pdf))
     try:
-        with pytest.raises(RuntimeError, match="refusing to replace it"):
+        with pytest.raises(RuntimeError, match="refusing to replace the original"):
             ocr._save_finalized(_RefusesIncrementalSave(doc, damage_on_save=True), pdf)
     finally:
         doc.close()

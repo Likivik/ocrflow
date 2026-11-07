@@ -35,6 +35,7 @@ from . import jobstore
 from .classifier import ClassifierUnavailable, classify
 from .ocr import process_pdf
 from .pdf_classify import classify_pdf
+from .pdfio import write_in_place
 from .queue_client import QueueClient
 from .scheduler import scheduler
 
@@ -1178,59 +1179,15 @@ def _stamp_metadata(
 
 
 def _save_stamped_pdf(doc, pdf_path: Path) -> None:
-    """Persist the stamp, rewriting the file when incremental save is refused.
+    """Persist the stamp through the one PDF writer.
 
-    ``saveIncr`` appends a revision to the file it opened, which is the right
-    write for a user's live document, and it is tried first. Some files cannot
-    take it — PyMuPDF raises ``ValueError("save to original must be
-    incremental")`` for documents it had to repair on open, and the identical
-    guard in ``ocr._finalize`` has caught that case for the text layer for a
-    while. Here it escaped: three production files failed *after* the paid OCR
-    work was done.
-
-    The fallback cannot write in place (that is what was refused), so it writes
-    a sibling temp file and replaces the original atomically — and it verifies
-    the page and image counts first, because the one thing worse than failing to
-    stamp a file is replacing it with a damaged copy.
+    Kept as the call-site name the stamp path and its tests use; the write
+    itself — incremental fast path, verified atomic rewrite, fsync, mode
+    inheritance — lives in :func:`nc_ocr_flow.pdfio.write_in_place`. The two
+    copies of that algorithm drifted apart (#54 fixed one, #57 the other),
+    which is why there is now one.
     """
-    pages_before = doc.page_count
-    # Indexing, not iteration: pymupdf's Document is not iterable and mypy
-    # rejects `for page in doc` (the type gate caught this exact shape once
-    # before, in the page-stats measurement).
-    images_before = sum(len(doc.load_page(i).get_images()) for i in range(pages_before))
-
-    try:
-        doc.saveIncr()
-        return
-    except Exception as exc:  # ValueError: "save to original must be incremental"
-        log.warning(
-            "stamp: incremental save refused for %s (%s: %s); rewriting",
-            pdf_path,
-            type(exc).__name__,
-            exc,
-        )
-
-    import pymupdf
-
-    tmp = pdf_path.with_name(pdf_path.name + ".stamp.tmp")
-    try:
-        doc.save(str(tmp), garbage=0, deflate=True)
-        rebuilt = pymupdf.open(str(tmp))
-        try:
-            pages_after = rebuilt.page_count
-            images_after = sum(len(rebuilt.load_page(i).get_images()) for i in range(pages_after))
-        finally:
-            rebuilt.close()
-        if (pages_after, images_after) != (pages_before, images_before):
-            raise RuntimeError(
-                f"stamp rewrite changed {pdf_path}: {pages_before} pages/"
-                f"{images_before} images became {pages_after}/{images_after}; "
-                "refusing to replace the original"
-            )
-        os.replace(tmp, pdf_path)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
+    write_in_place(doc, pdf_path, garbage=0)
 
 
 def _build_stamp_xmp(engine: str, engine_api: str = "unknown", engine_ver: str = "unknown") -> str:
