@@ -23,6 +23,29 @@ from pathlib import Path
 from typing import Any
 
 from .queue_client import Job, QueueClient
+from .readiness import report_configured_engine
+
+
+# What the worker can tell the app about a failure. Deliberately small: every
+# value here exists in the app's RetryPolicy table, and anything the worker does
+# not recognise is ``unknown`` — bounded-retryable, never silently terminal.
+def classify_failure(exc: BaseException) -> str:
+    name = type(exc).__name__
+    text = str(exc).lower()
+    if "empty file" in text or "streamed an empty" in text:
+        return "empty_stream"
+    if "no such job" in text or "no longer exists" in text:
+        return "app_4xx"
+    if "credentials" in text or "defaultcredentials" in name.lower():
+        return "credentials_missing"
+    if name in ("Timeout", "TimeoutError", "RetryError", "ConnectTimeout", "ReadTimeout"):
+        return "engine_timeout"
+    if name in ("ConnectionError", "HTTPError", "RequestException"):
+        return "app_5xx"
+    if name == "QueueProtocolError":
+        return "app_5xx"
+    return "unknown"
+
 
 log = logging.getLogger("nc_ocr_flow.runner")
 
@@ -95,8 +118,14 @@ def run_once(
     try:
         outcome = process(job.path, job.file_id or 0, engine=job.engine, job_id=job.id)
     except Exception as exc:
-        log.warning("job %s failed: %s", job.id, exc)
-        client.failure(job.id, error=f"{type(exc).__name__}: {exc}", reason="worker_error")
+        code = classify_failure(exc)
+        log.warning("job %s failed (%s): %s", job.id, code, exc)
+        client.failure(
+            job.id,
+            error=f"{type(exc).__name__}: {exc}",
+            reason="worker_error",
+            reason_code=code,
+        )
         return True
 
     _report(client, job, outcome or {})
@@ -193,6 +222,11 @@ def main(argv: list[str] | None = None) -> int:
         level=os.environ.get("NC_OCR_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    # Name an unusable engine at boot instead of letting the first job
+    # discover it: the host had tessdata but no ocrmypdf or tesseract
+    # binary, and the module accepted the value regardless.
+    report_configured_engine()
 
     base_url = os.environ.get("NC_OCR_URL", "").rstrip("/")
     if not base_url:

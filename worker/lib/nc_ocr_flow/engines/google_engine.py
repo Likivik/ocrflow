@@ -48,6 +48,7 @@ The embedded text layer is built from the words in Google's order.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tempfile
@@ -236,6 +237,22 @@ def _ocr_pdf(pdf_path: str) -> list[tuple[int, OcrResult]]:
     return out
 
 
+def _annotation_has_text(full) -> bool:
+    """Whether Vision's annotation actually carries text.
+
+    ``full_text_annotation`` is NOT a reliable "there is text" signal: measured on
+    a stamp image, Vision returned an annotation object with page dimensions
+    (496x565) and no words at all. Checking only ``full is None`` therefore
+    missed every text-free page, and those jobs failed with "produced 0 blocks".
+
+    ``.text`` is the annotation's whole UTF-8 text, so an empty string is the
+    engine saying "I read nothing here".
+    """
+    if full is None:
+        return False
+    return bool((getattr(full, "text", "") or "").strip())
+
+
 def _aggregate_json_results(
     bucket: str, prefix: str, pdf_path: str | None = None
 ) -> list[tuple[int, OcrResult]]:
@@ -307,8 +324,21 @@ def _aggregate_json_results(
             continue
 
         full = getattr(parsed, "full_text_annotation", None)
-        if full is None:
-            out.append((page_num - 1, OcrResult(blocks=[], page_width=0.0, page_height=0.0)))
+        if not _annotation_has_text(full):
+            # Vision answered for this page and read no words (a stamp, a blank
+            # sheet, a photo). Record that as evidence, so the caller can skip
+            # instead of failing the job. Note it is NOT enough to check
+            # `full is None`: a text-free page still comes back with an
+            # annotation object carrying page dimensions (measured: 0 blocks,
+            # dims 496x565 on a stamp image).
+            # The unparsable-JSON branch above deliberately keeps the default
+            # True: a response we could not read is a bug, not an empty page.
+            out.append(
+                (
+                    page_num - 1,
+                    OcrResult(blocks=[], page_width=0.0, page_height=0.0, source_had_text=False),
+                )
+            )
             continue
         page_idx = page_num - 1
         page_w, page_h = _page_dims(full, parsed, pdf_path, page_idx)
@@ -642,11 +672,34 @@ def _cleanup_bucket(name: str | None) -> None:
         log.warning("vision: bucket cleanup failed: %s", exc)
 
 
-def _project_id(client) -> str | None:
-    """Resolve the active GCP project id."""
-    if hasattr(client, "_channel") and hasattr(client, "_transport"):
-        return None  # client doesn't expose project directly; SDK handles
-    return os.environ.get("NC_OCR_GOOGLE_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+def _project_id(client=None) -> str | None:
+    """Resolve the active GCP project id.
+
+    Order: ``NC_OCR_GOOGLE_PROJECT``, ``GOOGLE_CLOUD_PROJECT``, then the
+    ``project_id`` inside the service-account file that
+    ``GOOGLE_APPLICATION_CREDENTIALS`` points at.
+
+    The old body returned ``None`` whenever the client exposed ``_transport``
+    — i.e. for every real client — so the documented "overrides the one in the
+    credential file" fallback never existed. Batch OCR then built a storage
+    client with ``project=None`` and bucket creation failed with
+    ``400 Required parameter: project``.
+    """
+    explicit = os.environ.get("NC_OCR_GOOGLE_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if explicit:
+        return explicit
+
+    path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if path:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                project = json.load(fh).get("project_id")
+            if project:
+                return str(project)
+        except (OSError, ValueError) as exc:
+            log.warning("google: cannot read project_id from %s: %s", path, exc)
+
+    return getattr(client, "project", None) or None
 
 
 # --- Long-running operation poll -------------------------------------------

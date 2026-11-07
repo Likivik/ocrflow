@@ -719,3 +719,42 @@ def test_page_dims_fallback_dpi_matches_orchestrator_render_dpi():
     from nc_ocr_flow import ocr as _ocr
 
     assert _ocr._render_page_png.__defaults__[0] == 200
+
+
+class TestProjectResolution:
+    """The project id decides whether batch OCR can create its scratch bucket.
+
+    `_project_id` used to return None for every real client, so the documented
+    "overrides the one in the credential file" fallback never ran and the batch
+    path died with `400 Required parameter: project`.
+    """
+
+    def test_reads_project_from_the_service_account_file(self, tmp_path, monkeypatch):
+        from nc_ocr_flow.engines import google_engine
+
+        key = tmp_path / "key.json"
+        key.write_text('{"type": "service_account", "project_id": "from-the-key"}')
+        monkeypatch.delenv("NC_OCR_GOOGLE_PROJECT", raising=False)
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(key))
+
+        assert google_engine._project_id() == "from-the-key"
+
+    def test_an_explicit_project_wins(self, tmp_path, monkeypatch):
+        from nc_ocr_flow.engines import google_engine
+
+        key = tmp_path / "key.json"
+        key.write_text('{"project_id": "from-the-key"}')
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(key))
+        monkeypatch.setenv("NC_OCR_GOOGLE_PROJECT", "explicit")
+
+        assert google_engine._project_id() == "explicit"
+
+    def test_an_unreadable_file_does_not_raise(self, tmp_path, monkeypatch):
+        from nc_ocr_flow.engines import google_engine
+
+        monkeypatch.delenv("NC_OCR_GOOGLE_PROJECT", raising=False)
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(tmp_path / "missing.json"))
+
+        assert google_engine._project_id() is None

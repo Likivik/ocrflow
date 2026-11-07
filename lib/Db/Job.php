@@ -21,6 +21,8 @@ use OCP\AppFramework\Db\Entity;
  * @method string getPath()
  * @method string getStatus()
  * @method ?string getReason()
+ * @method ?string getReasonCode()
+ * @method ?bool getRetryable()
  * @method ?string getEngine()
  * @method ?string getClaimedBy()
  * @method int getAttempts()
@@ -39,6 +41,8 @@ class Job extends Entity
 	protected string $path = '';
 	protected string $status = 'queued';
 	protected ?string $reason = null;
+	protected ?string $reasonCode = null;
+	protected ?bool $retryable = null;
 	protected ?string $engine = null;
 	protected ?string $claimedBy = null;
 	protected int $attempts = 0;

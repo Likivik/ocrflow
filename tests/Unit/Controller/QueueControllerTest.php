@@ -10,6 +10,7 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\AppFramework\Http;
 use OCA\OcrFlow\Service\FileExchange;
 use OCP\IConfig;
@@ -48,6 +49,7 @@ class QueueControllerTest extends TestCase
             $config,
             $this->createMock(LoggerInterface::class),
             $this->createMock(FileExchange::class),
+            new RetryPolicy(),
         );
     }
 
@@ -243,6 +245,7 @@ class QueueControllerTest extends TestCase
             $config,
             $this->createMock(LoggerInterface::class),
             $this->createMock(FileExchange::class),
+            new RetryPolicy(),
         );
 
         $data = $controller->result(7)->getData();
@@ -274,6 +277,7 @@ class QueueControllerTest extends TestCase
             $config,
             $this->createMock(LoggerInterface::class),
             $this->createMock(FileExchange::class),
+            new RetryPolicy(),
         );
 
         // Not an error status: the job simply belongs to someone else now.
