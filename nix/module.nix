@@ -50,7 +50,7 @@ let
     # neither this module nor the host aspect ever set it, so a fresh boot
     # crash-looped while every gate stayed green. Found by the poweredge VM smoke.
     ${lib.optionalString (cfg.davUser != null) "export NC_OCR_DAV_USER=${lib.escapeShellArg cfg.davUser}"}
-${lib.concatMapStrings (name: "    export ${name}=${lib.escapeShellArg cfg.extraEnvironment.${name}}\n") (lib.attrNames cfg.extraEnvironment)}
+${lib.concatMapStrings (name: "    export ${name}=\"${cfg.extraEnvironment.${name}}\"\n") (lib.attrNames cfg.extraEnvironment)}
     exec ${python}/bin/python3 -m nc_ocr_flow.runner
   '';
 in
@@ -155,9 +155,17 @@ in
       };
       description = ''
         Extra environment for the worker, for everything the engines need and this
-        module does not model: Google Vision's key path and project, a MiniMax key,
-        an engine selector. `$CREDENTIALS_DIRECTORY` expands to the unit's private
-        credentials directory, so a secret is referenced there and never inlined.
+        module does not model: Google Vision's key path and project, a MiniMax key.
+
+        The value reaches the worker's start script between double quotes, so the
+        shell expands exactly one thing in it: `$CREDENTIALS_DIRECTORY`, the unit's
+        private credentials directory. That is how a secret is referenced without
+        ever being inlined — `LoadCredential` copies the file there. (It used to be
+        single-quoted, so the variable stayed literal and the Google engine failed
+        with "File $CREDENTIALS_DIRECTORY/google-ocr-key was not found".)
+
+        Do not pick the engine here either: `services.ocrflow.engine` does that and
+        also writes the app's own setting.
       '';
     };
 
@@ -338,5 +346,37 @@ in
         '');
       }
     ))
+
+    # The app decides whether to queue at all with its OWN setting, and the
+    # module used to write the engine only into the worker's environment. A host
+    # configured `engine = "google"` therefore queued nothing and the worker sat
+    # idle: the two halves disagreed and no gate noticed, because both were
+    # green. Writing the app value from the same option makes one choice mean one
+    # thing, and a fresh install is configured without an operator remembering an
+    # occ command.
+    (lib.mkIf (cfg.enable && cfg.engine != null && config.services ? nextcloud && (config.services.nextcloud.enable or false)) {
+      systemd.services.ocrflow-app-engine = {
+        description = "Apply services.ocrflow.engine to the ocrflow app config";
+        after = [ "nextcloud-setup.service" ];
+        wants = [ "nextcloud-setup.service" ];
+        wantedBy = [ "multi-user.target" ];
+        serviceConfig = {
+          # occ refuses to run as root: "Console has to be executed with the user
+          # that owns config/config.php". nixpkgs hardcodes that user as
+          # "nextcloud" (five places, no option), so there is nothing to read from
+          # config here — `services.nextcloud.user` does not exist.
+          User = "nextcloud";
+          Type = "oneshot";
+          RemainAfterExit = true;
+          # `nextcloud-occ` requires EVERY declared Nextcloud secret credential,
+          # not just the ones this unit uses, or it aborts before running occ.
+          LoadCredential = lib.mapAttrsToList (n: p: "${n}:${p}") config.services.nextcloud.secrets;
+        };
+        script = ''
+          ${config.services.nextcloud.occ}/bin/nextcloud-occ \
+            config:app:set ocrflow engine --value=${lib.escapeShellArg cfg.engine}
+        '';
+      };
+    })
   ];
 }

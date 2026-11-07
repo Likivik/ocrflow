@@ -24,6 +24,9 @@ use OCP\IDBConnection;
 class Queue extends QBMapper
 {
 	public const STATUS_QUEUED = 'queued';
+
+	/** Attempts after which a retryable failure stays failed. */
+	private const MAX_ATTEMPTS = 3;
 	public const STATUS_CLAIMED = 'claimed';
 	public const STATUS_DONE = 'done';
 	public const STATUS_SKIPPED = 'skipped';
@@ -70,12 +73,27 @@ class Queue extends QBMapper
 			return null;
 		}
 
+		// A zero-byte source is a data problem, not work: the worker can only
+		// fetch an empty stream and fail after transport, which is exactly the
+		// QueueProtocolError class that died four times in production. Decide it
+		// here, where the size is already known, and record it as a skip.
+		$emptySource = $size !== null && $size <= 0;
+
 		$qb = $this->db->getQueryBuilder();
 		$qb->insert(self::JOBS)
 			->values([
 				'path' => $qb->createNamedParameter($path),
 				'file_id' => $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
-				'status' => $qb->createNamedParameter(self::STATUS_QUEUED),
+				'status' => $qb->createNamedParameter(
+					$emptySource ? 'skipped' : self::STATUS_QUEUED,
+				),
+				'reason' => $qb->createNamedParameter($emptySource ? 'empty_source' : null),
+				'reason_code' => $qb->createNamedParameter($emptySource ? 'empty_source' : null),
+				'retryable' => $qb->createNamedParameter($emptySource ? false : null),
+				'finished_at' => $qb->createNamedParameter(
+					$emptySource ? time() : null,
+					IQueryBuilder::PARAM_INT,
+				),
 				'created_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
 				'size' => $qb->createNamedParameter($size, IQueryBuilder::PARAM_INT),
 				'etag' => $qb->createNamedParameter($etag),
@@ -95,7 +113,19 @@ class Queue extends QBMapper
 			throw $e;
 		}
 
-		return (int) $this->db->getLastInsertId(self::JOBS);
+		if ($emptySource) {
+			// The row is recorded (the decision is visible in the queue view),
+			// but nothing was queued: returning null keeps the caller's "queued"
+			// count truthful.
+			return null;
+		}
+
+		// `IDBConnection::getLastInsertId()` was removed in Nextcloud 34; the
+		// query builder owns it now. Calling it on the connection threw
+		// "Call to undefined method ConnectionAdapter::getLastInsertId()" on every
+		// upload — the row landed, the listener logged a failure and returned no
+		// id, so nothing downstream could tell the job it had just created.
+		return $qb->getLastInsertId();
 	}
 
 	/**
@@ -209,7 +239,8 @@ class Queue extends QBMapper
 	 * one to the per-file row, so the Files sidebar answer does not depend on the
 	 * history table being complete.
 	 *
-	 * @param array{status: string, reason?: ?string, engine?: ?string, pages?: ?int,
+	 * @param array{status: string, reason?: ?string, reason_code?: ?string, retryable?: ?bool,
+ *              engine?: ?string, pages?: ?int,
 	 *              chars?: ?int, stamp_version?: ?string, error?: ?string} $result
 	 * @throws Exception
 	 */
@@ -225,6 +256,10 @@ class Queue extends QBMapper
 		$qb->update(self::JOBS)
 			->set('status', $qb->createNamedParameter($status))
 			->set('reason', $qb->createNamedParameter($result['reason'] ?? null))
+			->set('reason_code', $qb->createNamedParameter($result['reason_code'] ?? null))
+			->set('retryable', ($result['retryable'] ?? null) === null
+				? $qb->createNamedParameter(null)
+				: $qb->createNamedParameter((bool) $result['retryable'], IQueryBuilder::PARAM_BOOL))
 			->set('engine', $qb->createNamedParameter($result['engine'] ?? null))
 			->set('pages', $qb->createNamedParameter($result['pages'] ?? null, IQueryBuilder::PARAM_INT))
 			->set('chars', $qb->createNamedParameter($result['chars'] ?? null, IQueryBuilder::PARAM_INT))
@@ -242,6 +277,25 @@ class Queue extends QBMapper
 
 		if ($updated) {
 			$this->recordFile($job, $status, $result);
+		}
+
+		// Retry is the app's decision, taken here because this is the only place
+		// that knows both the policy verdict and the attempt count. The error
+		// text is kept on the requeued row: the next failure must not erase the
+		// evidence of the first.
+		if ($updated && $status === self::STATUS_ERROR && ($result['retryable'] ?? false) === true) {
+			$attempts = (int) $job->getAttempts();
+			if ($attempts + 1 < self::MAX_ATTEMPTS) {
+				$retry = $this->db->getQueryBuilder();
+				$retry->update(self::JOBS)
+					->set('status', $retry->createNamedParameter(self::STATUS_QUEUED))
+					->set('attempts', $retry->createNamedParameter($attempts + 1, IQueryBuilder::PARAM_INT))
+					->set('claimed_by', $retry->createNamedParameter(null))
+					->set('claimed_at', $retry->createNamedParameter(null))
+					->set('finished_at', $retry->createNamedParameter(null))
+					->where($retry->expr()->eq('id', $retry->createNamedParameter($id, IQueryBuilder::PARAM_INT)));
+				$retry->executeStatement();
+			}
 		}
 
 		return $updated;

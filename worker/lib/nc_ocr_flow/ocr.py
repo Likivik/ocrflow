@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .ocr_models import OcrResult
+from .pdfio import write_in_place
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +99,18 @@ class ProcessResult:
 
 
 # --- Main entry point -----------------------------------------------------
+
+
+def _save_finalized(doc, out_pdf) -> None:
+    """Write the text layer back through the one PDF writer.
+
+    Kept as the embed-path call site; the write rules — incremental fast path,
+    verified atomic rewrite, fsync, mode inheritance, no temp on any failure —
+    live in :func:`nc_ocr_flow.pdfio.write_in_place`. This function previously
+    carried its own copy of that algorithm, which drifted from the stamp's copy:
+    #54 fixed one, #57 the other, and the file was written twice per job.
+    """
+    write_in_place(doc, Path(out_pdf), garbage=4)
 
 
 def process_pdf(
@@ -298,10 +311,7 @@ def _finalize(
         # saveIncr writes a new revision to the same file (PyMuPDF's
         # standard "save incrementally" path). If the file didn't exist
         # before, fall back to a full save.
-        try:
-            doc.saveIncr()
-        except Exception:
-            doc.save(out_pdf, garbage=4, deflate=True)
+        _save_finalized(doc, out_pdf)
     finally:
         doc.close()
 
