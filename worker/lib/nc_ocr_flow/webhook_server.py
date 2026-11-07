@@ -905,12 +905,20 @@ def reconcile_stale_files(
 
 
 def _image_to_pdf(image_path: Path) -> Path:
-    """Convert image to PDF using img2pdf."""
+    """Convert image to PDF using img2pdf.
+
+    ``rotation=ifvalid`` because the EXIF Orientation tag is not trustworthy:
+    the spec defines 1-8 and a tag of 0 is broken metadata, but img2pdf raises
+    ``ExifOrientationError("Invalid rotation (0)")`` and refuses the whole file
+    over it (two production files died that way). Page orientation is decided
+    from the pixels later, by ``preorient_pdf`` — and engines read rotated text
+    regardless — so a legal tag is honoured and an illegal one is ignored.
+    """
     import img2pdf
 
     target = image_path.with_suffix(".pdf")
     with target.open("wb") as f:
-        f.write(img2pdf.convert(str(image_path)))
+        f.write(img2pdf.convert(str(image_path), rotation=img2pdf.Rotation.ifvalid))
     return target
 
 
