@@ -147,6 +147,10 @@ SKIP_REASON_BORN_DIGITAL = "born_digital_text_based"
 #: guard can be reported distinctly instead of being conflated with
 #: the other two.
 SKIP_REASON_TEXT_DENSITY_GUARD = "text_density_guard_low"
+#: The file is damaged on disk: it will not open, or opens with zero pages.
+#: Not retryable — the engine answers 400 for it every time (measured on three
+#: production files), so retrying only spends money and quota.
+SKIP_REASON_BROKEN_PDF = "broken_pdf"
 #: The old, undifferentiated string.  External consumers and stored
 #: rows may still reference it; we keep it exported so callers can
 #: compare against either form.
@@ -1526,6 +1530,7 @@ def _needs_ocr_decision(
         :data:`SKIP_REASON_STAMPED_BY_US` /
         :data:`SKIP_REASON_BORN_DIGITAL` /
         :data:`SKIP_REASON_TEXT_DENSITY_GUARD` /
+        :data:`SKIP_REASON_BROKEN_PDF` /
         :data:`REASON_FOREIGN_REWRITE`.
 
     A skip is taken when ``force`` is False AND one of:
@@ -1596,6 +1601,16 @@ def _needs_ocr_decision(
 
     try:
         cls = classify_pdf(path)
+        # A damaged file is not a text question. Decided here, on the normal
+        # path: `force=true` returns earlier, because an operator insisting on a
+        # specific file is entitled to hear the engine's 400 for himself.
+        if cls.get("broken_reason"):
+            log.warning(
+                "skipping %s: damaged PDF (%s)",
+                nc_path or path,
+                cls["broken_reason"],
+            )
+            return False, SKIP_REASON_BROKEN_PDF
         needs = bool(cls.get("needs_ocr", True))
     except Exception as exc:
         # Classifier crashed — default to OCR (better safe than skip).
