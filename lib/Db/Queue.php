@@ -70,12 +70,27 @@ class Queue extends QBMapper
 			return null;
 		}
 
+		// A zero-byte source is a data problem, not work: the worker can only
+		// fetch an empty stream and fail after transport, which is exactly the
+		// QueueProtocolError class that died four times in production. Decide it
+		// here, where the size is already known, and record it as a skip.
+		$emptySource = $size !== null && $size <= 0;
+
 		$qb = $this->db->getQueryBuilder();
 		$qb->insert(self::JOBS)
 			->values([
 				'path' => $qb->createNamedParameter($path),
 				'file_id' => $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
-				'status' => $qb->createNamedParameter(self::STATUS_QUEUED),
+				'status' => $qb->createNamedParameter(
+					$emptySource ? 'skipped' : self::STATUS_QUEUED,
+				),
+				'reason' => $qb->createNamedParameter($emptySource ? 'empty_source' : null),
+				'reason_code' => $qb->createNamedParameter($emptySource ? 'empty_source' : null),
+				'retryable' => $qb->createNamedParameter($emptySource ? false : null),
+				'finished_at' => $qb->createNamedParameter(
+					$emptySource ? time() : null,
+					IQueryBuilder::PARAM_INT,
+				),
 				'created_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
 				'size' => $qb->createNamedParameter($size, IQueryBuilder::PARAM_INT),
 				'etag' => $qb->createNamedParameter($etag),
@@ -93,6 +108,13 @@ class Queue extends QBMapper
 				return null;
 			}
 			throw $e;
+		}
+
+		if ($emptySource) {
+			// The row is recorded (the decision is visible in the queue view),
+			// but nothing was queued: returning null keeps the caller's "queued"
+			// count truthful.
+			return null;
 		}
 
 		// `IDBConnection::getLastInsertId()` was removed in Nextcloud 34; the
