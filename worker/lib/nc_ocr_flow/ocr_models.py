@@ -38,6 +38,12 @@ class OcrResult:
     blocks: list[OcrBlock]
     page_width: float  # PNG image width in pixels
     page_height: float  # PNG image height in pixels
+    #: Whether the engine's response carried text for this page. True even when
+    #: the block parser produced nothing (that is a parser bug, and it must stay
+    #: loud). False only when the engine answered for the page and returned no
+    #: annotation at all — an honest "there is nothing to read here", which is
+    #: a skip, not a failure.
+    source_had_text: bool = True
 
 
 __all__ = ["OcrBlock", "OcrResult"]

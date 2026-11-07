@@ -309,7 +309,17 @@ def _aggregate_json_results(
 
         full = getattr(parsed, "full_text_annotation", None)
         if full is None:
-            out.append((page_num - 1, OcrResult(blocks=[], page_width=0.0, page_height=0.0)))
+            # Vision answered for this page and returned no annotation: the
+            # page holds no text (a stamp, a blank sheet, a photo). Record that
+            # as evidence, so the caller can skip instead of failing the job.
+            # The unparsable-JSON branch above deliberately keeps the default
+            # True: a response we could not read is a bug, not an empty page.
+            out.append(
+                (
+                    page_num - 1,
+                    OcrResult(blocks=[], page_width=0.0, page_height=0.0, source_had_text=False),
+                )
+            )
             continue
         page_idx = page_num - 1
         page_w, page_h = _page_dims(full, parsed, pdf_path, page_idx)
