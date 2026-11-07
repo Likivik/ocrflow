@@ -113,11 +113,23 @@ class QueueClient:
         payload = {k: v for k, v in fields.items() if v is not None}
         self._post(f"queue/{job_id}/result", data=payload)
 
-    def failure(self, job_id: int, error: str, reason: str | None = None) -> None:
-        self._post(
-            f"queue/{job_id}/failure",
-            data={"error": error[:500], "reason": reason or ""},
-        )
+    def failure(
+        self,
+        job_id: int,
+        error: str,
+        reason: str | None = None,
+        reason_code: str | None = None,
+        retryable: bool | None = None,
+    ) -> None:
+        # ``reason_code`` is the app's vocabulary, not ours to invent: the app
+        # records anything it does not know as ``unknown`` and decides retry
+        # itself. ``retryable`` is a hint and is never obeyed.
+        payload: dict[str, str] = {"error": error[:500], "reason": reason or ""}
+        if reason_code is not None:
+            payload["reason_code"] = reason_code
+        if retryable is not None:
+            payload["retryable"] = "1" if retryable else "0"
+        self._post(f"queue/{job_id}/failure", data=payload)
 
     def fetch_file(self, job_id: int, dest: Path) -> Path:
         """Download a job's bytes into ``dest``.

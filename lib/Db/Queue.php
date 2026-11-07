@@ -24,6 +24,9 @@ use OCP\IDBConnection;
 class Queue extends QBMapper
 {
 	public const STATUS_QUEUED = 'queued';
+
+	/** Attempts after which a retryable failure stays failed. */
+	private const MAX_ATTEMPTS = 3;
 	public const STATUS_CLAIMED = 'claimed';
 	public const STATUS_DONE = 'done';
 	public const STATUS_SKIPPED = 'skipped';
@@ -274,6 +277,25 @@ class Queue extends QBMapper
 
 		if ($updated) {
 			$this->recordFile($job, $status, $result);
+		}
+
+		// Retry is the app's decision, taken here because this is the only place
+		// that knows both the policy verdict and the attempt count. The error
+		// text is kept on the requeued row: the next failure must not erase the
+		// evidence of the first.
+		if ($updated && $status === self::STATUS_ERROR && ($result['retryable'] ?? false) === true) {
+			$attempts = (int) $job->getAttempts();
+			if ($attempts + 1 < self::MAX_ATTEMPTS) {
+				$retry = $this->db->getQueryBuilder();
+				$retry->update(self::JOBS)
+					->set('status', $retry->createNamedParameter(self::STATUS_QUEUED))
+					->set('attempts', $retry->createNamedParameter($attempts + 1, IQueryBuilder::PARAM_INT))
+					->set('claimed_by', $retry->createNamedParameter(null))
+					->set('claimed_at', $retry->createNamedParameter(null))
+					->set('finished_at', $retry->createNamedParameter(null))
+					->where($retry->expr()->eq('id', $retry->createNamedParameter($id, IQueryBuilder::PARAM_INT)));
+				$retry->executeStatement();
+			}
 		}
 
 		return $updated;
