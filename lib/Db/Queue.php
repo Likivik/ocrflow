@@ -214,7 +214,8 @@ class Queue extends QBMapper
 	 * one to the per-file row, so the Files sidebar answer does not depend on the
 	 * history table being complete.
 	 *
-	 * @param array{status: string, reason?: ?string, engine?: ?string, pages?: ?int,
+	 * @param array{status: string, reason?: ?string, reason_code?: ?string, retryable?: ?bool,
+ *              engine?: ?string, pages?: ?int,
 	 *              chars?: ?int, stamp_version?: ?string, error?: ?string} $result
 	 * @throws Exception
 	 */
@@ -230,6 +231,10 @@ class Queue extends QBMapper
 		$qb->update(self::JOBS)
 			->set('status', $qb->createNamedParameter($status))
 			->set('reason', $qb->createNamedParameter($result['reason'] ?? null))
+			->set('reason_code', $qb->createNamedParameter($result['reason_code'] ?? null))
+			->set('retryable', ($result['retryable'] ?? null) === null
+				? $qb->createNamedParameter(null)
+				: $qb->createNamedParameter((bool) $result['retryable'], IQueryBuilder::PARAM_BOOL))
 			->set('engine', $qb->createNamedParameter($result['engine'] ?? null))
 			->set('pages', $qb->createNamedParameter($result['pages'] ?? null, IQueryBuilder::PARAM_INT))
 			->set('chars', $qb->createNamedParameter($result['chars'] ?? null, IQueryBuilder::PARAM_INT))
