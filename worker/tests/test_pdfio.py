@@ -77,7 +77,7 @@ def test_incremental_path_reports_without_temp(tmp_path):
 
 def test_refused_incremental_save_rewrites_verifies_and_inherits_mode(tmp_path):
     pdf = _two_page_pdf_with_images(tmp_path / "scan.pdf")
-    os.chmod(pdf, 0o640)
+    os.chmod(pdf, 0o600)
 
     doc = pymupdf.open(str(pdf))
     try:
@@ -88,7 +88,7 @@ def test_refused_incremental_save_rewrites_verifies_and_inherits_mode(tmp_path):
     assert report.mode == "rewrite"
     assert not list(tmp_path.glob("*.write.tmp")), "temp file left behind"
     # Without mode inheritance a 0600 user scan silently becomes 0644.
-    assert stat.S_IMODE(pdf.stat().st_mode) == 0o640, "mode was not inherited"
+    assert stat.S_IMODE(pdf.stat().st_mode) == 0o600, "mode was not inherited"
 
     check = pymupdf.open(str(pdf))
     try:
