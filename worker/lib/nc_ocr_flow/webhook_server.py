@@ -1635,8 +1635,20 @@ def _needs_ocr_decision(
     return False, SKIP_REASON_BORN_DIGITAL
 
 
-def _assert_ocr_produced_blocks(result, nc_path: str) -> None:
-    """Raise if a structured-OCR engine returned zero blocks (or tesseract
+def _assert_ocr_produced_blocks(result, nc_path: str) -> str | None:
+    """Return a skip reason when the file holds no text; raise when it is a bug.
+
+    Two outcomes look identical at the block count and are not the same thing:
+
+    * the engine answered for every page and carried **no annotation at all** — a
+      stamp, a blank sheet, a photo. Nothing to read and nothing to retry, so
+      this returns ``"no_text_detected"`` and the file is skipped, not failed.
+      Evidence: ``OcrResult.source_had_text``, which the Google aggregation sets
+      to False when ``full_text_annotation`` is absent.
+    * the engine carried text and the block parser produced nothing — the
+      documented bbox-parser bug. That still raises, because it must stay loud.
+
+    Raises if a structured-OCR engine returned zero blocks (or tesseract
     produced an empty text layer).
 
     Two engines populate ``result.page_results`` (google, minimax); the
@@ -1682,7 +1694,19 @@ def _assert_ocr_produced_blocks(result, nc_path: str) -> None:
         pages = result.page_results or []
         total_blocks = sum(len(p.blocks) for p in pages)
         if total_blocks > 0:
-            return
+            return None
+        if pages and not any(getattr(p, "source_had_text", True) for p in pages):
+            # Measured on the real files: three stamp/blank images all came back
+            # with an annotation-free page, and both Google Vision and tesseract
+            # find 0 characters in them. That is a correct answer, not a broken
+            # engine — so it is a skip, and it is never retried.
+            log.info(
+                "OCR engine=%s found no text on any of %d page(s) for %s; skipping",
+                engine,
+                len(pages),
+                nc_path,
+            )
+            return "no_text_detected"
         raise RuntimeError(
             f"OCR engine={engine} produced 0 blocks across "
             f"{len(pages)} page(s) for {nc_path!r}: empty result; file not "
@@ -1711,7 +1735,7 @@ def _assert_ocr_produced_blocks(result, nc_path: str) -> None:
                 f"eligible for retry"
             ) from exc
         if per_page >= MIN_TEXT_CHARS_PER_PAGE:
-            return
+            return None
         raise RuntimeError(
             f"OCR engine=tesseract produced an empty/garbled text layer "
             f"({chars} chars across {pages} page(s), "
@@ -1722,6 +1746,7 @@ def _assert_ocr_produced_blocks(result, nc_path: str) -> None:
     # Any other engine (auto/legacy): treat as structured — pass on
     # page_results without raising. New structured engines can be
     # added to the tuple above as they ship.
+    return None
 
 
 def _process_file(
@@ -1798,7 +1823,9 @@ def _process_file(
             # silently) must NOT mark the file ``done`` — the worker
             # sees the raise as ``status=error`` and the next webhook
             # /rescan retries it. See :func:`_assert_ocr_produced_blocks`.
-            _assert_ocr_produced_blocks(result, nc_path)
+            skip_reason = _assert_ocr_produced_blocks(result, nc_path)
+            if skip_reason:
+                return {"path": nc_path, "skipped": True, "reason": skip_reason}
 
             # Stamp PDF metadata: engine, timestamp, pages per engine
             _stamp_metadata(
@@ -1933,7 +1960,9 @@ def _process_file(
             # Gate the stamp + upload on a non-empty OCR result. See the
             # image branch above for the rationale and
             # :func:`_assert_ocr_produced_blocks` for the engine list.
-            _assert_ocr_produced_blocks(result, nc_path)
+            skip_reason = _assert_ocr_produced_blocks(result, nc_path)
+            if skip_reason:
+                return {"path": nc_path, "skipped": True, "reason": skip_reason}
 
             # Stamp PDF metadata: engine, timestamp, pages per engine
             _stamp_metadata(
