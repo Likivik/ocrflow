@@ -79,6 +79,21 @@ class QueueController extends OCSController
 			return new DataResponse(['message' => 'file no longer exists'], Http::STATUS_NOT_FOUND);
 		}
 
+		$stat = fstat($opened['handle']);
+		if (is_array($stat) && (int) ($stat['size'] ?? 0) === 0) {
+			// The source is empty on disk. The worker refuses an empty stream by
+			// design; naming the cause here turns a retryable-looking transport
+			// fault into a terminal data problem the worker can classify as
+			// empty_source.
+			if (is_resource($opened['handle'])) {
+				fclose($opened['handle']);
+			}
+			return new DataResponse(
+				['message' => 'file is empty', 'reason_code' => 'empty_source'],
+				Http::STATUS_UNPROCESSABLE_ENTITY,
+			);
+		}
+
 		// StreamResponse takes (pathOrHandle, int $status, array $headers). Passing
 		// the handle second put a resource where an int belongs and every fetch
 		// answered 500 "Argument #2 ($status) must be of type int, resource given".
