@@ -35,6 +35,7 @@ from . import jobstore
 from .classifier import ClassifierUnavailable, classify
 from .ocr import process_pdf
 from .pdf_classify import classify_pdf
+from .pdfio import write_in_place
 from .queue_client import QueueClient
 from .scheduler import scheduler
 
@@ -147,6 +148,10 @@ SKIP_REASON_BORN_DIGITAL = "born_digital_text_based"
 #: guard can be reported distinctly instead of being conflated with
 #: the other two.
 SKIP_REASON_TEXT_DENSITY_GUARD = "text_density_guard_low"
+#: The file is damaged on disk: it will not open, or opens with zero pages.
+#: Not retryable — the engine answers 400 for it every time (measured on three
+#: production files), so retrying only spends money and quota.
+SKIP_REASON_BROKEN_PDF = "broken_pdf"
 #: The old, undifferentiated string.  External consumers and stored
 #: rows may still reference it; we keep it exported so callers can
 #: compare against either form.
@@ -905,12 +910,20 @@ def reconcile_stale_files(
 
 
 def _image_to_pdf(image_path: Path) -> Path:
-    """Convert image to PDF using img2pdf."""
+    """Convert image to PDF using img2pdf.
+
+    ``rotation=ifvalid`` because the EXIF Orientation tag is not trustworthy:
+    the spec defines 1-8 and a tag of 0 is broken metadata, but img2pdf raises
+    ``ExifOrientationError("Invalid rotation (0)")`` and refuses the whole file
+    over it (two production files died that way). Page orientation is decided
+    from the pixels later, by ``preorient_pdf`` — and engines read rotated text
+    regardless — so a legal tag is honoured and an illegal one is ignored.
+    """
     import img2pdf
 
     target = image_path.with_suffix(".pdf")
     with target.open("wb") as f:
-        f.write(img2pdf.convert(str(image_path)))
+        f.write(img2pdf.convert(str(image_path), rotation=img2pdf.Rotation.ifvalid))
     return target
 
 
@@ -1161,8 +1174,20 @@ def _stamp_metadata(
     # path.
     doc.set_xml_metadata(_build_stamp_xmp(engine, engine_api, engine_ver))
 
-    doc.saveIncr()
+    _save_stamped_pdf(doc, pdf_path)
     doc.close()
+
+
+def _save_stamped_pdf(doc, pdf_path: Path) -> None:
+    """Persist the stamp through the one PDF writer.
+
+    Kept as the call-site name the stamp path and its tests use; the write
+    itself — incremental fast path, verified atomic rewrite, fsync, mode
+    inheritance — lives in :func:`nc_ocr_flow.pdfio.write_in_place`. The two
+    copies of that algorithm drifted apart (#54 fixed one, #57 the other),
+    which is why there is now one.
+    """
+    write_in_place(doc, pdf_path, garbage=0)
 
 
 def _build_stamp_xmp(engine: str, engine_api: str = "unknown", engine_ver: str = "unknown") -> str:
@@ -1462,6 +1487,7 @@ def _needs_ocr_decision(
         :data:`SKIP_REASON_STAMPED_BY_US` /
         :data:`SKIP_REASON_BORN_DIGITAL` /
         :data:`SKIP_REASON_TEXT_DENSITY_GUARD` /
+        :data:`SKIP_REASON_BROKEN_PDF` /
         :data:`REASON_FOREIGN_REWRITE`.
 
     A skip is taken when ``force`` is False AND one of:
@@ -1532,6 +1558,16 @@ def _needs_ocr_decision(
 
     try:
         cls = classify_pdf(path)
+        # A damaged file is not a text question. Decided here, on the normal
+        # path: `force=true` returns earlier, because an operator insisting on a
+        # specific file is entitled to hear the engine's 400 for himself.
+        if cls.get("broken_reason"):
+            log.warning(
+                "skipping %s: damaged PDF (%s)",
+                nc_path or path,
+                cls["broken_reason"],
+            )
+            return False, SKIP_REASON_BROKEN_PDF
         needs = bool(cls.get("needs_ocr", True))
     except Exception as exc:
         # Classifier crashed — default to OCR (better safe than skip).
@@ -1571,8 +1607,20 @@ def _needs_ocr_decision(
     return False, SKIP_REASON_BORN_DIGITAL
 
 
-def _assert_ocr_produced_blocks(result, nc_path: str) -> None:
-    """Raise if a structured-OCR engine returned zero blocks (or tesseract
+def _assert_ocr_produced_blocks(result, nc_path: str) -> str | None:
+    """Return a skip reason when the file holds no text; raise when it is a bug.
+
+    Two outcomes look identical at the block count and are not the same thing:
+
+    * the engine answered for every page and carried **no annotation at all** — a
+      stamp, a blank sheet, a photo. Nothing to read and nothing to retry, so
+      this returns ``"no_text_detected"`` and the file is skipped, not failed.
+      Evidence: ``OcrResult.source_had_text``, which the Google aggregation sets
+      to False when ``full_text_annotation`` is absent.
+    * the engine carried text and the block parser produced nothing — the
+      documented bbox-parser bug. That still raises, because it must stay loud.
+
+    Raises if a structured-OCR engine returned zero blocks (or tesseract
     produced an empty text layer).
 
     Two engines populate ``result.page_results`` (google, minimax); the
@@ -1618,7 +1666,19 @@ def _assert_ocr_produced_blocks(result, nc_path: str) -> None:
         pages = result.page_results or []
         total_blocks = sum(len(p.blocks) for p in pages)
         if total_blocks > 0:
-            return
+            return None
+        if pages and not any(getattr(p, "source_had_text", True) for p in pages):
+            # Measured on the real files: three stamp/blank images all came back
+            # with an annotation-free page, and both Google Vision and tesseract
+            # find 0 characters in them. That is a correct answer, not a broken
+            # engine — so it is a skip, and it is never retried.
+            log.info(
+                "OCR engine=%s found no text on any of %d page(s) for %s; skipping",
+                engine,
+                len(pages),
+                nc_path,
+            )
+            return "no_text_detected"
         raise RuntimeError(
             f"OCR engine={engine} produced 0 blocks across "
             f"{len(pages)} page(s) for {nc_path!r}: empty result; file not "
@@ -1647,7 +1707,7 @@ def _assert_ocr_produced_blocks(result, nc_path: str) -> None:
                 f"eligible for retry"
             ) from exc
         if per_page >= MIN_TEXT_CHARS_PER_PAGE:
-            return
+            return None
         raise RuntimeError(
             f"OCR engine=tesseract produced an empty/garbled text layer "
             f"({chars} chars across {pages} page(s), "
@@ -1658,6 +1718,7 @@ def _assert_ocr_produced_blocks(result, nc_path: str) -> None:
     # Any other engine (auto/legacy): treat as structured — pass on
     # page_results without raising. New structured engines can be
     # added to the tuple above as they ship.
+    return None
 
 
 def _process_file(
@@ -1734,7 +1795,9 @@ def _process_file(
             # silently) must NOT mark the file ``done`` — the worker
             # sees the raise as ``status=error`` and the next webhook
             # /rescan retries it. See :func:`_assert_ocr_produced_blocks`.
-            _assert_ocr_produced_blocks(result, nc_path)
+            skip_reason = _assert_ocr_produced_blocks(result, nc_path)
+            if skip_reason:
+                return {"path": nc_path, "skipped": True, "reason": skip_reason}
 
             # Stamp PDF metadata: engine, timestamp, pages per engine
             _stamp_metadata(
@@ -1801,6 +1864,7 @@ def _process_file(
                     "output": pdf_nc_path,
                     "engine": result.engine_used,
                     "vlm_pages": result.vlm_pages,
+                    **_page_stats_keys(result.output_pdf),
                     "kept_source": True,
                     "reason": SKIP_REASON_SOURCE_KEPT,
                 }
@@ -1811,6 +1875,7 @@ def _process_file(
                     "output": pdf_nc_path,
                     "engine": result.engine_used,
                     "vlm_pages": result.vlm_pages,
+                    **_page_stats_keys(result.output_pdf),
                     # Distinct reason so the panel and /stats show
                     # the real cause. Operator's job: clean up the
                     # leftover image manually (it cannot be safely
@@ -1825,6 +1890,7 @@ def _process_file(
                 "output": pdf_nc_path,
                 "engine": result.engine_used,
                 "vlm_pages": result.vlm_pages,
+                **_page_stats_keys(result.output_pdf),
             }
 
         if ext in PDF_EXTS:
@@ -1866,7 +1932,9 @@ def _process_file(
             # Gate the stamp + upload on a non-empty OCR result. See the
             # image branch above for the rationale and
             # :func:`_assert_ocr_produced_blocks` for the engine list.
-            _assert_ocr_produced_blocks(result, nc_path)
+            skip_reason = _assert_ocr_produced_blocks(result, nc_path)
+            if skip_reason:
+                return {"path": nc_path, "skipped": True, "reason": skip_reason}
 
             # Stamp PDF metadata: engine, timestamp, pages per engine
             _stamp_metadata(
@@ -1891,9 +1959,40 @@ def _process_file(
                 "output": nc_path,
                 "engine": result.engine_used,
                 "vlm_pages": result.vlm_pages,
+                **_page_stats_keys(result.output_pdf),
             }
 
     return {"path": nc_path, "skipped": True, "reason": "unknown"}
+
+
+def _page_stats_keys(pdf_path, /) -> dict:
+    """`pages` and `chars` for the queue row, measured on the produced PDF.
+
+    The app stores exactly what the worker reports, and the worker reported
+    neither: every successful job left both columns NULL, so the panel and
+    `/stats` had no page or character counts to show. Measuring the output PDF
+    is the one place both numbers are certainly correct — the OCR text is in it,
+    whatever engine wrote it.
+    """
+    try:
+        import pymupdf
+
+        doc = pymupdf.open(str(pdf_path))
+        try:
+            return {
+                "pages": doc.page_count,
+                # Indexed, not iterated: pymupdf's Document has no __iter__ in
+                # its own typing, so `for page in doc` fails mypy while working
+                # at runtime — the kind of thing a type gate exists to catch.
+                "chars": sum(
+                    len(doc.load_page(i).get_text().strip()) for i in range(doc.page_count)
+                ),
+            }
+        finally:
+            doc.close()
+    except Exception as exc:  # a missing output PDF must not fail the job
+        log.warning("page stats failed for %s: %s", pdf_path, exc)
+        return {}
 
 
 # --- Job tracking (for /status panel + NC app) ---

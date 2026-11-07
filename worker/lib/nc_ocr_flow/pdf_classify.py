@@ -77,6 +77,35 @@ log = logging.getLogger(__name__)
 _HEURISTIC_MIN_CHARS = 20
 
 
+def broken_pdf_reason(path: str | Path) -> str | None:
+    """Why this PDF cannot be OCR'd at all, or ``None`` when it is readable.
+
+    A file that will not open, or that opens with zero pages, cannot be OCR'd by
+    anyone. Production showed the two shapes and their cost: one 625 KB contract
+    that pymupdf refuses to open and two receipts (7 KB, 14 KB) with zero pages.
+    All three reached Google, which answered ``400 Unsupported input file
+    format``, and all three were retried — a paid call and a doomed retry over a
+    file that is damaged on disk.
+
+    This is the one place that already opens every PDF, so the verdict belongs
+    here rather than at the engine boundary.
+    """
+    try:
+        import pymupdf
+    except ImportError:  # cannot check; let the engine answer
+        return None
+    try:
+        document = pymupdf.open(str(path))
+    except Exception as exc:
+        return f"unopenable ({type(exc).__name__}: {exc})"
+    try:
+        if document.page_count == 0:
+            return "opens with 0 pages"
+    finally:
+        document.close()
+    return None
+
+
 def classify_pdf(path: str | Path) -> dict:
     """Classify a PDF: text_based → skip OCR, anything else → OCR it.
 
@@ -91,6 +120,19 @@ def classify_pdf(path: str | Path) -> dict:
     not installed or raises.
     """
     p = str(path)
+
+    # Pre-flight: a damaged file gets an honest verdict instead of a 400 from
+    # the engine (and five retries of the same 400).
+    broken = broken_pdf_reason(p)
+    if broken is not None:
+        log.warning("pdf_classify: %s is not OCR-able: %s", p, broken)
+        return {
+            "needs_ocr": False,
+            "pdf_type": "broken",
+            "confidence": 1.0,
+            "has_encoding_issues": True,
+            "broken_reason": broken,
+        }
 
     # Try pdf-inspector first
     try:
