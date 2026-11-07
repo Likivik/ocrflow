@@ -28,6 +28,8 @@ use Psr\Log\LoggerInterface;
  * it a user's credentials would let a compromised container read every file that
  * user can read, which is more than it needs.
  */
+use OCA\OcrFlow\Service\RetryPolicy;
+
 class QueueController extends OCSController
 {
 	public function __construct(
@@ -37,6 +39,7 @@ class QueueController extends OCSController
 		private IConfig $config,
 		private LoggerInterface $logger,
 		private FileExchange $files,
+		private RetryPolicy $retryPolicy,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -76,7 +79,29 @@ class QueueController extends OCSController
 			return new DataResponse(['message' => 'file no longer exists'], Http::STATUS_NOT_FOUND);
 		}
 
-		$response = new StreamResponse($opened['name'], $opened['handle'], $opened['mime']);
+		$stat = fstat($opened['handle']);
+		if (is_array($stat) && (int) ($stat['size'] ?? 0) === 0) {
+			// The source is empty on disk. The worker refuses an empty stream by
+			// design; naming the cause here turns a retryable-looking transport
+			// fault into a terminal data problem the worker can classify as
+			// empty_source.
+			if (is_resource($opened['handle'])) {
+				fclose($opened['handle']);
+			}
+			return new DataResponse(
+				['message' => 'file is empty', 'reason_code' => 'empty_source'],
+				Http::STATUS_UNPROCESSABLE_ENTITY,
+			);
+		}
+
+		// StreamResponse takes (pathOrHandle, int $status, array $headers). Passing
+		// the handle second put a resource where an int belongs and every fetch
+		// answered 500 "Argument #2 ($status) must be of type int, resource given".
+		$response = new StreamResponse($opened['handle'], Http::STATUS_OK, ['Content-Type' => $opened['mime']]);
+		$response->addHeader(
+			'Content-Disposition',
+			'attachment; filename="' . rawurlencode($opened['name']) . '"',
+		);
 		$response->cacheFor(0);
 		return $response;
 	}
@@ -241,9 +266,16 @@ class QueueController extends OCSController
 			$status = Queue::STATUS_DONE;
 		}
 
+		$reasonCode = $this->reasonCodeParam();
+		$decision = $this->retryPolicy->decide($reasonCode, $this->retryableParam());
+		if ($decision['agrees'] === false) {
+			$this->logger->warning('ocrflow: job ' . $id . ' worker retryable hint disagreed with policy for "' . (string) $reasonCode . '"; policy wins');
+		}
 		$applied = $this->queue->finish($id, [
 			'status' => $status,
 			'reason' => $this->nullableString('reason'),
+			'reason_code' => $reasonCode,
+			'retryable' => $reasonCode === null ? null : $decision['retryable'],
 			'engine' => $this->nullableString('engine'),
 			'pages' => $this->nullableInt('pages'),
 			'chars' => $this->nullableInt('chars'),
@@ -263,9 +295,16 @@ class QueueController extends OCSController
 		}
 		$error = (string) $this->request->getParam('error', '');
 		$this->logger->warning('ocrflow: job ' . $id . ' failed: ' . $error);
+		$reasonCode = $this->reasonCodeParam();
+		$decision = $this->retryPolicy->decide($reasonCode, $this->retryableParam());
+		if ($decision['agrees'] === false) {
+			$this->logger->warning('ocrflow: job ' . $id . ' worker retryable hint disagreed with policy for "' . (string) $reasonCode . '"; policy wins');
+		}
 		$applied = $this->queue->finish($id, [
 			'status' => Queue::STATUS_ERROR,
 			'reason' => $this->nullableString('reason'),
+			'reason_code' => $reasonCode,
+			'retryable' => $reasonCode === null ? null : $decision['retryable'],
 			'error' => $error === '' ? null : $error,
 		], $this->workerName());
 		return new DataResponse([
@@ -273,6 +312,37 @@ class QueueController extends OCSController
 			'status' => Queue::STATUS_ERROR,
 			'applied' => $applied,
 		]);
+	}
+
+	/**
+	 * The worker may only report codes from the closed vocabulary. Anything
+	 * else is recorded as `unknown` and logged, so the table cannot fill with
+	 * one-off strings that no policy knows how to treat.
+	 */
+	private function reasonCodeParam(): ?string
+	{
+		$code = $this->nullableString('reason_code');
+		if ($code === null) {
+			return null;
+		}
+		if (!$this->retryPolicy->isKnown($code)) {
+			$this->logger->warning('ocrflow: worker reported unknown reason_code "' . $code . '"; recording unknown');
+			return RetryPolicy::CODE_UNKNOWN;
+		}
+		return $code;
+	}
+
+	/**
+	 * The worker's retryable opinion, recorded for the disagreement log. It is
+	 * never obeyed: policy has one owner.
+	 */
+	private function retryableParam(): ?bool
+	{
+		$raw = $this->request->getParam('retryable', null);
+		if ($raw === null || $raw === '') {
+			return null;
+		}
+		return filter_var($raw, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
 	}
 
 	/**
