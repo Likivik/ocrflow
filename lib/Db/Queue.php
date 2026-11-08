@@ -338,6 +338,10 @@ class Queue extends QBMapper
 					->set('finished_at', $retry->createNamedParameter(null))
 					->where($retry->expr()->eq('id', $retry->createNamedParameter($id, IQueryBuilder::PARAM_INT)));
 				$retry->executeStatement();
+				// The per-file row is what the UI and the status endpoint read.
+				// Leaving it on `error` while the job is queued again is two
+				// answers to one question, so the row follows the job.
+				$this->recordFile($job, self::STATUS_QUEUED, $result);
 			}
 		}
 
