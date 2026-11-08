@@ -280,6 +280,7 @@ class QueueController extends OCSController
 			'pages' => $this->nullableInt('pages'),
 			'chars' => $this->nullableInt('chars'),
 			'stamp_version' => $this->nullableString('stamp_version'),
+			'stage_events' => $this->stageEventsParam(),
 		], $this->workerName());
 		// ``applied: false`` means this worker no longer holds the claim (its
 		// claim was recovered and re-claimed elsewhere). Not an error: the job
@@ -306,6 +307,7 @@ class QueueController extends OCSController
 			'reason_code' => $reasonCode,
 			'retryable' => $reasonCode === null ? null : $decision['retryable'],
 			'error' => $error === '' ? null : $error,
+			'stage_events' => $this->stageEventsParam(),
 		], $this->workerName());
 		return new DataResponse([
 			'id' => $id,
@@ -330,6 +332,37 @@ class QueueController extends OCSController
 			return RetryPolicy::CODE_UNKNOWN;
 		}
 		return $code;
+	}
+
+	/**
+	 * The per-stage events the worker reported, decoded.
+	 *
+	 * The worker sends them as one JSON string inside the flat finish
+	 * payload -- a flat dict of strings is what the queue endpoint accepts,
+	 * and a nested array in a form-encoded body is a protocol question
+	 * nobody needs to answer.
+	 *
+	 * A worker that predates this feature sends no such key at all, and a
+	 * worker that sends something unparseable gets no stage rows rather
+	 * than a broken request.
+	 *
+	 * @return array<int, mixed>|null
+	 */
+	private function stageEventsParam(): ?array
+	{
+		$raw = $this->request->getParam('stage_events');
+		if ($raw === null || $raw === '') {
+			return null;
+		}
+		if (is_array($raw)) {
+			return $raw;
+		}
+		$decoded = json_decode((string) $raw, true);
+		if (!is_array($decoded)) {
+			$this->logger->warning('ocrflow: worker sent stage_events that are not a JSON list; they are ignored');
+			return null;
+		}
+		return $decoded;
 	}
 
 	/**

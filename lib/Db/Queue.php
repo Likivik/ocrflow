@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Db;
 
+use OCA\OcrFlow\Service\StageEvents;
 use OCP\AppFramework\Db\QBMapper;
 use OCP\DB\Exception;
 use OCP\DB\QueryBuilder\IQueryBuilder;
@@ -34,10 +35,13 @@ class Queue extends QBMapper
 
 	private const JOBS = 'ocrflow_jobs';
 	private const FILES = 'ocrflow_files';
+	private const STAGE_EVENTS = 'ocrflow_stage_events';
 	private const MAX_CLAIM_TRIES = 8;
 
-	public function __construct(IDBConnection $db)
-	{
+	public function __construct(
+		IDBConnection $db,
+		private StageEvents $stageEvents,
+	) {
 		parent::__construct($db, self::JOBS, Job::class);
 	}
 
@@ -273,8 +277,9 @@ class Queue extends QBMapper
 	 * history table being complete.
 	 *
 	 * @param array{status: string, reason?: ?string, reason_code?: ?string, retryable?: ?bool,
- *              engine?: ?string, pages?: ?int,
-	 *              chars?: ?int, stamp_version?: ?string, error?: ?string} $result
+	 *              engine?: ?string, pages?: ?int,
+	 *              chars?: ?int, stamp_version?: ?string, error?: ?string,
+	 *              stage_events?: mixed} $result
 	 * @throws Exception
 	 */
 	public function finish(int $id, array $result, string $worker): bool
@@ -310,6 +315,11 @@ class Queue extends QBMapper
 
 		if ($updated) {
 			$this->recordFile($job, $status, $result);
+			// The stage events are part of the same outcome as the job row:
+			// they are written only when the guarded UPDATE actually
+			// happened, so a worker whose claim was recovered cannot leave
+			// stage rows on a job that now belongs to somebody else.
+			$this->recordStageEvents((int) $job->getId(), $result['stage_events'] ?? null);
 		}
 
 		// Retry is the app's decision, taken here because this is the only place
@@ -332,6 +342,42 @@ class Queue extends QBMapper
 		}
 
 		return $updated;
+	}
+
+	/**
+	 * Write the per-stage events the worker reported.
+	 *
+	 * The events arrive as the decoded `stage_events` payload. Everything
+	 * inadmissible is dropped by {@see StageEvents::normalize()} before it
+	 * gets here: an unknown stage name never reaches the table, and a reason
+	 * code we do not know is recorded as `unknown`.
+	 *
+	 * @throws Exception
+	 */
+	private function recordStageEvents(int $jobId, mixed $raw): void
+	{
+		$rows = $this->stageEvents->normalize($raw);
+		if ($rows === []) {
+			return;
+		}
+
+		foreach ($rows as $row) {
+			// Parameters belong to the builder that created them, so every
+			// placeholder below is made by this builder and bound by it.
+			$qb = $this->db->getQueryBuilder();
+			$qb->insert(self::STAGE_EVENTS)
+				->values([
+					'job_id' => $qb->createNamedParameter($jobId, IQueryBuilder::PARAM_INT),
+					'stage' => $qb->createNamedParameter($row['stage']),
+					'reason_code' => $qb->createNamedParameter($row['reason_code']),
+					'duration_ms' => $qb->createNamedParameter($row['duration_ms'], IQueryBuilder::PARAM_INT),
+					'cost_pages' => $qb->createNamedParameter($row['cost_pages'], IQueryBuilder::PARAM_INT),
+					// A DATETIME column: the driver wants the object, not a
+					// formatted string, or the value lands as "0000-00-00".
+					'created_at' => $qb->createNamedParameter(new \DateTime(), IQueryBuilder::PARAM_DATETIME_MUTABLE),
+				]);
+			$qb->executeStatement();
+		}
 	}
 
 	/**

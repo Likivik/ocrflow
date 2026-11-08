@@ -8,11 +8,14 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Service\RetryPolicy;
+use OCA\OcrFlow\Service\StageEvents;
 use OCP\DB\IPreparedStatement;
 use OCP\DB\IResult;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\LoggerInterface;
 
 /**
  * `enqueue()` must return the id of the row it just wrote.
@@ -70,7 +73,13 @@ class QueueEnqueueTest extends TestCase
         // Nextcloud 34 stubs — which is why the live host raised "undefined
         // method" while PHPStan saw nothing.
 
-        $queue = new Queue($db);
+        $queue = new Queue(
+            $db,
+            new StageEvents(
+                new RetryPolicy(),
+                $this->createMock(LoggerInterface::class),
+            ),
+        );
 
         $this->assertSame(42, $queue->enqueue('alice/files/a.pdf', 7, 1234, 'etag', 'tesseract'));
     }

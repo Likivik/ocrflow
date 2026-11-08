@@ -38,6 +38,7 @@ from .pdf_classify import classify_pdf
 from .pdfio import write_in_place
 from .queue_client import QueueClient
 from .scheduler import scheduler
+from .stage_events import StageTimer
 
 log = logging.getLogger(__name__)
 
@@ -1747,25 +1748,28 @@ def _process_file(
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         local_file = tmp / filename
-        _transport_download(nc_path, local_file, job_id)
+        with StageTimer("intake"):
+            _transport_download(nc_path, local_file, job_id)
 
         if ext in IMAGE_EXTS:
             log.info("classifying image: %s", nc_path)
-            try:
-                cls = classify(local_file)
-            except ClassifierUnavailable as exc:
-                # Fail closed. Treating "the model is broken" as "probably a
-                # document" would convert and delete every image in every
-                # folder on the next /scan-all, unattended. Stop and say why.
-                _shout_classifier_unavailable(exc)
-                raise RuntimeError(
-                    f"image classifier unavailable, refusing to convert {nc_path!r}: {exc}"
-                ) from exc
-            log.info("classify: is_document=%s reason=%s", cls.is_document, cls.reason)
+            classify_timer = StageTimer("classify")
+            with classify_timer:
+                try:
+                    cls = classify(local_file)
+                except ClassifierUnavailable as exc:
+                    # Fail closed. Treating "the model is broken" as "probably a
+                    # document" would convert and delete every image in every
+                    # folder on the next /scan-all, unattended. Stop and say why.
+                    _shout_classifier_unavailable(exc)
+                    raise RuntimeError(
+                        f"image classifier unavailable, refusing to convert {nc_path!r}: {exc}"
+                    ) from exc
+                log.info("classify: is_document=%s reason=%s", cls.is_document, cls.reason)
 
-            if not cls.is_document:
-                log.info("skipping photo: %s", nc_path)
-                return {"path": nc_path, "skipped": True, "reason": cls.reason}
+                if not cls.is_document:
+                    log.info("skipping photo: %s", nc_path)
+                    return {"path": nc_path, "skipped": True, "reason": cls.reason}
 
             # Name collision: if the target PDF path is already taken, do NOT
             # overwrite it (that would destroy the user's PDF and still bill a
@@ -1786,8 +1790,13 @@ def _process_file(
                     pdf_nc_path,
                 )
             # Document image: convert to PDF, OCR
-            pdf_path = _image_to_pdf(local_file)
-            result = process_pdf(pdf_path, engine=engine)
+            with StageTimer("prepare"):
+                pdf_path = _image_to_pdf(local_file)
+            recognize_timer = StageTimer("recognize")
+            with recognize_timer:
+                result = process_pdf(pdf_path, engine=engine)
+                # Billable pages: what the engine was asked to read.
+                recognize_timer.cost_pages = _page_stats_keys(result.output_pdf).get("pages", 0)
 
             # Gate the stamp + upload on a non-empty OCR result. An
             # engine that returned zero blocks (the documented Google
@@ -1800,14 +1809,15 @@ def _process_file(
                 return {"path": nc_path, "skipped": True, "reason": skip_reason}
 
             # Stamp PDF metadata: engine, timestamp, pages per engine
-            _stamp_metadata(
-                Path(result.output_pdf),
-                engine=result.engine_used,
-                vlm_pages=result.vlm_pages,
-                tess_pages=result.tess_pages,
-                vlm_failed=result.vlm_failed_pages,
-                l2_pages=result.l2_pages,
-            )
+            with StageTimer("compose"):
+                _stamp_metadata(
+                    Path(result.output_pdf),
+                    engine=result.engine_used,
+                    vlm_pages=result.vlm_pages,
+                    tess_pages=result.tess_pages,
+                    vlm_failed=result.vlm_failed_pages,
+                    l2_pages=result.l2_pages,
+                )
 
             # Upload OCR'd PDF (new .pdf path), delete original image.
             # C2: the upload can succeed while the delete of the
@@ -1827,9 +1837,10 @@ def _process_file(
             # ``status=error``: the user now has a usable PDF, and
             # the leftover image is a cleanup problem, not a failed
             # job.
-            pdf_nc_path = _transport_upload(
-                pdf_nc_path, Path(result.output_pdf), job_id, in_place=False
-            )
+            with StageTimer("deliver"):
+                pdf_nc_path = _transport_upload(
+                    pdf_nc_path, Path(result.output_pdf), job_id, in_place=False
+                )
             kept_source = False
             delete_failed = False
             delete_error = None
@@ -1927,7 +1938,11 @@ def _process_file(
                 }
 
             log.info("OCR-ing PDF (engine=%s force=%s): %s", engine, force, nc_path)
-            result = process_pdf(local_file, engine=engine)
+            recognize_timer = StageTimer("recognize")
+            with recognize_timer:
+                result = process_pdf(local_file, engine=engine)
+                # Billable pages: what the engine was asked to read.
+                recognize_timer.cost_pages = _page_stats_keys(result.output_pdf).get("pages", 0)
 
             # Gate the stamp + upload on a non-empty OCR result. See the
             # image branch above for the rationale and
@@ -1937,14 +1952,15 @@ def _process_file(
                 return {"path": nc_path, "skipped": True, "reason": skip_reason}
 
             # Stamp PDF metadata: engine, timestamp, pages per engine
-            _stamp_metadata(
-                Path(result.output_pdf),
-                engine=result.engine_used,
-                vlm_pages=result.vlm_pages,
-                tess_pages=result.tess_pages,
-                vlm_failed=result.vlm_failed_pages,
-                l2_pages=result.l2_pages,
-            )
+            with StageTimer("compose"):
+                _stamp_metadata(
+                    Path(result.output_pdf),
+                    engine=result.engine_used,
+                    vlm_pages=result.vlm_pages,
+                    tess_pages=result.tess_pages,
+                    vlm_failed=result.vlm_failed_pages,
+                    l2_pages=result.l2_pages,
+                )
 
             # Upload OCR'd PDF (replaces original → NC version).
             # C3: the previous code did a plain PUT straight over
@@ -1952,7 +1968,8 @@ def _process_file(
             # reset, timeout) left a truncated, corrupt PDF on disk
             # with no way to recover. We PUT to a sibling temp path
             # and then MOVE it atomically onto the target.
-            _transport_upload(nc_path, Path(result.output_pdf), job_id, in_place=True)
+            with StageTimer("deliver"):
+                _transport_upload(nc_path, Path(result.output_pdf), job_id, in_place=True)
 
             return {
                 "path": nc_path,
