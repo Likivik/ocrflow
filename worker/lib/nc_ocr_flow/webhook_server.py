@@ -38,7 +38,7 @@ from .pdf_classify import classify_pdf
 from .pdfio import write_in_place
 from .queue_client import QueueClient
 from .scheduler import scheduler
-from .stage_events import StageTimer
+from .stage_events import StageTimer, verdict_code
 
 log = logging.getLogger(__name__)
 
@@ -1769,6 +1769,9 @@ def _process_file(
 
                 if not cls.is_document:
                     log.info("skipping photo: %s", nc_path)
+                    # The verdict is the decision; the stage row that records
+                    # it must carry the code, not only the prose.
+                    classify_timer.reason_code = verdict_code(cls.reason)
                     return {"path": nc_path, "skipped": True, "reason": cls.reason}
 
             # Name collision: if the target PDF path is already taken, do NOT
@@ -1919,11 +1922,21 @@ def _process_file(
             # forces a re-OCR (or, after ``FOREIGN_REWRITE_LIMIT``
             # consecutive foreign rewrites, records
             # ``reason='foreign_rewrite'`` and skips without OCR'ing).
-            needs_ocr, skip_reason = _needs_ocr_decision(
-                local_file,
-                force,
-                nc_path=nc_path,
-            )
+            # The born-digital / stamped-good decision is a classification,
+            # so it is timed as one. The stage that decided is the stage the
+            # row names, and the code the decision carries rides on it.
+            classify_timer = StageTimer("classify")
+            with classify_timer:
+                needs_ocr, skip_reason = _needs_ocr_decision(
+                    local_file,
+                    force,
+                    nc_path=nc_path,
+                )
+                if not needs_ocr:
+                    # The verdict rides on the stage that reached it: the
+                    # stage row is where the decision is recorded, so it
+                    # must carry the code, not only the prose.
+                    classify_timer.reason_code = verdict_code(skip_reason)
             if not needs_ocr:
                 log.info(
                     "skip %s: %s (force=%s)",
