@@ -184,6 +184,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished     REAL,
     error        TEXT,
     reason       TEXT,
+    -- B3: the closed outcome vocabulary shared with the PHP app. NULL means
+    -- "no policy decision recorded" (a row written before this column
+    -- existed), never "not retryable".
+    reason_code  TEXT,
+    retryable    INTEGER,
     result       TEXT,
     -- Retry tracking. C6 additive migration adds these to existing
     -- production databases via ``_migrate_add_retry_columns`` at
@@ -315,6 +320,8 @@ def _init_schema() -> None:
         # G2: add the foreign_rewrites counter (idempotent; see
         # ``_migrate_add_foreign_rewrites_column``).
         _migrate_add_foreign_rewrites_column(conn)
+        # B3: outcome vocabulary, idempotent (see the function above).
+        _migrate_add_reason_code_columns(conn)
         # B1 backstop: enforce at-most-one queued/running row per
         # path at the DB layer (idempotent; dedupes first). MUST
         # run after every column-add it depends on. See
@@ -322,6 +329,23 @@ def _init_schema() -> None:
         # retry-index ordering lesson — a failing migration here
         # leaves ``_ready() == False`` and the queue as a no-op.
         _migrate_inflight_unique_index(conn)
+
+
+def _migrate_add_reason_code_columns(conn) -> None:
+    """B3: add the outcome-vocabulary columns to an existing store.
+
+    Idempotent, like ``_migrate_add_retry_columns``: a fresh DB gets the columns
+    from ``_SCHEMA_SQL``, an upgraded store gets them here. No index is created:
+    they are read for display and for the retry decision, never as a lookup key.
+    """
+    # Index 1 is the column name; index 0 is the cid. Reading row[0] yields
+    # integers, so every init saw "the column is missing" and re-added it --
+    # `duplicate column name: reason_code` on the second call.
+    have = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "reason_code" not in have:
+        conn.execute("ALTER TABLE jobs ADD COLUMN reason_code TEXT")
+    if "retryable" not in have:
+        conn.execute("ALTER TABLE jobs ADD COLUMN retryable INTEGER")
 
 
 def _ready() -> bool:
