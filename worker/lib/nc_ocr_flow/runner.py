@@ -30,6 +30,27 @@ from .readiness import report_configured_engine
 # value here exists in the app's RetryPolicy table, and anything the worker does
 # not recognise is ``unknown`` — bounded-retryable, never silently terminal.
 def classify_failure(exc: BaseException) -> str:
+    """Map a failure to one outcome code, by HTTP status when there is one.
+
+    The status is the app's own answer and outranks text matching: without it a
+    terminal 422 ("empty source, will never work") arrived as a
+    QueueProtocolError and was classified app_5xx - retryable - the inversion
+    this function exists to prevent. Exceptions with no status keep the
+    text/name rules: transport corruption with no answer is still unknown work,
+    and unknown must stay bounded-retryable.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        if status in (401, 403):
+            return "credentials_missing"
+        if 400 <= status < 500:
+            return "app_4xx"
+        if 500 <= status < 600:
+            return "app_5xx"
+    return _classify_by_text(exc)
+
+
+def _classify_by_text(exc: BaseException) -> str:
     name = type(exc).__name__
     text = str(exc).lower()
     if "empty file" in text or "streamed an empty" in text:

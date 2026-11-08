@@ -308,7 +308,7 @@ class Queue extends QBMapper
 			->andWhere($qb->expr()->eq('claimed_by', $qb->createNamedParameter($worker)));
 		$updated = $qb->executeStatement() === 1;
 
-		if ($updated) {
+		if ($updated && $status !== self::STATUS_ERROR) {
 			$this->recordFile($job, $status, $result);
 		}
 
@@ -328,6 +328,14 @@ class Queue extends QBMapper
 					->set('finished_at', $retry->createNamedParameter(null))
 					->where($retry->expr()->eq('id', $retry->createNamedParameter($id, IQueryBuilder::PARAM_INT)));
 				$retry->executeStatement();
+				// The per-file row is what the UI and the status endpoint read.
+				// Leaving it on `error` while the job is queued again is two answers to one
+				// question; the row follows the job.
+				$this->recordFile($job, self::STATUS_QUEUED, $result);
+				// The per-file row is what the UI and the status endpoint read.
+				// Leaving it on `error` while the job is queued again is two
+				// answers to one question; the row follows the job.
+				$this->recordFile($job, self::STATUS_QUEUED, $result);
 			}
 		}
 

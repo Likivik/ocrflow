@@ -36,7 +36,16 @@ class WorkerUnauthorized(RuntimeError):
 
 
 class QueueProtocolError(RuntimeError):
-    """The server answered, but not with something we understand."""
+    """The server answered, but not with something we understand.
+
+    Carries the HTTP status when there was one. The classifier decides retry
+    from the status: a 422 ("this file is empty, it will never work") and a
+    503 ("try later") both arrive here, and only one of them is work to redo.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class FileGone(QueueProtocolError):
@@ -155,9 +164,9 @@ class QueueClient:
         if response.status_code == 404:
             raise FileGone(f"job {job_id}: the app reports the file no longer exists")
         if response.status_code >= 500:
-            raise QueueProtocolError(f"server error {response.status_code} fetching job {job_id}")
+            raise QueueProtocolError(f"server error {response.status_code} fetching job {job_id}", status_code=response.status_code)
         if response.status_code != 200:
-            raise QueueProtocolError(f"unexpected {response.status_code} fetching job {job_id}")
+            raise QueueProtocolError(f"unexpected {response.status_code} fetching job {job_id}", status_code=response.status_code)
 
         dest.parent.mkdir(parents=True, exist_ok=True)
         written = 0
@@ -196,7 +205,7 @@ class QueueClient:
         if response.status_code == 404:
             raise FileGone(f"job {job_id}: the target file no longer exists")
         if response.status_code >= 500:
-            raise QueueProtocolError(f"server error {response.status_code} storing job {job_id}")
+            raise QueueProtocolError(f"server error {response.status_code} storing job {job_id}", status_code=response.status_code)
         return self._data(response)
 
     def result_file(self, job_id: int, source: Path, name: str | None = None) -> dict[str, Any]:
@@ -224,7 +233,7 @@ class QueueClient:
         if response.status_code == 404:
             raise FileGone(f"job {job_id}: the target folder no longer exists")
         if response.status_code >= 500:
-            raise QueueProtocolError(f"server error {response.status_code} storing job {job_id}")
+            raise QueueProtocolError(f"server error {response.status_code} storing job {job_id}", status_code=response.status_code)
         return self._data(response)
 
     def _headers(self) -> dict[str, str]:
@@ -256,7 +265,7 @@ class QueueClient:
                 "then reload php-fpm"
             )
         if response.status_code >= 500:
-            raise QueueProtocolError(f"server error {response.status_code} on {path}")
+            raise QueueProtocolError(f"server error {response.status_code} on {path}", status_code=response.status_code)
         return response
 
     @staticmethod
