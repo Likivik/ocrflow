@@ -24,6 +24,7 @@ from typing import Any
 
 from .queue_client import Job, QueueClient
 from .readiness import report_configured_engine
+from .stage_events import StageCollector, collector_scope
 
 
 # What the worker can tell the app about a failure. Deliberately small: every
@@ -76,7 +77,12 @@ def read_secret(env: dict[str, str] | None = None) -> str:
     return ""
 
 
-def _report(client: QueueClient, job: Job, outcome: dict[str, Any]) -> None:
+def _report(
+    client: QueueClient,
+    job: Job,
+    outcome: dict[str, Any],
+    stage_events: str | None = None,
+) -> None:
     """Translate the engine's own vocabulary into the queue's, once."""
     if outcome.get("skipped"):
         # "Nothing to do" is not a failure: the file stays untouched and the row
@@ -86,6 +92,7 @@ def _report(client: QueueClient, job: Job, outcome: dict[str, Any]) -> None:
             job.id,
             status="skipped",
             reason=outcome.get("reason") or "skipped",
+            stage_events=stage_events,
         )
         return
     client.result(
@@ -95,6 +102,7 @@ def _report(client: QueueClient, job: Job, outcome: dict[str, Any]) -> None:
         pages=outcome.get("pages"),
         chars=outcome.get("chars"),
         stamp_version=outcome.get("stamp_version"),
+        stage_events=stage_events,
     )
 
 
@@ -115,20 +123,30 @@ def run_once(
         job.attempts,
         job.engine,
     )
+    # The collector is scoped around the whole job: whatever the pipeline
+    # managed to do before it failed is still worth recording. A stage that
+    # never ran is absent from the list, which is the point.
+    collector = StageCollector()
     try:
-        outcome = process(job.path, job.file_id or 0, engine=job.engine, job_id=job.id)
+        with collector_scope(collector):
+            outcome = process(job.path, job.file_id or 0, engine=job.engine, job_id=job.id)
     except Exception as exc:
         code = classify_failure(exc)
         log.warning("job %s failed (%s): %s", job.id, code, exc)
+        # The stage that blew up is the last one recorded; it gets the job's
+        # failure code so the row says which stage failed, not just that
+        # something did.
+        collector.mark_last_reason(code)
         client.failure(
             job.id,
             error=f"{type(exc).__name__}: {exc}",
             reason="worker_error",
             reason_code=code,
+            stage_events=collector.as_json(),
         )
         return True
 
-    _report(client, job, outcome or {})
+    _report(client, job, outcome or {}, collector.as_json())
     return True
 
 

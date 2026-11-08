@@ -109,7 +109,13 @@ class QueueClient:
         return Job.from_api(self._data(response))
 
     def result(self, job_id: int, **fields: Any) -> None:
-        """Report success. Only the keys the app documents are sent."""
+        """Report success. Only the keys the app documents are sent.
+
+        ``stage_events`` is the JSON list of per-stage events, as a string:
+        the payload is a flat form body, and the app decodes it. It is
+        dropped when it is ``None`` -- a worker that ran no stage says
+        nothing rather than claiming an empty run.
+        """
         payload = {k: v for k, v in fields.items() if v is not None}
         self._post(f"queue/{job_id}/result", data=payload)
 
@@ -120,6 +126,7 @@ class QueueClient:
         reason: str | None = None,
         reason_code: str | None = None,
         retryable: bool | None = None,
+        stage_events: str | None = None,
     ) -> None:
         # ``reason_code`` is the app's vocabulary, not ours to invent: the app
         # records anything it does not know as ``unknown`` and decides retry
@@ -129,6 +136,10 @@ class QueueClient:
             payload["reason_code"] = reason_code
         if retryable is not None:
             payload["retryable"] = "1" if retryable else "0"
+        if stage_events:
+            # A JSON string, because this payload is typed as strings: the
+            # stage events travel as one opaque blob the app decodes.
+            payload["stage_events"] = stage_events
         self._post(f"queue/{job_id}/failure", data=payload)
 
     def fetch_file(self, job_id: int, dest: Path) -> Path:
