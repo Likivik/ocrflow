@@ -145,6 +145,7 @@ class Queue extends QBMapper
 				->set('finished_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
 				->where($qb->expr()->eq('id', $qb->createNamedParameter((int) $existing->getId(), IQueryBuilder::PARAM_INT)));
 			$qb->executeStatement();
+			$this->recordDecision((int) $existing->getId(), 'empty_source');
 			return;
 		}
 
@@ -163,6 +164,79 @@ class Queue extends QBMapper
 				'etag' => $qb->createNamedParameter($etag),
 			]);
 		$qb->executeStatement();
+		$this->recordDecision((int) $qb->getLastInsertId(), 'empty_source');
+	}
+
+	/**
+	 * Record the app's own decision in the one place decisions are recorded.
+	 *
+	 * The worker never learns the file existed, and nobody else writes a
+	 * reason code for this decision — so if it is not written here, it is not
+	 * written at all. One row per stage per job: a rescan that reaches the
+	 * same verdict must not pile up rows for one job.
+	 *
+	 * @throws Exception
+	 */
+	private function recordDecision(int $jobId, string $reasonCode): void
+	{
+		if ($this->hasStageRow($jobId, 'intake', $reasonCode)) {
+			return;
+		}
+		$row = $this->stageEvents->appDecision('intake', $reasonCode, 0, 0);
+		if ($row === null) {
+			return;
+		}
+		$this->insertStageRow($jobId, $row);
+	}
+
+	/**
+	 * Write one stage row.
+	 *
+	 * One insert path for both callers: the worker's report and the app's
+	 * own decision land in the table the same way, or the table answers
+	 * "why" two different ways.
+	 *
+	 * @param array{stage: string, reason_code: ?string, duration_ms: ?int, cost_pages: ?int} $row
+	 * @throws Exception
+	 */
+	private function insertStageRow(int $jobId, array $row): void
+	{
+		// Parameters belong to the builder that created them, so every
+		// placeholder below is made by this builder and bound by it.
+		$qb = $this->db->getQueryBuilder();
+		$qb->insert(self::STAGE_EVENTS)
+			->values([
+				'job_id' => $qb->createNamedParameter($jobId, IQueryBuilder::PARAM_INT),
+				'stage' => $qb->createNamedParameter($row['stage']),
+				'reason_code' => $qb->createNamedParameter($row['reason_code']),
+				'duration_ms' => $qb->createNamedParameter($row['duration_ms'], IQueryBuilder::PARAM_INT),
+				'cost_pages' => $qb->createNamedParameter($row['cost_pages'], IQueryBuilder::PARAM_INT),
+				// A DATETIME column: the driver wants the object, not a
+				// formatted string, or the value lands as "0000-00-00".
+				'created_at' => $qb->createNamedParameter(new \DateTime(), IQueryBuilder::PARAM_DATETIME_MUTABLE),
+			]);
+		$qb->executeStatement();
+	}
+
+	/**
+	 * Has this job already a row for that stage with that code?
+	 *
+	 * Keyed on the code as well as the stage: the worker's `intake` row (the
+	 * download) and the app's `intake` decision (this source needs no work)
+	 * share a stage name, and one must not suppress the other. A repeat of
+	 * the same decision, on the other hand, must not pile up rows.
+	 *
+	 * @throws Exception
+	 */
+	private function hasStageRow(int $jobId, string $stage, string $reasonCode): bool
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('id')->from(self::STAGE_EVENTS)
+			->where($qb->expr()->eq('job_id', $qb->createNamedParameter($jobId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->eq('stage', $qb->createNamedParameter($stage)))
+			->andWhere($qb->expr()->eq('reason_code', $qb->createNamedParameter($reasonCode)))
+			->setMaxResults(1);
+		return $qb->executeQuery()->fetch() !== false;
 	}
 
 	/**
@@ -366,21 +440,7 @@ class Queue extends QBMapper
 		}
 
 		foreach ($rows as $row) {
-			// Parameters belong to the builder that created them, so every
-			// placeholder below is made by this builder and bound by it.
-			$qb = $this->db->getQueryBuilder();
-			$qb->insert(self::STAGE_EVENTS)
-				->values([
-					'job_id' => $qb->createNamedParameter($jobId, IQueryBuilder::PARAM_INT),
-					'stage' => $qb->createNamedParameter($row['stage']),
-					'reason_code' => $qb->createNamedParameter($row['reason_code']),
-					'duration_ms' => $qb->createNamedParameter($row['duration_ms'], IQueryBuilder::PARAM_INT),
-					'cost_pages' => $qb->createNamedParameter($row['cost_pages'], IQueryBuilder::PARAM_INT),
-					// A DATETIME column: the driver wants the object, not a
-					// formatted string, or the value lands as "0000-00-00".
-					'created_at' => $qb->createNamedParameter(new \DateTime(), IQueryBuilder::PARAM_DATETIME_MUTABLE),
-				]);
-			$qb->executeStatement();
+			$this->insertStageRow($jobId, $row);
 		}
 	}
 

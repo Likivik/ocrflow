@@ -56,6 +56,15 @@ final class RetryPolicy
 		// The source file is zero bytes on disk. Nothing to fetch or read —
 		// this is a data problem and needs a human, not a retry.
 		'empty_source' => false,
+		// The classifier's verdicts. These are not failures: the file needs
+		// no work, so there is nothing to retry and nobody to tell. The
+		// classifier decides; the policy only records the decision's name.
+		//   born_digital_text_based — the PDF already carries a text layer.
+		//   mobilenet               — the image is a photo, not a document.
+		//   stamped_good_by_us      — our own earlier OCR output is there.
+		'born_digital_text_based' => false,
+		'mobilenet' => false,
+		'stamped_good_by_us' => false,
 		// Transport returned an empty stream. Terminal until the transport
 		// distinguishes "gone" from "transient" (410 vs 5xx).
 		'empty_stream' => false,
@@ -103,6 +112,26 @@ final class RetryPolicy
 			'retryable' => $retryable,
 			'agrees' => $hint === null ? null : $hint === $retryable,
 		];
+	}
+
+	/**
+	 * The code for a classifier verdict, or null when the text is not one.
+	 *
+	 * The worker may report a verdict either as a code or as the free-text
+	 * reason it already used ("the PDF already has a text layer"). Both must
+	 * land on the same code, or the table answers "why" two different ways
+	 * depending on which worker said it. A worker that reports the code
+	 * outright needs no help; this is the fallback for one that does not.
+	 */
+	public function verdictCode(?string $reason): ?string
+	{
+		if ($reason === null) {
+			return null;
+		}
+		return match ($reason) {
+			'born_digital_text_based', 'mobilenet', 'stamped_good_by_us' => $reason,
+			default => null,
+		};
 	}
 
 	/**

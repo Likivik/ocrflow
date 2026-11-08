@@ -63,6 +63,44 @@ final class StageEvents
 	}
 
 	/**
+	 * A decision the app took itself, in the shape the table stores.
+	 *
+	 * The worker reports what happened; the app decides what that means. But
+	 * the app also decides things on its own — a zero-byte source needs no
+	 * work — and those decisions used to live only in the job row, so the
+	 * table that exists to answer "why" said nothing about them.
+	 *
+	 * The same closed vocabularies apply: an unknown stage name or an
+	 * unknown code is refused here exactly as it is for a worker's report.
+	 *
+	 * `cost_pages` is not filtered the way a worker's report is filtered.
+	 * There, a page count outside `recognize` is a claim nobody can act on,
+	 * so it is dropped. Here the app is stating a fact about its own
+	 * decision: it spent no pages, and zero is the truthful number.
+	 *
+	 * @return array{stage: string, reason_code: ?string, duration_ms: ?int, cost_pages: ?int}|null
+	 */
+	public function appDecision(string $stage, string $reasonCode, ?int $durationMs = 0, ?int $costPages = 0): ?array
+	{
+		if (!$this->isKnownStage($stage)) {
+			$this->logger->warning('ocrflow: the app decided with unknown stage "' . $stage . '"; the decision is dropped');
+			return null;
+		}
+		$code = $reasonCode;
+		if (!$this->retryPolicy->isKnown($code)) {
+			$this->logger->warning('ocrflow: the app decided with unknown reason_code "' . $code . '"; recording unknown');
+			$code = RetryPolicy::CODE_UNKNOWN;
+		}
+		return [
+			'stage' => $stage,
+			'reason_code' => $code,
+			'duration_ms' => $durationMs === null ? null : max(0, $durationMs),
+			// A decision the app took costs nothing, so it spent no pages.
+			'cost_pages' => $costPages === null ? null : max(0, $costPages),
+		];
+	}
+
+	/**
 	 * Turn the reported events into rows we are willing to store.
 	 *
 	 * @param mixed $raw the decoded `stage_events` payload: a list of maps

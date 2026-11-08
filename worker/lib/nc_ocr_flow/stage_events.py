@@ -41,6 +41,36 @@ STAGES: tuple[str, ...] = (
 #: The only stage that can spend money.
 COST_STAGE = "recognize"
 
+#: The classifier's verdicts: decisions, not failures.
+#:
+#: The app owns the vocabulary of reason codes; the worker reports which
+#: verdict it reached. These three mean "this file needs no work" -- the PDF
+#: already carries a text layer, the image is a photo, our own earlier OCR
+#: output is there. They are terminal: retrying cannot change the answer,
+#: and re-OCR-ing a born-digital PDF costs money to learn the same thing.
+#:
+#: The free-text skip reasons the worker already produced are spelled the
+#: same as the codes, so the mapping is the identity -- but it is written
+#: down, so a divergence later is a one-line change and not a hunt.
+VERDICT_CODES: dict[str, str] = {
+    "born_digital_text_based": "born_digital_text_based",
+    "mobilenet": "mobilenet",
+    "stamped_good_by_us": "stamped_good_by_us",
+}
+
+
+def verdict_code(reason: str | None) -> str | None:
+    """The reason code for a classifier verdict, or None for anything else.
+
+    A skip that is not a verdict (``unsupported_ext``, ``foreign_rewrite``,
+    ...) keeps its free-text reason and no code: the app has no policy for
+    it, and inventing one here would only widen a vocabulary the app owns.
+    """
+    if reason is None:
+        return None
+    return VERDICT_CODES.get(reason)
+
+
 _active: ContextVar[StageCollector | None] = ContextVar("ocrflow_stage_collector", default=None)
 
 

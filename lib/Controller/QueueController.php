@@ -267,6 +267,13 @@ class QueueController extends OCSController
 		}
 
 		$reasonCode = $this->reasonCodeParam();
+		if ($reasonCode === null) {
+			// A worker that predates the verdict codes reports the classifier's
+			// verdict as prose only. The app knows the mapping, so the row
+			// still gets a code: a terminal decision with no code is
+			// indistinguishable from "nobody decided".
+			$reasonCode = $this->retryPolicy->verdictCode($this->nullableString('reason'));
+		}
 		$decision = $this->retryPolicy->decide($reasonCode, $this->retryableParam());
 		if ($decision['agrees'] === false) {
 			$this->logger->warning('ocrflow: job ' . $id . ' worker retryable hint disagreed with policy for "' . (string) $reasonCode . '"; policy wins');

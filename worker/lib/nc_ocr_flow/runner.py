@@ -24,7 +24,7 @@ from typing import Any
 
 from .queue_client import Job, QueueClient
 from .readiness import report_configured_engine
-from .stage_events import StageCollector, collector_scope
+from .stage_events import StageCollector, collector_scope, verdict_code
 
 
 # What the worker can tell the app about a failure. Deliberately small: every
@@ -113,6 +113,10 @@ def _report(
             job.id,
             status="skipped",
             reason=outcome.get("reason") or "skipped",
+            # A classifier verdict is a decision, and decisions are recorded
+            # with a code. Without it the job row would say only "born digital"
+            # in prose, and the table that answers "why" would say nothing.
+            reason_code=verdict_code(outcome.get("reason")),
             stage_events=stage_events,
         )
         return
@@ -167,7 +171,17 @@ def run_once(
         )
         return True
 
-    _report(client, job, outcome or {}, collector.as_json())
+    outcome = outcome or {}
+    # A classifier verdict is a decision, and the stage that reached it is the
+    # row that records it. The pipeline may already have marked the stage
+    # (the classifier knows); this makes sure it is marked either way, so a
+    # verdict can never reach the table as prose alone.
+    if outcome.get("skipped"):
+        verdict = verdict_code(outcome.get("reason"))
+        if verdict is not None:
+            collector.mark_last_reason(verdict)
+
+    _report(client, job, outcome, collector.as_json())
     return True
 
 
