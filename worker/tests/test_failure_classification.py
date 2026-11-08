@@ -1,7 +1,6 @@
 """The classifier must never turn a terminal answer into retryable work."""
 
 import pytest
-
 from nc_ocr_flow.queue_client import FileGone, QueueProtocolError
 from nc_ocr_flow.runner import classify_failure
 
