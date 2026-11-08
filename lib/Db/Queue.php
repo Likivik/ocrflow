@@ -60,6 +60,17 @@ class Queue extends QBMapper
 		?string $etag,
 		?string $engine = null,
 	): ?int {
+		// A zero-byte source is a data problem, not work: the worker can only fetch
+		// an empty stream and fail after transport — the QueueProtocolError class
+		// that died four times in production. This must run BEFORE the dedupe
+		// guards below: `jobForVersion()` returns any row for this version,
+		// including the `error` row written the last time this file was queued,
+		// so the correction would otherwise never be recorded.
+		if ($size !== null && $size <= 0) {
+			$this->recordEmptySource($path, $fileId, $size, $etag);
+			return null;
+		}
+
 		if ($fileId !== null) {
 			if ($this->jobForVersion($fileId, $etag) !== null) {
 				return null;
@@ -73,27 +84,12 @@ class Queue extends QBMapper
 			return null;
 		}
 
-		// A zero-byte source is a data problem, not work: the worker can only
-		// fetch an empty stream and fail after transport, which is exactly the
-		// QueueProtocolError class that died four times in production. Decide it
-		// here, where the size is already known, and record it as a skip.
-		$emptySource = $size !== null && $size <= 0;
-
 		$qb = $this->db->getQueryBuilder();
 		$qb->insert(self::JOBS)
 			->values([
 				'path' => $qb->createNamedParameter($path),
 				'file_id' => $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
-				'status' => $qb->createNamedParameter(
-					$emptySource ? 'skipped' : self::STATUS_QUEUED,
-				),
-				'reason' => $qb->createNamedParameter($emptySource ? 'empty_source' : null),
-				'reason_code' => $qb->createNamedParameter($emptySource ? 'empty_source' : null),
-				'retryable' => $qb->createNamedParameter($emptySource ? false : null),
-				'finished_at' => $qb->createNamedParameter(
-					$emptySource ? time() : null,
-					IQueryBuilder::PARAM_INT,
-				),
+				'status' => $qb->createNamedParameter(self::STATUS_QUEUED),
 				'created_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
 				'size' => $qb->createNamedParameter($size, IQueryBuilder::PARAM_INT),
 				'etag' => $qb->createNamedParameter($etag),
@@ -113,19 +109,56 @@ class Queue extends QBMapper
 			throw $e;
 		}
 
-		if ($emptySource) {
-			// The row is recorded (the decision is visible in the queue view),
-			// but nothing was queued: returning null keeps the caller's "queued"
-			// count truthful.
-			return null;
-		}
-
 		// `IDBConnection::getLastInsertId()` was removed in Nextcloud 34; the
 		// query builder owns it now. Calling it on the connection threw
 		// "Call to undefined method ConnectionAdapter::getLastInsertId()" on every
 		// upload — the row landed, the listener logged a failure and returned no
 		// id, so nothing downstream could tell the job it had just created.
 		return $qb->getLastInsertId();
+	}
+
+	/**
+	 * Record (or correct) a zero-byte source as a terminal skip.
+	 *
+	 * Correcting matters: these files were queued before the size check existed
+	 * and their rows say `error`, which a retry policy reads as work to do. A
+	 * rescan must be able to fix the classification, not leave it frozen.
+	 *
+	 * @throws Exception
+	 */
+	private function recordEmptySource(string $path, ?int $fileId, ?int $size, ?string $etag): void
+	{
+		$existing = $fileId === null ? $this->findByPath($path) : $this->jobForVersion($fileId, $etag);
+		if ($existing !== null) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->update(self::JOBS)
+				->set('status', $qb->createNamedParameter('skipped'))
+				->set('reason', $qb->createNamedParameter('empty_source'))
+				->set('reason_code', $qb->createNamedParameter('empty_source'))
+				->set('retryable', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL))
+				->set('error', $qb->createNamedParameter(null))
+				->set('claimed_by', $qb->createNamedParameter(null))
+				->set('finished_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
+				->where($qb->expr()->eq('id', $qb->createNamedParameter((int) $existing->getId(), IQueryBuilder::PARAM_INT)));
+			$qb->executeStatement();
+			return;
+		}
+
+		$qb = $this->db->getQueryBuilder();
+		$qb->insert(self::JOBS)
+			->values([
+				'path' => $qb->createNamedParameter($path),
+				'file_id' => $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
+				'status' => $qb->createNamedParameter('skipped'),
+				'reason' => $qb->createNamedParameter('empty_source'),
+				'reason_code' => $qb->createNamedParameter('empty_source'),
+				'retryable' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+				'created_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
+				'finished_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
+				'size' => $qb->createNamedParameter($size, IQueryBuilder::PARAM_INT),
+				'etag' => $qb->createNamedParameter($etag),
+			]);
+		$qb->executeStatement();
 	}
 
 	/**
