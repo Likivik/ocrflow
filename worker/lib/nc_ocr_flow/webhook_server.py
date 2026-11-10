@@ -554,31 +554,6 @@ def _retry(fn, *, what: str, attempts: int = _RETRY_ATTEMPTS):
     raise last  # type: ignore[misc]
 
 
-def _webdav_delete(nc_path: str) -> None:
-    """Delete file from NC via WebDAV DELETE (for image→PDF replacement).
-
-    Raises ``raise_for_status`` inside the retried closure — the same
-    shape as ``_webdav_download`` / ``_webdav_upload``. A 5xx on the
-    final attempt otherwise escapes unretried, and in the image→PDF
-    branch (lines around 910-918 in ``_process_file``) would leave both
-    the source image and the new PDF in Nextcloud while the job row
-    silently records ``error``.
-    """
-    url = _webdav_url(nc_path)
-    log.info("WebDAV DELETE %s", url)
-
-    def _do_delete() -> requests.Response:
-        r = requests.delete(
-            url,
-            auth=_dav_auth(),
-            timeout=30,
-        )
-        r.raise_for_status()
-        return r
-
-    _retry(_do_delete, what=f"WebDAV DELETE {nc_path}")
-
-
 def _webdav_replace_atomic(nc_path: str, src: Path) -> None:
     """Atomically overwrite ``nc_path`` with ``src`` via WebDAV MOVE.
 
@@ -1822,31 +1797,19 @@ def _process_file(
                     l2_pages=result.l2_pages,
                 )
 
-            # Upload OCR'd PDF (new .pdf path), delete original image.
-            # C2: the upload can succeed while the delete of the
-            # source image fails (intermittent WebDAV 5xx, brief
-            # network blip, locked file). Old behaviour left the
-            # source image in place and recorded the file row against
-            # the image path with no signal — /stats showed
-            # ``status=done`` and the operator had no way to know the
-            # user sees both the image AND the new PDF. We retry the
-            # delete (with the same _webdav_delete backoff loop that
-            # already exists) and, if it still fails after all
-            # retries, keep both files and record a distinct reason.
-            # The status stays ``done`` because the OCR work itself
-            # succeeded and the new PDF is live — but the reason makes
-            # the leftover image visible to the panel and to
-            # /stats. We deliberately do NOT mark the file
-            # ``status=error``: the user now has a usable PDF, and
-            # the leftover image is a cleanup problem, not a failed
-            # job.
+            # Upload the OCR'd PDF (new .pdf path) and report the source image
+            # for trashing. The worker does NOT delete the source itself: a
+            # WebDAV DELETE is a permanent removal that never reaches the
+            # user's trash bin (measured: 23 image conversions, 0 source
+            # images left, 0 trash rows — the images were destroyed, not
+            # trashed). The app owns the file, so the app does the move: it
+            # receives the intent in the result payload and calls the
+            # filesystem API, which is what the trashbin hooks catch.
             with StageTimer("deliver"):
                 pdf_nc_path = _transport_upload(
                     pdf_nc_path, Path(result.output_pdf), job_id, in_place=False
                 )
             kept_source = False
-            delete_failed = False
-            delete_error = None
             if _KEEP_SOURCE_IMAGE:
                 # Deliberate: the operator asked to keep originals (EXIF,
                 # camera metadata, the file the user actually took). The image
@@ -1859,19 +1822,11 @@ def _process_file(
                     pdf_nc_path,
                 )
             else:
-                try:
-                    _webdav_delete(nc_path)
-                except Exception as exc:
-                    delete_failed = True
-                    delete_error = exc
-                    log.warning(
-                        "image branch: OCR + upload of %s succeeded, but"
-                        " delete of source image %s failed after retries (%s);"
-                        " keeping both files",
-                        pdf_nc_path,
-                        nc_path,
-                        exc,
-                    )
+                log.info(
+                    "image branch: reporting source image %s for trashing (the app moves it,"
+                    " the worker never deletes over WebDAV)",
+                    nc_path,
+                )
             if kept_source:
                 return {
                     "path": nc_path,
@@ -1883,28 +1838,20 @@ def _process_file(
                     "reason": SKIP_REASON_SOURCE_KEPT,
                 }
 
-            if delete_failed:
-                return {
-                    "path": nc_path,
-                    "output": pdf_nc_path,
-                    "engine": result.engine_used,
-                    "vlm_pages": result.vlm_pages,
-                    **_page_stats_keys(result.output_pdf),
-                    # Distinct reason so the panel and /stats show
-                    # the real cause. Operator's job: clean up the
-                    # leftover image manually (it cannot be safely
-                    # re-deleted by the worker because the user may
-                    # already be looking at both files).
-                    "reason": "image_delete_failed",
-                    "delete_error": str(delete_error),
-                }
-
             return {
                 "path": nc_path,
                 "output": pdf_nc_path,
                 "engine": result.engine_used,
                 "vlm_pages": result.vlm_pages,
                 **_page_stats_keys(result.output_pdf),
+                # The app turns this into a move to the trash bin, after it
+                # has recorded the successful job. ``source_path`` is the
+                # image to trash; ``result_path`` is what the conversion
+                # produced, so the app can refuse to trash a node that is
+                # also the result.
+                "source_converted": True,
+                "source_path": nc_path,
+                "result_path": pdf_nc_path,
             }
 
         if ext in PDF_EXTS:
@@ -2323,10 +2270,6 @@ def _run_job(job: dict) -> None:
         job["result"] = result
         if result.get("skipped") or result.get("reason"):
             job["reason"] = result.get("reason", "")
-        # Surface the WebDAV delete error in the job log even when
-        # the rest of the OCR was a success.
-        if result.get("delete_error") and not job.get("error"):
-            job["error"] = f"image_delete_failed: {result['delete_error']}"
         log.info("worker: job %d %s: %s", job["id"], job["status"], job["path"])
     except requests.HTTPError as exc:
         # 404 means the file is gone from Nextcloud (deleted between
