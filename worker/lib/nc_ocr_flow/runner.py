@@ -22,6 +22,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .config import env_float, env_str
 from .queue_client import Job, QueueClient
 from .readiness import report_configured_engine
 from .stage_events import StageCollector, collector_scope, verdict_code
@@ -280,7 +281,7 @@ def _install_signal_handlers() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
-        level=os.environ.get("NC_OCR_LOG_LEVEL", "INFO").upper(),
+        level=env_str("NC_OCR_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
@@ -289,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     # binary, and the module accepted the value regardless.
     report_configured_engine()
 
-    base_url = os.environ.get("NC_OCR_URL", "").rstrip("/")
+    base_url = env_str("NC_OCR_URL", "").rstrip("/")
     if not base_url:
         log.error("NC_OCR_URL is not set; nothing to talk to")
         return 2
@@ -298,16 +299,16 @@ def main(argv: list[str] | None = None) -> int:
         log.error(
             "no worker secret: set NC_OCR_WORKER_SECRET or provide %s/%s "
             "(see `occ ocrflow:worker:secret`)",
-            os.environ.get("CREDENTIALS_DIRECTORY", "$CREDENTIALS_DIRECTORY"),
+            env_str("CREDENTIALS_DIRECTORY", "$CREDENTIALS_DIRECTORY"),
             CREDENTIAL_NAME,
         )
         return 2
 
-    idle = float(os.environ.get("NC_OCR_IDLE_SECONDS", DEFAULT_IDLE_SECONDS))
+    idle = env_float("NC_OCR_IDLE_SECONDS", DEFAULT_IDLE_SECONDS)
     client = QueueClient(
         base_url=base_url,
         secret=secret,
-        worker_name=os.environ.get("NC_OCR_WORKER_NAME", "worker"),
+        worker_name=env_str("NC_OCR_WORKER_NAME", "worker"),
     )
 
     # Probe surface. Off unless NC_OCR_HEALTH_PORT is set, so native deployments
@@ -318,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
 
     health_port = health_port_from_env()
     if health_port is not None:
-        start_health_server(health_port, worker_name=os.environ.get("NC_OCR_WORKER_NAME", "worker"))
+        start_health_server(health_port, worker_name=env_str("NC_OCR_WORKER_NAME", "worker"))
         log.info("health probe on :%d (/heartbeat)", health_port)
 
     _install_signal_handlers()

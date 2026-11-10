@@ -57,6 +57,7 @@ import unicodedata
 from pathlib import Path
 from uuid import uuid4
 
+from nc_ocr_flow.config import env_float, env_int, env_str
 from nc_ocr_flow.ocr_models import OcrBlock, OcrResult
 
 log = logging.getLogger(__name__)
@@ -75,8 +76,8 @@ ENGINE_NAME = "google"
 # oversized inputs as an operator-visible error rather than letting
 # the upload silently consume GCS quota).
 _MAX_PDF_BYTES = 200 * 1024 * 1024  # 200 MB
-_BATCH_TIMEOUT_S = int(os.environ.get("NC_OCR_GOOGLE_BATCH_TIMEOUT", "1800"))
-_POLL_INTERVAL_S = float(os.environ.get("NC_OCR_GOOGLE_POLL_INTERVAL", "2"))
+_BATCH_TIMEOUT_S = env_int("NC_OCR_GOOGLE_BATCH_TIMEOUT", 1800)
+_POLL_INTERVAL_S = env_float("NC_OCR_GOOGLE_POLL_INTERVAL", 2.0)
 
 
 # --- Lazily-built Vision client --------------------------------------------
@@ -618,7 +619,7 @@ def _ensure_batch_bucket(client) -> str:
     if _batch_bucket:
         return _batch_bucket
 
-    explicit = os.environ.get("NC_OCR_GOOGLE_BUCKET")
+    explicit = env_str("NC_OCR_GOOGLE_BUCKET", "")
     if explicit:
         _batch_bucket = explicit
         return explicit
@@ -631,7 +632,7 @@ def _ensure_batch_bucket(client) -> str:
     name = f"nc-ocr-vision-tmp-{uuid.uuid4().hex[:10]}"
     gs = storage.Client(project=project)
     b = gs.bucket(name)
-    b.location = os.environ.get("NC_OCR_GOOGLE_LOCATION", "US")
+    b.location = env_str("NC_OCR_GOOGLE_LOCATION", "US")
     b.create()
     _batch_bucket = name
     return name
@@ -658,7 +659,7 @@ def _delete_batch_objects(bucket: str, obj_name: str, out_prefix: str) -> None:
 
 def _cleanup_bucket(name: str | None) -> None:
     """Best-effort: delete the temp bucket + all its objects."""
-    if not name or name == os.environ.get("NC_OCR_GOOGLE_BUCKET"):
+    if not name or name == env_str("NC_OCR_GOOGLE_BUCKET", ""):
         return
     try:
         from google.cloud import storage  # type: ignore[import-not-found]
@@ -685,11 +686,11 @@ def _project_id(client=None) -> str | None:
     client with ``project=None`` and bucket creation failed with
     ``400 Required parameter: project``.
     """
-    explicit = os.environ.get("NC_OCR_GOOGLE_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    explicit = env_str("NC_OCR_GOOGLE_PROJECT", "") or env_str("GOOGLE_CLOUD_PROJECT", "")
     if explicit:
         return explicit
 
-    path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    path = env_str("GOOGLE_APPLICATION_CREDENTIALS", "")
     if path:
         try:
             with open(path, encoding="utf-8") as fh:

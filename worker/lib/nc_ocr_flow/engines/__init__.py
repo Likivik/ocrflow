@@ -27,9 +27,10 @@ resolve the engine.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from typing import Any
+
+from nc_ocr_flow.config import env_str
 
 # --- Engine name constants -------------------------------------------------
 
@@ -60,7 +61,7 @@ def resolve_engine(name: str | None = None) -> str:
 
     Raises ``ValueError`` on an unknown engine name.
     """
-    raw = name if name is not None else os.environ.get("NC_OCR_ENGINE", "")
+    raw = name if name is not None else env_str("NC_OCR_ENGINE", "")
     chosen = (raw or DEFAULT_ENGINE).strip().lower()
     if chosen in ("", NONE):
         raise EngineNotConfigured(

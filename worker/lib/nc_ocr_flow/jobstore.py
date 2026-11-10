@@ -40,13 +40,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import time
 from contextlib import suppress
 from datetime import UTC
 from pathlib import Path
 from typing import Any
+
+from .config import env_flag, env_str
 
 log = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ def _resolve_db_path() -> Path:
     back to a per-user cache path under ``$XDG_CACHE_HOME`` or
     ``~/.cache`` so the service still starts in degraded mode.
     """
-    env = os.environ.get("NC_OCR_STATE_DIR") or os.environ.get("STATE_DIRECTORY", "")
+    env = env_str("NC_OCR_STATE_DIR", "") or env_str("STATE_DIRECTORY", "")
     env = env.split(":")[0] if env else ""
     primary = Path(env) / "jobs.db" if env else Path("/var/lib/nc-ocr/jobs.db")
     primary.parent.mkdir(parents=True, exist_ok=True)
@@ -141,9 +142,22 @@ class JobStoreUnavailable(RuntimeError):
     """
 
 
+#: Parsed at import time so a typo in the value stops the worker at boot
+#: instead of in the middle of a write. :func:`_strict` re-reads the variable
+#: on every call, because the panel and the tests flip it at runtime.
+_STRICT_BOOT_CHECK = env_flag("NC_OCR_STATE_STRICT", False)
+
+
 def _strict() -> bool:
-    """True when a failed statement is a bug instead of a degradation."""
-    return os.environ.get("NC_OCR_STATE_STRICT", "").strip().lower() in ("1", "true", "yes")
+    """True when a failed statement is a bug instead of a degradation.
+
+    The value is parsed by :func:`nc_ocr_flow.config.env_flag`, so
+    ``NC_OCR_STATE_STRICT`` accepts exactly ``1`` (true), ``0`` and the empty
+    string (false).  Anything else — ``true``, ``yes``, ``off`` — is a typo and
+    raises :class:`~nc_ocr_flow.config.ConfigError` naming the variable
+    instead of quietly meaning "off".
+    """
+    return env_flag("NC_OCR_STATE_STRICT", False)
 
 
 #: Contention, not corruption. Two connections can legitimately collide on a

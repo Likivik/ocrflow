@@ -35,6 +35,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .config import env_str
 from .ocr_models import OcrResult
 from .pdfio import write_in_place
 
@@ -64,7 +65,7 @@ FALLBACK_FONT_PATHS = (
     "/nix/var/nix/profiles/default/share/fonts/dejavu/DejaVuSans.ttf",
 )
 # Kept for callers that already import it.
-FONT_PATH = os.environ.get(FONT_PATH_ENV, DEFAULT_FONT_PATH)
+FONT_PATH = env_str(FONT_PATH_ENV, DEFAULT_FONT_PATH)
 
 
 # --- Public dataclasses ----------------------------------------------------
@@ -495,7 +496,7 @@ def _get_font():
     """
     import fitz
 
-    configured = os.environ.get(FONT_PATH_ENV)
+    configured = env_str(FONT_PATH_ENV, "")
     if configured:
         # Explicit configuration must never degrade silently: a set-but-missing
         # path is an operator error, not a licence to substitute Helvetica.

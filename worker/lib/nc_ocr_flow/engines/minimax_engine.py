@@ -34,14 +34,15 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from nc_ocr_flow import ocr as _orch
+from nc_ocr_flow.config import env_str
 from nc_ocr_flow.ocr_models import OcrBlock, OcrResult
 
 log = logging.getLogger(__name__)
 
 ENGINE_NAME = "minimax"
 
-MINIMAX_URL = os.environ.get("NC_OCR_MINIMAX_URL", "https://api.minimax.io/v1").rstrip("/")
-MINIMAX_MODEL = os.environ.get("NC_OCR_MINIMAX_MODEL", "MiniMax-M3")
+MINIMAX_URL = env_str("NC_OCR_MINIMAX_URL", "https://api.minimax.io/v1").rstrip("/")
+MINIMAX_MODEL = env_str("NC_OCR_MINIMAX_MODEL", "MiniMax-M3")
 
 # Blocks with conf below this are flagged in PDF metadata for review.
 LOW_CONF_FLOOR = 0.70
@@ -315,10 +316,10 @@ def _blocks_from_toolcall(args_json: str, png_w: int, png_h: int) -> list[OcrBlo
 
 
 def _read_key() -> str:
-    val = os.environ.get("NC_OCR_MINIMAX_KEY")
+    val = env_str("NC_OCR_MINIMAX_KEY", "")
     if val:
         return val
-    path = os.environ.get("NC_OCR_MINIMAX_KEY_FILE")
+    path = env_str("NC_OCR_MINIMAX_KEY_FILE", "")
     if path:
         return Path(path).read_text().strip()
     return ""
