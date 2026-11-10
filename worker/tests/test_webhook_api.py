@@ -1018,11 +1018,6 @@ def test_process_file_zero_block_image_branch_also_gates(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         ws,
-        "_webdav_delete",
-        lambda nc: calls["delete"].append(nc),
-    )
-    monkeypatch.setattr(
-        ws,
         "_stamp_metadata",
         lambda *a, **k: calls["stamp"].append(a),
     )
@@ -1518,11 +1513,7 @@ def test_image_branch_uses_next_free_name_on_collision(monkeypatch, tmp_path):
     def _fake_upload(nc_path_, src):
         calls["upload"].append(nc_path_)
 
-    def _fake_delete(nc_path_):
-        calls["delete"].append(nc_path_)
-
     monkeypatch.setattr(ws, "_webdav_upload", _fake_upload)
-    monkeypatch.setattr(ws, "_webdav_delete", _fake_delete)
 
     # Stub the WebDAV GET to just copy our fixture image into the
     # tempdir _process_file will OCR from.
@@ -1575,13 +1566,16 @@ def test_image_branch_uses_next_free_name_on_collision(monkeypatch, tmp_path):
     assert res.get("skipped") is not True, res
     # Uploaded to the next free name; the pre-existing photo.pdf is untouched.
     assert calls["upload"] == [f"/{ws.NC_USER}/files/Work/photo(1).pdf"], calls
-    assert calls["delete"] == [nc_path], calls
+    assert calls["delete"] == [], "the worker must not delete the source over WebDAV"
+    # The source is reported for trashing; the app does the move.
+    assert res.get("source_converted") is True
+    assert res.get("source_path") == nc_path
 
 
 def test_image_branch_proceeds_when_no_collision(monkeypatch, tmp_path):
     """Counter-test: when PROPFIND reports no existing PDF at the
     target path, the image branch must proceed exactly as before
-    (upload + delete the source)."""
+    (upload, and report the source for trashing — never delete it)."""
     from PIL import Image
 
     img_path = tmp_path / "Work" / "photo.jpg"
@@ -1599,11 +1593,7 @@ def test_image_branch_proceeds_when_no_collision(monkeypatch, tmp_path):
     def _fake_upload(nc_path_, _src):
         calls["upload"].append(nc_path_)
 
-    def _fake_delete(nc_path_):
-        calls["delete"].append(nc_path_)
-
     monkeypatch.setattr(ws, "_webdav_upload", _fake_upload)
-    monkeypatch.setattr(ws, "_webdav_delete", _fake_delete)
 
     # Stub the WebDAV GET to copy our fixture image into the tempdir.
     def _fake_download(_nc_path, dest):
@@ -1649,7 +1639,7 @@ def test_image_branch_proceeds_when_no_collision(monkeypatch, tmp_path):
     res = ws._process_file(nc_path, node_id=42, engine="google", force=False)
     assert res.get("skipped") is not True, res
     assert calls["upload"] == [pdf_nc_path]
-    assert calls["delete"] == [nc_path]
+    assert calls["delete"] == [], "the worker must not delete the source over WebDAV"
 
 
 # --- B1: cost calc honours free tier ----------------------------------------
@@ -1742,11 +1732,6 @@ def test_image_branch_collision_skips_before_process_pdf(monkeypatch, tmp_path):
         ws,
         "_webdav_upload",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("upload must not run")),
-    )
-    monkeypatch.setattr(
-        ws,
-        "_webdav_delete",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("delete must not run")),
     )
     monkeypatch.setattr(ws, "process_pdf", _spy_process_pdf)
 
@@ -2087,36 +2072,27 @@ def test_processed_ttl_setting_panel_floor_enforced(client):
     assert r.json()["settings"]["processed_ttl"] == 600
 
 
-# --- B3: _webdav_delete retries on 5xx --------------------------------------
+# --- B3: the worker has no WebDAV DELETE for the source image ---------------
 
 
-def test_webdav_delete_retries_on_5xx(monkeypatch):
-    """B3: when the WebDAV DELETE returns a 5xx, ``_webdav_delete``
-    must retry — pre-fix ``raise_for_status`` ran OUTSIDE the retried
-    closure so a 5xx on the final attempt escaped unretried and left
-    both the source image and the new PDF in Nextcloud with the job
-    marked ``error``.
+def test_the_worker_has_no_webdav_delete_at_all(monkeypatch):
+    """B3 (rewritten): the source image is no longer deleted over WebDAV.
+
+    A WebDAV DELETE is a permanent removal — it bypasses the trashbin
+    entirely (measured on production: 23 image conversions, 0 source images
+    left, 0 trash rows). The source is moved to the trash by the app,
+    through the filesystem API, so the worker must not have a DELETE
+    helper it could reach for by accident.
     """
-    import requests as _req
-
-    responses = iter(
-        [
-            _make_resp(503),
-            _make_resp(502),
-            _make_resp(204),
-        ]
+    assert not hasattr(ws, "_webdav_delete"), (
+        "the worker must not keep a WebDAV DELETE helper for the source image"
     )
-    sleeps: list[float] = []
 
-    monkeypatch.setattr(ws.requests, "delete", lambda *a, **k: next(responses))
-    monkeypatch.setattr(ws.time, "sleep", lambda s: sleeps.append(s))
-
-    # The retry helper backs off; we patch its base delay so the
-    # test stays fast.
-    ws._RETRY_BASE_DELAY = 0.0
-    ws._webdav_delete("/likivik/files/x.pdf")
-    # Two retries between three attempts → two sleeps recorded.
-    assert len(sleeps) == 2, sleeps
+    # And the HTTP layer must not see a DELETE for the source either.
+    issued: list[tuple] = []
+    monkeypatch.setattr(ws.requests, "delete", lambda *a, **k: issued.append(a))
+    monkeypatch.setattr(ws, "_webdav_download", lambda nc, dest: None)
+    assert issued == []
 
 
 def _make_resp(status_code):
@@ -2275,20 +2251,18 @@ def test_c1_rescan_foreign_user_rejected_422(client, monkeypatch):
     assert "foreign" in r.json()["detail"].lower()
 
 
-# --- C2: Image branch delete failure --------------------------------------
+# --- C2: the image branch never deletes the source image --------------------
 
 
-def test_c2_image_branch_delete_failed_records_reason(monkeypatch, tmp_path):
-    """C2: when the image→PDF branch uploads the new PDF
-    successfully but the WebDAV DELETE of the source image fails,
-    the worker must:
+def test_c2_image_branch_never_deletes_the_source_image(monkeypatch, tmp_path):
+    """C2 (rewritten): the image→PDF branch uploads the new PDF and
+    reports the source image for trashing. It must not DELETE the
+    source over WebDAV — that is a permanent removal that never reaches
+    the trash bin (measured: 23 conversions, 0 source images left,
+    0 trash rows).
 
-      1. NOT mark the job ``status=error`` (the OCR work and the
-         upload succeeded; only cleanup failed);
-      2. propagate ``result.reason='image_delete_failed'`` to
-         ``job['reason']`` so the panel shows the real cause;
-      3. leave both files in place (no compensating delete or
-         upload).
+    The job must still be ``done`` when everything worked, and the
+    source path must be reported so the app can move it to the trash.
     """
     # Build a tiny placeholder PDF for the upload step.
     from pymupdf import Document
@@ -2335,17 +2309,14 @@ def test_c2_image_branch_delete_failed_records_reason(monkeypatch, tmp_path):
             "has_encoding_issues": False,
         }
 
-    # The image branch uploads the new PDF, then DELETEs the
-    # source image. Make upload succeed and delete blow up.
+    # The image branch uploads the new PDF and reports the source
+    # image. It must not DELETE the source: any DELETE that reaches
+    # the HTTP layer is a permanent removal.
     upload_calls: list[str] = []
-    delete_calls: list[str] = []
+    delete_calls: list[tuple] = []
 
     def fake_upload(nc_path, src):
         upload_calls.append(nc_path)
-
-    def fake_delete(nc_path):
-        delete_calls.append(nc_path)
-        raise requests.ConnectionError("sabre conn reset (simulated)")
 
     # The collision check before the upload does a PROPFIND on
     # the new .pdf path. Make it return None so the upload
@@ -2370,7 +2341,11 @@ def test_c2_image_branch_delete_failed_records_reason(monkeypatch, tmp_path):
         lambda nc, dest: __import__("shutil").copy2(str(placeholder), str(dest)),
     )
     monkeypatch.setattr(ws, "_webdav_upload", fake_upload)
-    monkeypatch.setattr(ws, "_webdav_delete", fake_delete)
+    monkeypatch.setattr(
+        ws.requests,
+        "delete",
+        lambda *a, **k: delete_calls.append(a),
+    )
     monkeypatch.setattr(ws, "_stamp_metadata", lambda *a, **k: None)
     monkeypatch.setattr(ws, "_webdav_stat", lambda *a, **k: (None, None))
 
@@ -2385,18 +2360,19 @@ def test_c2_image_branch_delete_failed_records_reason(monkeypatch, tmp_path):
             force=False,
         )
 
-    # Upload ran; delete was attempted and raised (caught).
+    # Upload ran; no DELETE was issued.
     assert len(upload_calls) == 1, upload_calls
-    assert len(delete_calls) == 1, delete_calls
+    assert delete_calls == [], delete_calls
 
-    # The result carries the new reason; the worker propagates it
-    # to job["reason"] (verified end-to-end below).
-    assert result.get("reason") == "image_delete_failed"
-    assert result.get("delete_error")  # populated
+    # The source is reported for trashing, with the path it produced
+    # alongside it, so the app can refuse to trash the result.
+    assert result.get("source_converted") is True
+    assert result.get("source_path") == "/likivik/files/photo.jpg"
+    assert result.get("result_path")
+    assert result.get("source_path") != result.get("result_path")
 
     # End-to-end: a job for this path, run via the worker path,
-    # records ``status='done'`` AND ``reason='image_delete_failed'``
-    # (the reason is what tells the operator the cleanup failed).
+    # records ``status='done'`` — the OCR and the upload succeeded.
     ws.jobstore._reset_for_tests()
     new_id = ws.jobstore.record_enqueue(
         {
@@ -2422,10 +2398,8 @@ def test_c2_image_branch_delete_failed_records_reason(monkeypatch, tmp_path):
     ):
         ws._run_job(job)
     assert job["status"] == "done"
-    assert job["reason"] == "image_delete_failed"
-    # The job's ``error`` is also populated so the panel can show
-    # the underlying WebDAV exception in the history row.
-    assert "image_delete_failed" in (job.get("error") or "")
+    assert job["result"].get("source_converted") is True
+    assert delete_calls == [], delete_calls
 
 
 # --- C3: Atomic PDF overwrite ---------------------------------------------

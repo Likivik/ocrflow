@@ -106,6 +106,34 @@ class FileExchange
 	}
 
 	/**
+	 * Move a file to the user's trash bin.
+	 *
+	 * The filesystem-layer delete is what Nextcloud's trashbin hooks catch:
+	 * a WebDAV DELETE bypasses them, so the file is destroyed instead of
+	 * being recoverable. The app is the only party that holds a Nextcloud
+	 * identity, so the app does this move.
+	 *
+	 * Idempotent: a source that is already gone is a success — the end
+	 * state the caller wanted is already true.
+	 *
+	 * @throws NotFoundException when the node exists but is not a file
+	 */
+	public function trashSource(string $owner, string $relative): bool
+	{
+		try {
+			$node = $this->resolve($owner, $relative);
+		} catch (NotFoundException) {
+			// Already gone. The caller wanted it out of the way; it is.
+			return true;
+		}
+		if (!$node instanceof File) {
+			throw new NotFoundException('not a file: ' . $relative);
+		}
+		$node->delete();
+		return true;
+	}
+
+	/**
 	 * `scan.pdf` then `scan (1).pdf`, `scan (2).pdf` — the naming Nextcloud's own
 	 * clients use, so a second OCR never clobbers the first.
 	 *

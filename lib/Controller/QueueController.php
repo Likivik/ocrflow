@@ -289,10 +289,73 @@ class QueueController extends OCSController
 			'stamp_version' => $this->nullableString('stamp_version'),
 			'stage_events' => $this->stageEventsParam(),
 		], $this->workerName());
+		// The source image of an image→PDF conversion is moved to the
+		// user's trash bin here, not deleted by the worker over WebDAV: a
+		// WebDAV DELETE is a permanent removal (measured: 23 conversions, 0
+		// source images left, 0 trash rows). The app is the only party that
+		// holds a Nextcloud identity, so the app does the move — through the
+		// filesystem API, which is what the trashbin hooks catch.
+		//
+		// Only after the job is recorded as done, and only for a worker that
+		// said it converted an image: a worker that predates this field sends
+		// nothing, and nothing is trashed.
+		if ($applied && $status === Queue::STATUS_DONE) {
+			$this->trashConvertedSource($id);
+		}
 		// ``applied: false`` means this worker no longer holds the claim (its
 		// claim was recovered and re-claimed elsewhere). Not an error: the job
 		// is someone else's now, and the result was correctly discarded.
 		return new DataResponse(['id' => $id, 'status' => $status, 'applied' => $applied]);
+	}
+
+	/**
+	 * Move the source image of a finished image→PDF conversion to the trash.
+	 *
+	 * Failure policy: a leftover image is acceptable, a failed job is not.
+	 * The PDF already exists and is valid, so a trash failure is logged and
+	 * the job stays ``done``.
+	 */
+	private function trashConvertedSource(int $id): void
+	{
+		if (!$this->flagParam('source_converted')) {
+			return;
+		}
+
+		$job = $this->queue->getById($id);
+		if ($job === null) {
+			$this->logger->warning('ocrflow: job ' . $id . ' reported a converted source but the job is gone; nothing to trash');
+			return;
+		}
+		$jobPath = (string) $job->getPath();
+		$split = self::splitPath($jobPath);
+		if ($split === null) {
+			$this->logger->warning('ocrflow: job ' . $id . ' has an unusable path; not trashing the source');
+			return;
+		}
+		[$owner, $relative] = $split;
+
+		// The path the worker reported must be the job's own source. A
+		// worker is not allowed to name a file of its own choosing: that
+		// would turn the shared secret into a delete-anything capability.
+		$reported = $this->nullableString('source_path');
+		if ($reported !== null && $reported !== $jobPath) {
+			$this->logger->warning('ocrflow: job ' . $id . ' reported source "' . $reported . '" which is not its own path; not trashing');
+			return;
+		}
+
+		// Never trash the file the conversion produced. If the source and
+		// the result are the same path, trashing it would remove the PDF.
+		$result = $this->nullableString('result_path');
+		if ($result !== null && $result === $jobPath) {
+			$this->logger->warning('ocrflow: job ' . $id . ' reported its result at the source path; not trashing');
+			return;
+		}
+
+		try {
+			$this->files->trashSource($owner, $relative);
+		} catch (\Throwable $e) {
+			$this->logger->warning('ocrflow: job ' . $id . ' succeeded but the source image could not be moved to the trash: ' . $e->getMessage());
+		}
 	}
 
 	#[PublicPage]
@@ -426,5 +489,22 @@ class QueueController extends OCSController
 	{
 		$value = $this->request->getParam($key);
 		return $value === null || $value === '' ? null : (int) $value;
+	}
+
+	/**
+	 * A form-encoded boolean. The worker's payload is flat strings, so
+	 * ``true`` arrives as ``"1"``, ``"true"`` or ``"yes"`` depending on
+	 * which client sent it.
+	 */
+	private function flagParam(string $key): bool
+	{
+		$value = $this->request->getParam($key);
+		if ($value === null || $value === '' || $value === false) {
+			return false;
+		}
+		if (is_bool($value)) {
+			return $value;
+		}
+		return in_array(strtolower(trim((string) $value)), ['1', 'true', 'yes', 'on'], true);
 	}
 }

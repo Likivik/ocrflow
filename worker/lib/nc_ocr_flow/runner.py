@@ -128,6 +128,14 @@ def _report(
         chars=outcome.get("chars"),
         stamp_version=outcome.get("stamp_version"),
         stage_events=stage_events,
+        # Image→PDF conversion: the source image is not deleted by the
+        # worker (a WebDAV DELETE is a permanent removal that never reaches
+        # the trash bin). The app owns the file, so it moves the source to
+        # the trash itself — it needs to be told which file and what the
+        # conversion produced.
+        source_converted="1" if outcome.get("source_converted") else None,
+        source_path=outcome.get("source_path"),
+        result_path=outcome.get("result_path"),
     )
 
 

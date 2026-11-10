@@ -45,7 +45,7 @@ def image_job(tmp_path, monkeypatch):
         )
 
     Path(tmp_path / "out.pdf").write_bytes(b"%PDF-1.4 out")
-    calls = {"upload": [], "delete": [], "stamped": 0}
+    calls = {"upload": [], "stamped": 0, "http_delete": []}
     monkeypatch.setattr(ws, "_webdav_download", fake_download)
     monkeypatch.setattr(ws, "_image_to_pdf", fake_image_to_pdf)
     monkeypatch.setattr(ws, "process_pdf", fake_process_pdf)
@@ -56,7 +56,15 @@ def image_job(tmp_path, monkeypatch):
         lambda *a, **k: calls.__setitem__("stamped", calls["stamped"] + 1),
     )
     monkeypatch.setattr(ws, "_webdav_upload", lambda p, src: calls["upload"].append(p))
-    monkeypatch.setattr(ws, "_webdav_delete", lambda p: calls["delete"].append(p))
+    # The HTTP layer is the thing under test: the worker must never issue a
+    # DELETE for the source image. A WebDAV DELETE is a permanent removal
+    # (measured: 23 conversions, 0 source images left, 0 trash rows), so the
+    # app moves the source to the trash instead.
+    monkeypatch.setattr(
+        ws.requests,
+        "delete",
+        lambda *a, **k: calls["http_delete"].append(a),
+    )
     monkeypatch.setattr(
         ws,
         "classify",
@@ -82,7 +90,7 @@ def test_classifier_failure_stops_the_job_and_touches_nothing(image_job, monkeyp
         ws._process_file("/likivik/files/photo.png", 1)
     assert "classifier unavailable" in str(err.value)
     assert image_job["upload"] == [], "must not upload a converted PDF"
-    assert image_job["delete"] == [], "must not delete the source image"
+    assert image_job["http_delete"] == [], "must not delete the source image"
     assert image_job["stamped"] == 0
 
 
@@ -151,16 +159,30 @@ def test_keep_source_image_flag_preserves_the_original(image_job, monkeypatch):
     monkeypatch.setattr(ws, "_KEEP_SOURCE_IMAGE", True)
     res = ws._process_file("/likivik/files/photo.png", 1)
     assert image_job["upload"] == ["/likivik/files/photo.pdf"]
-    assert image_job["delete"] == [], "source image must survive the flag"
+    assert image_job["http_delete"] == [], "source image must survive the flag"
     assert res.get("kept_source") is True
     assert res.get("reason") == ws.SKIP_REASON_SOURCE_KEPT
+    # The flag means "leave the source alone": the app must not be asked to
+    # move it to the trash either.
+    assert not res.get("source_converted")
+    assert res.get("source_path") is None
 
 
-def test_default_still_deletes_the_source_image(image_job):
+def test_default_reports_the_source_for_trashing_and_never_deletes_it(image_job):
+    """The default no longer destroys the source: it reports it.
+
+    The app moves the source image to the trash bin through the filesystem
+    API. The worker must not issue a DELETE of its own — that bypasses the
+    trashbin entirely (measured: 23 conversions, 0 source images left,
+    0 trash rows).
+    """
     res = ws._process_file("/likivik/files/photo.png", 1)
-    assert image_job["delete"] == ["/likivik/files/photo.png"]
+    assert image_job["http_delete"] == [], "the worker must never DELETE over WebDAV"
     assert res.get("kept_source") is None
     assert image_job["upload"] == ["/likivik/files/photo.pdf"]
+    assert res.get("source_converted") is True
+    assert res.get("source_path") == "/likivik/files/photo.png"
+    assert res.get("result_path") == "/likivik/files/photo.pdf"
 
 
 def test_photo_still_skipped(image_job, monkeypatch):
@@ -171,7 +193,7 @@ def test_photo_still_skipped(image_job, monkeypatch):
     )
     res = ws._process_file("/likivik/files/photo.png", 1)
     assert res.get("skipped") is True
-    assert image_job["upload"] == [] and image_job["delete"] == []
+    assert image_job["upload"] == [] and image_job["http_delete"] == []
 
 
 # --- the directory listing itself -----------------------------------------
