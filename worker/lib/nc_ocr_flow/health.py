@@ -15,11 +15,12 @@ module is importable without PyMuPDF/ONNX so tests stay fast.
 
 from __future__ import annotations
 
-import os
 import threading
 import time
 
 from fastapi import FastAPI
+
+from .config import env_str
 
 _STARTED = time.monotonic()
 
@@ -47,8 +48,8 @@ def create_app(
     probe=None,
 ) -> FastAPI:
     """Build the probe app. Pure function: no side effects, easy to test."""
-    name = worker_name or os.environ.get("NC_OCR_WORKER_NAME", "worker")
-    ver = version or os.environ.get("NC_OCR_VERSION", "dev")
+    name = worker_name or env_str("NC_OCR_WORKER_NAME", "worker")
+    ver = version or env_str("NC_OCR_VERSION", "dev")
 
     app = FastAPI(
         title="ocrflow-worker",
@@ -70,7 +71,7 @@ def create_app(
         # transport the app decides per job, so ``null`` here is normal, not a
         # fault — the field exists so an operator can tell "decided per job"
         # from "unconfigured" without reading the source.
-        engine = (os.environ.get("NC_OCR_ENGINE") or "").strip().lower() or None
+        engine = env_str("NC_OCR_ENGINE", "").strip().lower() or None
         return {
             "status": "ok" if store["ready"] else "degraded",
             "worker": name,

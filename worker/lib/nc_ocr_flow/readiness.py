@@ -16,10 +16,11 @@ unready engine is fatal (a worker started with that engine) or informational
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+
+from .config import env_str
 
 log = logging.getLogger(__name__)
 
@@ -47,16 +48,16 @@ class Readiness:
 
 def _credential_file_present() -> bool:
     """True when the Google key exists in any of the places the module reads."""
-    explicit = os.environ.get(_GOOGLE_KEY_ENV, "").strip()
+    explicit = env_str(_GOOGLE_KEY_ENV, "").strip()
     if explicit and Path(explicit).is_file():
         return True
-    directory = os.environ.get(_CREDENTIALS_ENV, "").strip()
+    directory = env_str(_CREDENTIALS_ENV, "").strip()
     return bool(directory and (Path(directory) / "google-ocr-key").is_file())
 
 
 def _tessdata_present() -> bool:
     for candidate in (
-        os.environ.get("TESSDATA_PREFIX", ""),
+        env_str("TESSDATA_PREFIX", ""),
         "/usr/share/tesseract-ocr/5/tessdata",
         "/usr/share/tessdata",
     ):
@@ -85,10 +86,10 @@ def readiness_for(engine: str) -> Readiness:
             missing.append(
                 "service-account key (NC_OCR_GOOGLE_KEY or $CREDENTIALS_DIRECTORY/google-ocr-key)"
             )
-        if not os.environ.get(_GOOGLE_BUCKET_ENV, "").strip():
+        if not env_str(_GOOGLE_BUCKET_ENV, "").strip():
             missing.append(f"{_GOOGLE_BUCKET_ENV} (staging bucket)")
     elif engine == "minimax":
-        if not os.environ.get(_MINIMAX_KEY_ENV, "").strip():
+        if not env_str(_MINIMAX_KEY_ENV, "").strip():
             missing.append(f"{_MINIMAX_KEY_ENV}")
     else:
         missing.append(f"unknown engine {engine!r}")
@@ -97,7 +98,7 @@ def readiness_for(engine: str) -> Readiness:
 
 
 def configured_engine() -> str:
-    return (os.environ.get(_ENGINE_ENV) or "google").strip().lower()
+    return env_str(_ENGINE_ENV, "google").strip().lower()
 
 
 def report_configured_engine() -> Readiness:

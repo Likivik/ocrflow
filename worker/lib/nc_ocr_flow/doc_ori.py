@@ -54,9 +54,10 @@ from __future__ import annotations
 
 import io
 import logging
-import os
 import threading
 from pathlib import Path
+
+from .config import env_str
 
 log = logging.getLogger(__name__)
 
@@ -86,7 +87,7 @@ _model_path_used: str | None = None
 
 
 def _default_model_path() -> str:
-    return os.environ.get(ENV_VAR, DEFAULT_MODEL_PATH)
+    return env_str(ENV_VAR, DEFAULT_MODEL_PATH)
 
 
 def _get_session():

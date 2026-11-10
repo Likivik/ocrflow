@@ -33,6 +33,7 @@ from pydantic import BaseModel
 
 from . import jobstore
 from .classifier import ClassifierUnavailable, classify
+from .config import env_flag, env_float, env_int, env_str
 from .ocr import process_pdf
 from .pdf_classify import classify_pdf
 from .pdfio import write_in_place
@@ -43,7 +44,7 @@ from .stage_events import StageTimer, verdict_code
 log = logging.getLogger(__name__)
 
 # --- Config from environment ---
-NC_URL = os.environ.get("NC_OCR_NC_URL", "http://localhost").rstrip("/")
+NC_URL = env_str("NC_OCR_NC_URL", "http://localhost").rstrip("/")
 # No default user. It used to be "likivik" — a person, with that person's
 # authority over the whole instance — so an unset variable silently ran the
 # worker as a human instead of as the account it was given. A missing user is
@@ -118,8 +119,8 @@ def verify_dav_credentials() -> None:
     _dav_auth()
 
 
-LISTEN_HOST = os.environ.get("NC_OCR_LISTEN_HOST", "127.0.0.1")
-LISTEN_PORT = int(os.environ.get("NC_OCR_LISTEN_PORT", "8095"))
+LISTEN_HOST = env_str("NC_OCR_LISTEN_HOST", "127.0.0.1")
+LISTEN_PORT = env_int("NC_OCR_LISTEN_PORT", 8095)
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".heic"}
 PDF_EXTS = {".pdf"}
@@ -243,7 +244,7 @@ def _processed_ttl_seconds() -> float:
 
 
 def _state_dir() -> Path:
-    d = os.environ.get("NC_OCR_STATE_DIR") or os.environ.get("STATE_DIRECTORY", "")
+    d = env_str("NC_OCR_STATE_DIR", "") or env_str("STATE_DIRECTORY", "")
     d = d.split(":")[0] if d else ""
     return Path(d) if d else Path("/var/lib/nc-ocr")
 
@@ -406,7 +407,7 @@ def _webdav_download(nc_path: str, dest: Path) -> None:
 # one; the OCS channel needs only the shared secret, because the app opens the
 # file as its owner. Both transports stay implemented until the API path has run
 # in production — see the plan's Phase 6 gate — and `NC_OCR_TRANSPORT` picks one.
-TRANSPORT = os.environ.get("NC_OCR_TRANSPORT", "dav").strip().lower()
+TRANSPORT = env_str("NC_OCR_TRANSPORT", "dav").strip().lower()
 
 _api_client_singleton: QueueClient | None = None
 
@@ -423,7 +424,7 @@ def _api_client() -> QueueClient:
         _api_client_singleton = QueueClient(
             base_url=NC_URL,
             secret=secret,
-            worker_name=os.environ.get("NC_OCR_WORKER_NAME", "worker"),
+            worker_name=env_str("NC_OCR_WORKER_NAME", "worker"),
         )
     return _api_client_singleton
 
@@ -760,11 +761,11 @@ def _webdav_exists(nc_path: str, timeout: int = 10) -> bool:
 # *post-query* ceiling on PROPFINDs to keep the worst-case wall-clock
 # bounded if the index is large. Empirically one PROPFIND takes
 # ~50-200ms per request, so 500 rows is about 1.5 minutes.
-_RECONCILE_MAX_PROPFINDS = int(os.environ.get("NC_OCR_RECONCILE_MAX_PROPFINDS", "500"))
+_RECONCILE_MAX_PROPFINDS = env_int("NC_OCR_RECONCILE_MAX_PROPFINDS", 500)
 # How many rows one reconcile pass queries from the index. The
 # ordering is ``finished ASC`` (oldest first) so the first pass
 # cleans the worst offenders.
-_RECONCILE_QUERY_LIMIT = int(os.environ.get("NC_OCR_RECONCILE_QUERY_LIMIT", "500"))
+_RECONCILE_QUERY_LIMIT = env_int("NC_OCR_RECONCILE_QUERY_LIMIT", 500)
 
 
 def reconcile_stale_files(
@@ -913,12 +914,7 @@ _FREE_PDF_TRIES = 10_000
 #: image; on for folders where the original matters (EXIF, camera metadata,
 #: the file the user actually took). Either way the image is recoverable from
 #: the PDF with ``nc-ocr-extract`` — the bytes are stored untouched.
-_KEEP_SOURCE_IMAGE = os.environ.get("NC_OCR_KEEP_SOURCE_IMAGE", "0").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-    "",
-)
+_KEEP_SOURCE_IMAGE = env_flag("NC_OCR_KEEP_SOURCE_IMAGE", False)
 
 _classifier_shouted = False
 
@@ -1997,7 +1993,7 @@ _IDLE_POLL_SECONDS = 5.0
 #: it without thinking about it would re-amplify an outage (the
 #: backoff would still be running, the queue would still be
 #: blocked). 0 disables the feature.
-_MAX_RETRY_ATTEMPTS = int(os.environ.get("NC_OCR_MAX_RETRY_ATTEMPTS", "2"))
+_MAX_RETRY_ATTEMPTS = env_int("NC_OCR_MAX_RETRY_ATTEMPTS", 2)
 #: Backoff schedule, indexed by ``attempts`` (the count BEFORE the
 #: new attempt). The first retry waits 60s, the second 300s. Keep
 #: this conservative: the worker is blocked on a queued retry, not
@@ -2118,6 +2114,13 @@ _SETTING_SPEC: dict[str, tuple[str, int]] = {
 #: the semaphores are built at import time).
 _RESTART_SETTINGS = {"workers"}
 
+#: Env-backed settings that are consulted at call time rather than at import
+#: time. They are parsed here anyway, so a malformed value fails the boot
+#: instead of the first webhook that happens to read it.
+_CALL_TIME_INT_SETTINGS = ("NC_OCR_PROCESSED_TTL",)
+for _env_name in _CALL_TIME_INT_SETTINGS:
+    env_int(_env_name, 0)
+
 # Opening the store belongs to start_scheduler, not to import: see
 # `_clear_restart_flag`.
 
@@ -2139,9 +2142,11 @@ def _int_env(name: str, default: int) -> int:
     except Exception:
         raw = None
     if raw in (None, ""):
-        raw = os.environ.get(name)
-    if raw is None:
-        return default
+        # The environment is the documented fallback source, and Nix is the
+        # only producer: a value that is not an integer is a typo, so it
+        # fails at import time naming the variable instead of quietly
+        # meaning "default".
+        return max(1, env_int(name, default))
     try:
         return max(1, int(raw))
     except (TypeError, ValueError):
@@ -2161,9 +2166,7 @@ def _int_env_nonneg(name: str, default: int) -> int:
     except Exception:
         raw = None
     if raw in (None, ""):
-        raw = os.environ.get(name)
-    if raw is None:
-        return default
+        return max(0, env_int(name, default))
     try:
         return max(0, int(raw))
     except (TypeError, ValueError):
@@ -2182,13 +2185,16 @@ def _setting_values() -> tuple[dict[str, int], dict[str, int], dict[str, str]]:
         if raw not in (None, ""):
             sources[key] = "db"
         else:
-            raw = os.environ.get(env_name)
-            sources[key] = "env" if raw not in (None, "") else "default"
+            # The panel must render even when a stored value is malformed,
+            # so this path stays tolerant; the strict env parse happens in
+            # _int_env/_int_env_nonneg, which decide what the worker runs on.
+            raw = env_str(env_name, "")
+            sources[key] = "env" if raw != "" else "default"
         # The TTL setting is the only one in the spec where 0 is a
         # valid value (it means "always re-OCR"). Everything else has
         # a meaningful lower bound of 1, so the floor is per-key.
         floor = 0 if key == "processed_ttl" else 1
-        if raw is None:
+        if raw is None or raw == "":
             current[key] = default
             sources[key] = "default"
             continue
@@ -2235,7 +2241,7 @@ def _path_in_flight(nc_path: str) -> bool:
 
 def _engine_slot(engine: str | None):
     """Concurrency ceiling for this job's engine."""
-    key = (engine or os.environ.get("NC_OCR_ENGINE") or "").lower()
+    key = (engine or env_str("NC_OCR_ENGINE", "")).lower()
     if not key or key == "none":
         # No engine: the job should never have been queued. Refuse loudly rather
         # than picking a slot and a provider nobody chose.
@@ -2564,13 +2570,7 @@ def reconcile_orphans() -> dict:
 # entries modified after it. Bounded by ``NC_OCR_CATCHUP_MAX``; a missing
 # watermark means a fresh install, which must never trigger a mass scan.
 _CATCHUP_WATERMARK_KEY = "_last_webhook_at"
-_CATCHUP_ENABLED = os.environ.get("NC_OCR_CATCHUP", "1").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-    "off",
-    "",
-)
+_CATCHUP_ENABLED = env_flag("NC_OCR_CATCHUP", True)
 _CATCHUP_MAX = _int_env_nonneg("NC_OCR_CATCHUP_MAX", 200)
 _CATCHUP_TIMEOUT = _int_env_nonneg("NC_OCR_CATCHUP_TIMEOUT", 120)
 #: Refuse to look further back than this even if the watermark is older.
@@ -2792,11 +2792,7 @@ def _catchup_on_startup(_gen: int = 0) -> None:
 #: plus a catch-up pass re-queuing files the queue had already handled. The
 #: scheduler therefore starts only when something asks for it: the old entry
 #: point leaves the default (on), the new worker sets NC_OCR_RUN_SCHEDULER=0.
-_SCHEDULER_ENABLED = os.environ.get("NC_OCR_RUN_SCHEDULER", "1").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-)
+_SCHEDULER_ENABLED = env_flag("NC_OCR_RUN_SCHEDULER", True)
 #: The quota loop is part of the scheduler: same switch, decided once here so
 #: start_scheduler can consult it long before that function is defined.
 _VISION_QUOTA_ENABLED = _SCHEDULER_ENABLED
@@ -2881,15 +2877,15 @@ VISION_FREE_UNITS = 1000
 VISION_USD_PER_1000 = 1.50
 #: How often to re-read the rate quota. The metric is sampled once a
 #: minute and lags up to four, so polling faster than this adds nothing.
-_VISION_QUOTA_INTERVAL = float(os.environ.get("NC_OCR_VISION_QUOTA_INTERVAL", "900"))
+_VISION_QUOTA_INTERVAL = env_float("NC_OCR_VISION_QUOTA_INTERVAL", 900.0)
 
 
 def _vision_credentials_path() -> str:
     """Locate the Vision service-account JSON, or "" when unavailable."""
-    p = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    p = env_str("GOOGLE_APPLICATION_CREDENTIALS", "")
     if p and Path(p).exists():
         return p
-    d = os.environ.get("CREDENTIALS_DIRECTORY", "")
+    d = env_str("CREDENTIALS_DIRECTORY", "")
     if d:
         cand = Path(d) / "google-ocr-key"
         if cand.exists():
@@ -2979,13 +2975,13 @@ def _vision_quota_once() -> None:
                 # exercise it without going through Google auth.
                 match = _pick_quota_dimension(
                     qi.get("dimensionsInfos") or [],
-                    os.environ.get("NC_OCR_GOOGLE_LOCATION", "US") or "US",
+                    env_str("NC_OCR_GOOGLE_LOCATION", "US"),
                 )
                 if match is None:
                     log.warning(
                         "vision quota: no dimension matched region=%r;"
                         " using conservative fallback 1800 req/min",
-                        (os.environ.get("NC_OCR_GOOGLE_LOCATION", "US") or "US").upper(),
+                        env_str("NC_OCR_GOOGLE_LOCATION", "US").upper(),
                     )
                 else:
                     val = match.get("details", {}).get("value")

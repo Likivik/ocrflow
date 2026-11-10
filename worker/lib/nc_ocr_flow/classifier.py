@@ -11,9 +11,10 @@ API:
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from .config import env_str
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ def _get_session():
     if _MOBILENET_SESSION is None:
         import onnxruntime as ort
 
-        model_path = os.environ.get(
+        model_path = env_str(
             "NC_OCR_MOBILENET_MODEL",
             "/etc/static/nc-ocr/mobilenet_v3_small_fp32.onnx",
         )

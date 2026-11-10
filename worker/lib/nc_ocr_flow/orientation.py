@@ -98,6 +98,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from .config import env_int
+
 log = logging.getLogger(__name__)
 
 
@@ -197,17 +199,10 @@ def _resolve_max_dpi(render_dpi: int) -> int:
          not a fixed dpi — see the module docstring).
       3. :data:`_DEFAULT_MAX_DPI` (300).
     """
-    import os as _os
-
-    raw = _os.environ.get("NC_OCR_ORIENTATION_MAX_DPI", "").strip()
-    if raw:
-        try:
-            val = int(raw)
-        except ValueError:
-            val = render_dpi if render_dpi else _DEFAULT_MAX_DPI
-        else:
-            return val
-    return render_dpi if render_dpi else _DEFAULT_MAX_DPI
+    return env_int(
+        "NC_OCR_ORIENTATION_MAX_DPI",
+        render_dpi if render_dpi else _DEFAULT_MAX_DPI,
+    )
 
 
 def _resolve_jpeg_quality() -> int:
@@ -216,15 +211,7 @@ def _resolve_jpeg_quality() -> int:
     Priority: ``NC_OCR_ORIENTATION_JPEG_Q`` env var, falling back to
     :data:`_DEFAULT_JPEG_QUALITY`.
     """
-    import os as _os
-
-    raw = _os.environ.get("NC_OCR_ORIENTATION_JPEG_Q", "").strip()
-    if raw:
-        try:
-            return int(raw)
-        except ValueError:
-            return _DEFAULT_JPEG_QUALITY
-    return _DEFAULT_JPEG_QUALITY
+    return env_int("NC_OCR_ORIENTATION_JPEG_Q", _DEFAULT_JPEG_QUALITY)
 
 
 def _compute_source_dpi(page, cap_dpi: int) -> int:
