@@ -46,10 +46,27 @@ def create_app(
     worker_name: str | None = None,
     version: str | None = None,
     probe=None,
+    quota=None,
 ) -> FastAPI:
     """Build the probe app. Pure function: no side effects, easy to test."""
     name = worker_name or env_str("NC_OCR_WORKER_NAME", "worker")
     ver = version or env_str("NC_OCR_VERSION", "dev")
+
+    def _quota_state() -> dict[str, object]:
+        """The vision-quota claim gate, for the operator's dashboard.
+
+        Numbers and timestamps only — no credentials, no paths. Read
+        defensively: a probe reports, it never breaks the heartbeat.
+        """
+        try:
+            gate = quota
+            if gate is None:
+                from .quota_gate import GATE
+
+                gate = GATE
+            return gate.snapshot()
+        except Exception:  # pragma: no cover - defensive
+            return {}
 
     app = FastAPI(
         title="ocrflow-worker",
@@ -81,6 +98,9 @@ def create_app(
             "store_ready": store["ready"],
             "jobs_depth": store["jobs_depth"],
             "error": store["error"],
+            # Why the worker may be idle when the queue is not empty: a
+            # blocked claim gate looks like a stall from the outside.
+            "vision_quota": _quota_state(),
         }
 
     @app.get("/init")

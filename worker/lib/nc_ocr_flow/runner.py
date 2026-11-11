@@ -22,8 +22,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from . import quota_gate
 from .config import env_float, env_str
 from .queue_client import Job, QueueClient
+from .quota_gate import QuotaGate
 from .readiness import report_configured_engine
 from .stage_events import StageCollector, collector_scope, verdict_code
 
@@ -144,8 +146,17 @@ def run_once(
     client: QueueClient,
     process: Callable[..., dict[str, Any]],
     worker_name: str = "worker",
+    gate: QuotaGate | None = None,
 ) -> bool:
-    """Handle at most one job. Returns True when one was handled."""
+    """Handle at most one job. Returns True when one was handled.
+
+    ``gate`` is the vision-quota claim gate: when it blocks, this returns
+    ``False`` without claiming, so a rate-limited quota cannot spend a job's
+    attempts. The gate fails open on a missing or stale sample — see
+    :mod:`nc_ocr_flow.quota_gate`.
+    """
+    if gate is not None and gate.check().blocked:
+        return False
     job = client.claim()
     if job is None:
         return False
@@ -336,8 +347,15 @@ def main(argv: list[str] | None = None) -> int:
         TRANSPORT,
         DavCredentialsMissing,
         _process_file,
+        start_vision_quota_sampler,
         verify_dav_credentials,
     )
+
+    # The claim gate needs fresh quota samples in this process (the scheduler
+    # the sampling loop belongs to does not run here). Starts a daemon thread
+    # only when quota gating applies: Vision credentials present and the
+    # engine can actually use them. No-ops otherwise, gate disabled.
+    start_vision_quota_sampler()
 
     # Before claiming anything: a worker with no way to reach files would claim a
     # job, fail to fetch it, and blame the document. Refuse to start instead.
@@ -369,7 +387,14 @@ def main(argv: list[str] | None = None) -> int:
     log.info("worker started: %s, idle %ss", base_url, idle)
     while True:
         try:
-            handled = run_once(client, _process_file)
+            # A blocked quota gate must not fall through to the idle sleep:
+            # the bounded gate sleep IS the wait, so a recovered quota is
+            # picked up within at most MAX_SLEEP_S, not idle + latency.
+            verdict = quota_gate.GATE.check()
+            if verdict.blocked:
+                time.sleep(quota_gate.GATE.sleep_seconds())
+                continue
+            handled = run_once(client, _process_file, gate=quota_gate.GATE)
         except Exception as exc:
             log.error("worker loop error: %s", exc)
             time.sleep(min(idle * 4, 60))
