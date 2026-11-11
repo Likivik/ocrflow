@@ -38,12 +38,32 @@ class QueueStageEventsTest extends TestCase
 	private array $rows = [];
 
 	/** @var list<string> */
+	private array $sqls = [];
+
+	/** @var list<string> */
 	private array $tables = [];
 
 	private function db(bool $claimGuardHolds = true, ?array $jobRow = null): IDBConnection
 	{
 		$calls = 0;
 		$db = $this->createMock(IDBConnection::class);
+		// The stage rows are written as one multi-row INSERT per chunk on
+		// the connection (the QueryBuilder cannot express them), so the
+		// connection is where they are captured: each raw INSERT is
+		// unpacked back into rows keyed by column, the same shape the
+		// builder-based path used to produce.
+		$db->method('executeStatement')->willReturnCallback(
+			function (string $sql, array $params = [], array $types = []): int {
+				$this->sqls[] = $sql;
+				$this->tables[] = 'ocrflow_stage_events';
+				$columns = ['job_id', 'stage', 'reason_code', 'duration_ms', 'cost_pages', 'created_at'];
+				$width = count($columns);
+				for ($offset = 0; $offset + $width <= count($params); $offset += $width) {
+					$this->rows[] = array_combine($columns, array_slice($params, $offset, $width));
+				}
+				return 1;
+			}
+		);
 		$db->method('getQueryBuilder')->willReturnCallback(
 			function () use (&$calls, $jobRow, $claimGuardHolds): IQueryBuilder {
 				$index = ++$calls;
