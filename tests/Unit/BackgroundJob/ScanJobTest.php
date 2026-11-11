@@ -31,9 +31,16 @@ require_once __DIR__ . '/oc_hooks_emitter.php';
  *
  * The budget comes from config (`scan_max_files`, default 20 000), so an
  * operator can size the walk to their instance instead of recompiling.
+ *
+ * A file still being written must not be enqueued on every scan: dedupe keys
+ * on etag, and a growing file presents a new etag each time — so a file whose
+ * mtime is inside the quiescence window (`scan_min_age_seconds`, default 120)
+ * is skipped without a row, and the next scan picks it up once it is quiet.
  */
 class ScanJobTest extends TestCase
 {
+    private const NOW = 1700000000;
+
     private ITimeFactory&MockObject $time;
     private IRootFolder&MockObject $rootFolder;
     private Queue&MockObject $queue;
@@ -42,6 +49,9 @@ class ScanJobTest extends TestCase
     /** @var list<string> */
     private array $enqueuedPaths = [];
     private string $maxFiles = '20000';
+    private string $minAge = '120';
+    /** @var list<string> */
+    private array $logLines = [];
 
     protected function setUp(): void
     {
@@ -51,10 +61,15 @@ class ScanJobTest extends TestCase
         $this->logger = $this->createMock(LoggerInterface::class);
         $this->config = $this->createMock(IConfig::class);
 
+        $this->time->method('getTime')->willReturn(self::NOW);
+
         $this->config->method('getAppValue')->willReturnCallback(
             function (string $appId, string $key): string {
                 if ($key === 'engine') {
                     return 'tesseract';
+                }
+                if ($key === 'scan_min_age_seconds') {
+                    return $this->minAge;
                 }
                 return $this->maxFiles;
             },
@@ -63,6 +78,10 @@ class ScanJobTest extends TestCase
         $this->queue->method('enqueue')->willReturnCallback(function (string $path): ?int {
             $this->enqueuedPaths[] = $path;
             return 1;
+        });
+
+        $this->logger->method('info')->willReturnCallback(function (string $message): void {
+            $this->logLines[] = $message;
         });
     }
 
@@ -81,7 +100,7 @@ class ScanJobTest extends TestCase
         );
     }
 
-    private function file(string $path): File&MockObject
+    private function file(string $path, ?int $mtime = null): File&MockObject
     {
         $file = $this->createMock(File::class);
         $file->method('getName')->willReturn(basename($path));
@@ -89,6 +108,7 @@ class ScanJobTest extends TestCase
         $file->method('getId')->willReturn(crc32($path));
         $file->method('getSize')->willReturn(1024);
         $file->method('getEtag')->willReturn('etag');
+        $file->method('getMtime')->willReturn($mtime ?? (self::NOW - 3600));
         return $file;
     }
 
@@ -216,5 +236,83 @@ class ScanJobTest extends TestCase
         $this->runJob($this->job('yes'), ['user' => 'alice', 'path' => '/scan']);
 
         $this->assertCount(5, $this->enqueuedPaths);
+    }
+
+    public function testAFileYoungerThanTheWindowIsNotEnqueued(): void
+    {
+        // Modified ten seconds ago, window 120: still being written, or at
+        // least not provably quiet. No row — the next scan decides again.
+        $target = $this->folder('/alice/files/scan', [
+            $this->file('/alice/files/scan/growing.pdf', self::NOW - 10),
+        ]);
+        $this->root($target);
+
+        $this->runJob($this->job('20000'), ['user' => 'alice', 'path' => '/scan']);
+
+        $this->assertSame([], $this->enqueuedPaths, 'a young file is left for a later scan');
+    }
+
+    public function testAFileOlderThanTheWindowIsEnqueued(): void
+    {
+        $target = $this->folder('/alice/files/scan', [
+            $this->file('/alice/files/scan/quiet.pdf', self::NOW - 121),
+        ]);
+        $this->root($target);
+
+        $this->runJob($this->job('20000'), ['user' => 'alice', 'path' => '/scan']);
+
+        $this->assertSame(['/alice/files/scan/quiet.pdf'], $this->enqueuedPaths);
+    }
+
+    public function testAFileExactlyAtTheWindowBoundaryIsEnqueued(): void
+    {
+        // Age exactly `scan_min_age_seconds`: the file is no longer "younger
+        // than" the window, so the scan claims it.
+        $target = $this->folder('/alice/files/scan', [
+            $this->file('/alice/files/scan/at-the-edge.pdf', self::NOW - 120),
+        ]);
+        $this->root($target);
+
+        $this->runJob($this->job('20000'), ['user' => 'alice', 'path' => '/scan']);
+
+        $this->assertSame(['/alice/files/scan/at-the-edge.pdf'], $this->enqueuedPaths);
+    }
+
+    public function testAGarbageWindowFallsBackToTheDefault(): void
+    {
+        // 100 seconds old with a garbage config: the default window is 120,
+        // so the file is still considered young and skipped.
+        $this->minAge = 'soon';
+
+        $target = $this->folder('/alice/files/scan', [
+            $this->file('/alice/files/scan/growing.pdf', self::NOW - 100),
+        ]);
+        $this->root($target);
+
+        $this->runJob($this->job('20000'), ['user' => 'alice', 'path' => '/scan']);
+
+        $this->assertSame([], $this->enqueuedPaths, 'a garbage window becomes the default, not zero');
+    }
+
+    public function testYoungFilesAreSkippedInOneSummaryLineNotOnePerFile(): void
+    {
+        $target = $this->folder('/alice/files/scan', [
+            $this->file('/alice/files/scan/one.pdf', self::NOW - 5),
+            $this->file('/alice/files/scan/two.pdf', self::NOW - 10),
+            $this->file('/alice/files/scan/old.pdf', self::NOW - 500),
+        ]);
+        $this->root($target);
+
+        $this->runJob($this->job('20000'), ['user' => 'alice', 'path' => '/scan']);
+
+        $this->assertSame(['/alice/files/scan/old.pdf'], $this->enqueuedPaths);
+
+        $young = array_values(array_filter(
+            $this->logLines,
+            static fn (string $line): bool => str_contains($line, 'younger than'),
+        ));
+        $this->assertCount(1, $young, 'one summary line per scan, not one per skipped file');
+        $this->assertStringContainsString('2 files', $young[0]);
+        $this->assertStringContainsString('120', $young[0]);
     }
 }
