@@ -19,6 +19,15 @@ written.
 
 ### Fixed
 
+- Permanent OCR failures stay failed: `enqueue()` refuses to re-queue a file
+  whose per-file ledger row records a permanent failure (`broken_pdf`,
+  `bad_format`, `empty_source`, `no_text_detected`, `parse_produced_nothing`,
+  `save_refused`) for the same etag, so the verdict survives retention purging
+  the job row — previously a file that failed for a permanent reason was
+  re-queued, paid for and failed again once per retention window, forever. New
+  bytes (a new etag) still earn a fresh attempt, and `occ ocrflow:requeue
+  <path>` clears the verdict for one file. Ambiguous codes (transport-shaped,
+  deploy-shaped, 4xx) fail open toward retrying.
 - A job whose source file changed while the OCR ran no longer writes its
   (stale) result over the user's newer file, and no longer trashes the newer
   file as the "converted source" of an image→PDF conversion: the result path
