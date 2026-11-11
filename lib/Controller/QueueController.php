@@ -8,6 +8,7 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Controller;
 
 use OCA\OcrFlow\AppInfo\Application;
+use OCA\OcrFlow\Db\Job;
 use OCA\OcrFlow\Db\Queue;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\PublicPage;
@@ -184,6 +185,16 @@ class QueueController extends OCSController
 		}
 		[$owner, $relative] = $split;
 
+		// The source the job was queued for is not the source on disk
+		// anymore: the user edited or replaced the file while OCR ran. The
+		// worker's result is for an older version, so writing it beside the
+		// new one — and later trashing the new one as the "converted
+		// source" — would destroy the user's newer file. Terminal skip:
+		// the new version is enqueued as its own job by the next scan.
+		if ($this->sourceChanged($job, $owner, $relative)) {
+			return $this->skipSourceChanged($id);
+		}
+
 		$directory = dirname($relative);
 		$directory = $directory === '.' ? '' : $directory . '/';
 
@@ -254,6 +265,18 @@ class QueueController extends OCSController
 	{
 		if (($denied = $this->denyIfNotWorker()) !== null) {
 			return $denied;
+		}
+
+		// The finish and the trash below both act on the job's source; a
+		// job must only ever act on the exact file version it was queued
+		// for, so a source that changed mid-run is refused here before
+		// either can run (see `sourceChanged`).
+		$job = $this->queue->getById($id);
+		if ($job !== null) {
+			$split = self::splitPath((string) $job->getPath());
+			if ($split !== null && $this->sourceChanged($job, $split[0], $split[1])) {
+				return $this->skipSourceChanged($id);
+			}
 		}
 
 		// A worker may legitimately decide that a file needs no work: a
@@ -356,6 +379,52 @@ class QueueController extends OCSController
 		} catch (\Throwable $e) {
 			$this->logger->warning('ocrflow: job ' . $id . ' succeeded but the source image could not be moved to the trash: ' . $e->getMessage());
 		}
+	}
+
+	/**
+	 * Has the job's source been changed since the job was enqueued?
+	 *
+	 * The job row carries the etag `Queue::enqueue()` recorded; the file on
+	 * disk carries its current one. A job must only ever act on the exact
+	 * file version it was queued for, and a mismatch means the user edited
+	 * or replaced the file while OCR ran — the worker's result is for a
+	 * version nobody asked about anymore.
+	 *
+	 * Nothing to compare is not a change: a legacy row with no etag, or a
+	 * source that is gone (null current etag), keeps today's behaviour.
+	 */
+	private function sourceChanged(Job $job, string $owner, string $relative): bool
+	{
+		$jobEtag = $job->getEtag();
+		if ($jobEtag === null || $jobEtag === '') {
+			return false;
+		}
+		$current = $this->files->currentEtag($owner, $relative);
+		return $current !== null && $current !== $jobEtag;
+	}
+
+	/**
+	 * Record the refusal as a terminal skip, so the worker does not retry:
+	 * the same etag mismatch would refuse again, and a retry of the old
+	 * version's result is what this guard exists to prevent.
+	 *
+	 * Same response shape the other terminal skips use.
+	 */
+	private function skipSourceChanged(int $id): DataResponse
+	{
+		$this->logger->warning('ocrflow: job ' . $id . ' skipped: the source file changed while the job ran (source_changed); the result was not written');
+		$applied = $this->queue->finish($id, [
+			'status' => Queue::STATUS_SKIPPED,
+			'reason' => 'the source file changed while the job ran; the result was for an older version',
+			'reason_code' => 'source_changed',
+			'retryable' => false,
+			'stage_events' => $this->stageEventsParam(),
+		], $this->workerName());
+		return new DataResponse([
+			'id' => $id,
+			'status' => Queue::STATUS_SKIPPED,
+			'applied' => $applied,
+		]);
 	}
 
 	#[PublicPage]

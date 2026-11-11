@@ -56,6 +56,11 @@ final class RetryPolicy
 		// The source file is zero bytes on disk. Nothing to fetch or read —
 		// this is a data problem and needs a human, not a retry.
 		'empty_source' => false,
+		// The source file changed while the job ran: the worker's result
+		// was produced from an older version, so writing it would clobber
+		// the user's newer file. Terminal — the new version is enqueued as
+		// its own job by the next scan.
+		'source_changed' => false,
 		// The classifier's verdicts. These are not failures: the file needs
 		// no work, so there is nothing to retry and nobody to tell. The
 		// classifier decides; the policy only records the decision's name.

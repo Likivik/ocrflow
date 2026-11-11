@@ -31,6 +31,9 @@ class ScanJob extends QueuedJob
 	/** Default file budget of a single scan; configurable via `scan_max_files`. */
 	private const DEFAULT_MAX_FILES = 20000;
 
+	/** Default quiescence window of a single scan; configurable via `scan_min_age_seconds`. */
+	private const DEFAULT_MIN_AGE = 120;
+
 	public function __construct(
 		ITimeFactory $time,
 		private IRootFolder $rootFolder,
@@ -72,7 +75,10 @@ class ScanJob extends QueuedJob
 
 		$seen = 0;
 		$queued = 0;
+		$young = 0;
 		$max = $this->maxFiles();
+		$minAge = $this->minAgeSeconds();
+		$now = $this->time->getTime();
 		foreach ($folder->getDirectoryListing() as $node) {
 			$stack = [$node];
 			while ($stack !== []) {
@@ -105,12 +111,31 @@ class ScanJob extends QueuedJob
 				if (!$this->candidate->isProcessable($current->getName())) {
 					continue;
 				}
+				// Quiescence: a file still being written presents a new etag
+				// on every scan, and a new etag is a new job — so a file
+				// modified within the window is left alone, no row, and the
+				// next scan picks it up once it is quiet (or skips it again
+				// if it changed again).
+				if (($now - $current->getMtime()) < $minAge) {
+					$young++;
+					continue;
+				}
 				if ($this->queue->enqueue($current->getPath(), $current->getId(), $current->getSize(), $current->getEtag(), $engine) !== null) {
 					$queued++;
 				}
 			}
 		}
 
+		if ($young > 0) {
+			// One summary line per scan, not one per file: a busy upload
+			// would otherwise flood the log with thousands of lines.
+			$this->logger->info(sprintf(
+				'ocrflow: scan of %s skipped %d files younger than %ds',
+				$path,
+				$young,
+				$minAge,
+			));
+		}
 		$this->logger->info(sprintf('ocrflow: scan of %s saw %d files, queued %d', $path, $seen, $queued));
 	}
 
@@ -126,6 +151,23 @@ class ScanJob extends QueuedJob
 			return (int) $raw;
 		}
 		return self::DEFAULT_MAX_FILES;
+	}
+
+	/**
+	 * The quiescence window of one scan, from config. A file whose mtime is
+	 * inside the window is presumed still changing and is not enqueued.
+	 *
+	 * Same rule as `maxFiles()`: a value that is not a non-negative integer
+	 * is treated as unconfigured rather than passed through, so a typo
+	 * cannot become "skip nothing" or "skip everything".
+	 */
+	private function minAgeSeconds(): int
+	{
+		$raw = trim((string) $this->config->getAppValue(Application::APP_ID, 'scan_min_age_seconds', (string) self::DEFAULT_MIN_AGE));
+		if (ctype_digit($raw)) {
+			return (int) $raw;
+		}
+		return self::DEFAULT_MIN_AGE;
 	}
 
 	private function resolveFolder(string $user, string $path): Folder

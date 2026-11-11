@@ -134,6 +134,23 @@ class FileExchange
 	}
 
 	/**
+	 * The node's current etag, or null when the node is gone.
+	 *
+	 * The result path compares this against the etag recorded at enqueue:
+	 * a mismatch means the user changed the file while OCR ran, and the
+	 * worker's result is for a version nobody asked about anymore.
+	 */
+	public function currentEtag(string $owner, string $relative): ?string
+	{
+		try {
+			$node = $this->resolve($owner, $relative);
+		} catch (NotFoundException) {
+			return null;
+		}
+		return (string) $node->getEtag();
+	}
+
+	/**
 	 * `scan.pdf` then `scan (1).pdf`, `scan (2).pdf` — the naming Nextcloud's own
 	 * clients use, so a second OCR never clobbers the first.
 	 *

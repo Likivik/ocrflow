@@ -5,6 +5,19 @@ written.
 
 ## Unreleased
 
+### Fixed
+
+- A job whose source file changed while the OCR ran no longer writes its
+  (stale) result over the user's newer file, and no longer trashes the newer
+  file as the "converted source" of an image→PDF conversion: the result path
+  compares the file's current etag against the one recorded at enqueue and
+  refuses with a terminal `skipped`/`source_changed`. Legacy rows without an
+  etag keep the old behaviour.
+- Folder scans no longer re-OCR a file that is still being written: a file
+  whose mtime is within `scan_min_age_seconds` (default 120, garbage config
+  falls back to the default) of the scan is left for a later scan instead of
+  being enqueued as a new job on every etag change.
+
 ### Added
 
 - **Administration → OCR**: a settings page for the engine and the group list,
