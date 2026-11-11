@@ -176,8 +176,17 @@ rather than by reading more code.
     taxonomy open burned 250 tool calls and produced zero code; the same task with seven
     stages named finished correctly.
 
-14. **A child sharing your workspace will discard your untracked files.** Parallel work
-    needs a separate workspace or an API-only path, not the same working copy.
+14. **A brief that does not open with `ws_doctor` + `cd` lets the child work in the
+    parent's tree.** The gate binds a child to its own workspace, but its shell still
+    starts in the parent's directory; without the redirect the child runs `jj` there, and
+    a `jj new main` silently deletes untracked files that live only on disk. Both trees
+    looked correct from the outside, so the loss surfaced as "the file is gone".
 
 15. **Claims of version support need a run, not a declaration.** `max-version="35"` on an
     instance running 34 is an opinion until CI runs against 35.
+
+16. **Verify the isolation before blaming it.** After that file vanished, the obvious
+    conclusion was "the child shared my workspace". `ws_status` showed the opposite: the
+    parent was correctly bound and four child workspaces existed. The shared `jj op log`
+    then showed the child's commands attributed to `container-first@` — the parent's tree.
+    Two tools, two answers, and only the second one was true.
