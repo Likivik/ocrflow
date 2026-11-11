@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\BackgroundJob;
 
+use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\Candidate;
 use OCA\OcrFlow\Service\EnginePolicy;
@@ -15,6 +16,7 @@ use OCP\BackgroundJob\QueuedJob;
 use OCP\Files\Folder;
 use OCP\Files\IRootFolder;
 use OCP\Files\NotFoundException;
+use OCP\IConfig;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -26,7 +28,8 @@ use Psr\Log\LoggerInterface;
  */
 class ScanJob extends QueuedJob
 {
-	private const MAX_FILES = 20000;
+	/** Default file budget of a single scan; configurable via `scan_max_files`. */
+	private const DEFAULT_MAX_FILES = 20000;
 
 	public function __construct(
 		ITimeFactory $time,
@@ -35,6 +38,7 @@ class ScanJob extends QueuedJob
 		private Candidate $candidate,
 		private EnginePolicy $engine,
 		private LoggerInterface $logger,
+		private IConfig $config,
 	) {
 		parent::__construct($time);
 	}
@@ -68,15 +72,34 @@ class ScanJob extends QueuedJob
 
 		$seen = 0;
 		$queued = 0;
+		$max = $this->maxFiles();
 		foreach ($folder->getDirectoryListing() as $node) {
 			$stack = [$node];
-			while ($stack !== [] && $seen < self::MAX_FILES) {
+			while ($stack !== []) {
 				$current = array_pop($stack);
 				if ($current instanceof Folder) {
+					// The budget check sits BEFORE the listing on purpose:
+					// `getDirectoryListing()` is the expensive step (a folder
+					// with 100 000 children costs a 100 000-node listing and a
+					// 100 000-entry stack), so it must not run once the budget
+					// is spent. The old guard only sat on the loop condition.
+					if ($seen >= $max) {
+						$this->logger->warning(sprintf(
+							'ocrflow: scan of %s truncated after %d files (limit %d): skipping %s',
+							$path,
+							$seen,
+							$max,
+							$current->getPath(),
+						));
+						break 2;
+					}
 					foreach ($current->getDirectoryListing() as $child) {
 						$stack[] = $child;
 					}
 					continue;
+				}
+				if ($seen >= $max) {
+					break 2;
 				}
 				$seen++;
 				if (!$this->candidate->isProcessable($current->getName())) {
@@ -89,6 +112,20 @@ class ScanJob extends QueuedJob
 		}
 
 		$this->logger->info(sprintf('ocrflow: scan of %s saw %d files, queued %d', $path, $seen, $queued));
+	}
+
+	/**
+	 * The file budget of one scan, from config. A value that is not a positive
+	 * integer is treated as unconfigured rather than passed through: a typo
+	 * must not become "walk zero files" or "walk everything".
+	 */
+	private function maxFiles(): int
+	{
+		$raw = trim((string) $this->config->getAppValue(Application::APP_ID, 'scan_max_files', (string) self::DEFAULT_MAX_FILES));
+		if (ctype_digit($raw) && (int) $raw > 0) {
+			return (int) $raw;
+		}
+		return self::DEFAULT_MAX_FILES;
 	}
 
 	private function resolveFolder(string $user, string $path): Folder
