@@ -31,7 +31,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from . import jobstore
+from . import jobstore, quota_gate
 from .classifier import ClassifierUnavailable, classify
 from .config import env_flag, env_float, env_int, env_str
 from .ocr import process_pdf
@@ -3018,6 +3018,9 @@ def _vision_quota_once() -> None:
 
         if limit:
             jobstore.setting_put("_vision_limit_per_min", str(limit))
+            # The claim gate reads this in-process snapshot; jobstore keeps
+            # the panel's persisted reading. One writer: this function.
+            quota_gate.GATE.update(remaining=max(0, limit - peak))
         jobstore.setting_put("_vision_used_per_min", str(peak))
         jobstore.setting_put("_vision_checked", str(int(time.time())))
         jobstore.setting_put("_vision_quota_ok", "1")
@@ -3031,6 +3034,38 @@ def _vision_quota_loop(gen: int) -> None:
     while scheduler.is_current(gen):
         _vision_quota_once()
         time.sleep(_VISION_QUOTA_INTERVAL)
+
+
+def start_vision_quota_sampler() -> threading.Thread | None:
+    """Sample the Vision quota in a plain daemon thread.
+
+    The scheduler-bound loop above belongs to the legacy server's lifecycle;
+    the queue runner runs no scheduler at all, yet the claim gate needs fresh
+    samples in its own process. This thread is that sampler: same body, same
+    interval, independent of ``NC_OCR_RUN_SCHEDULER``.
+
+    Returns ``None`` (and disables the gate) when quota gating cannot apply:
+    no Vision credentials on the host, or the configured engine is one that
+    Vision quota is irrelevant to. On the api transport the app decides the
+    engine per job, so the gate must stay armed there.
+    """
+    from .readiness import configured_engine
+
+    enabled = bool(_vision_credentials_path()) and (
+        TRANSPORT == "api" or configured_engine() == "google"
+    )
+    quota_gate.GATE.set_enabled(enabled)
+    if not enabled:
+        return None
+
+    def _loop() -> None:
+        while True:
+            _vision_quota_once()
+            time.sleep(_VISION_QUOTA_INTERVAL)
+
+    thread = threading.Thread(target=_loop, name="ocrflow-vision-quota", daemon=True)
+    thread.start()
+    return thread
 
 
 _VISION_QUOTA_ENABLED = _SCHEDULER_ENABLED
