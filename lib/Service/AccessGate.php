@@ -99,8 +99,8 @@ final class AccessGate
 	 * Per-user auto-OCR switch, stored in `oc_preferences` as '1'/'0'.
 	 *
 	 * Positive on purpose: the default is "on", and a setting must not be
-	 * named after its exception. The old `auto_ocr_disabled` key is moved
-	 * (and inverted once) by the 0.1.3 migration.
+	 * named after its exception. There is no old key to migrate: the negative
+	 * name was never written by any instance, so the rename costs no data.
 	 *
 	 * Separate from the group gate because losing auto-OCR for one folder-heavy
 	 * user should not mean editing the group list for everyone.
