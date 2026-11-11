@@ -73,4 +73,68 @@ final class RetryPolicyTest extends TestCase
 		$this->assertTrue($decision['retryable']);
 		$this->assertNull($decision['agrees']);
 	}
+
+	/**
+	 * The permanent set must be a subset of the single closed vocabulary: if
+	 * a code is listed as permanent but the vocabulary has never heard of it,
+	 * the two lists have drifted and enqueue would block on a code nobody
+	 * can ever record. This test is the tripwire.
+	 */
+	public function testEveryPermanentCodeExistsInTheVocabulary(): void
+	{
+		$vocabulary = $this->policy->vocabulary();
+		foreach ($this->policy->permanentCodes() as $code) {
+			$this->assertArrayHasKey($code, $vocabulary,
+				'the permanent set and the vocabulary must never drift: ' . $code . ' is not a known code');
+		}
+	}
+
+	/**
+	 * Permanent is a strict subset of terminal: a permanent code must not be
+	 * retryable, and it must be a FAILURE code, not a classifier verdict —
+	 * a verdict is an answer, not something the file failed at.
+	 */
+	public function testPermanentCodesAreTerminalFailures(): void
+	{
+		foreach ($this->policy->permanentCodes() as $code) {
+			$this->assertTrue($this->policy->isKnown($code));
+			$this->assertFalse($this->policy->isRetryable($code),
+				$code . ' cannot be both permanent and retryable');
+			$this->assertNull($this->policy->verdictCode($code),
+				$code . ' is a failure code, not a classifier verdict');
+		}
+	}
+
+	/**
+	 * The classification itself, pinned: retrying the same bytes can never
+	 * succeed for these, so enqueue must refuse them after the purge.
+	 */
+	public function testTheByteLevelFailuresArePermanent(): void
+	{
+		foreach (['no_text_detected', 'parse_produced_nothing', 'save_refused',
+			'broken_pdf', 'bad_format', 'empty_source'] as $code) {
+			$this->assertTrue($this->policy->isPermanent($code), $code . ' is permanent: the same bytes cannot succeed');
+		}
+	}
+
+	/**
+	 * Everything else fails open toward retrying: a code whose diagnosis is
+	 * ambiguous (transport-shaped, deploy-shaped, or a 4xx that may be about
+	 * credentials rather than the bytes) is NOT permanent.
+	 */
+	public function testAmbiguousAndTransientCodesAreNotPermanent(): void
+	{
+		foreach (['empty_stream', 'credentials_missing', 'app_4xx', 'engine_4xx',
+			'source_changed', 'born_digital_text_based', 'mobilenet', 'stamped_good_by_us',
+			'app_5xx', 'engine_5xx', 'engine_timeout', 'storage_error',
+			'some_new_engine_fault', RetryPolicy::CODE_UNKNOWN] as $code) {
+			$this->assertFalse($this->policy->isPermanent($code), $code . ' must fail open toward retrying');
+		}
+	}
+
+	public function testPermanentIsFalseForNullAndUnknown(): void
+	{
+		$this->assertFalse($this->policy->isPermanent(null));
+		$this->assertFalse($this->policy->isPermanent('made_up_code'));
+	}
 }

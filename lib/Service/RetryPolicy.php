@@ -148,4 +148,61 @@ final class RetryPolicy
 	{
 		return self::TABLE;
 	}
+
+	/**
+	 * Reason codes that are PERMANENT: retrying the SAME BYTES can never
+	 * succeed, so after retention purges the job row, `Queue::enqueue()`
+	 * refuses to re-queue the file while its etag is unchanged.
+	 *
+	 * This is a strict subset of the terminal failure codes. A code is only
+	 * here when the failure is a property of the bytes themselves — the same
+	 * pixels, parsed by any worker, produce the same refusal. Codes whose
+	 * diagnosis is ambiguous fail open toward retrying:
+	 *
+	 *   empty_stream        — transport-shaped: "gone" and "transient 5xx" are
+	 *                         not distinguished yet, so it cannot be trusted
+	 *                         as a verdict about the bytes.
+	 *   credentials_missing — deploy-shape: an operator adding the engine
+	 *                         credentials makes the same bytes succeed.
+	 *   app_4xx, engine_4xx — a 4xx may be about these bytes (too large) or
+	 *                         about credentials/quota; the code alone does
+	 *                         not say which, so it is not a verdict.
+	 *   source_changed      — the file moved on: the new version gets its own
+	 *                         attempt by design, and a different etag never
+	 *                         matches the verdict anyway.
+	 *   born_digital_text_based, mobilenet, stamped_good_by_us — classifier
+	 *                         verdicts, not failures: the file needed no work.
+	 *
+	 * Unknown or absent codes are never permanent (see {@see CODE_UNKNOWN}).
+	 *
+	 * @var list<string>
+	 */
+	private const PERMANENT = [
+		'no_text_detected',
+		'parse_produced_nothing',
+		'save_refused',
+		'broken_pdf',
+		'bad_format',
+		'empty_source',
+	];
+
+	/**
+	 * True when a failure with this code can never succeed for the same
+	 * bytes. Anything not explicitly listed — including every unknown code —
+	 * is not permanent: the block must fail open toward retrying.
+	 */
+	public function isPermanent(?string $code): bool
+	{
+		return $code !== null && in_array($code, self::PERMANENT, true);
+	}
+
+	/**
+	 * The permanent set, for the drift tripwire in the tests.
+	 *
+	 * @return list<string>
+	 */
+	public function permanentCodes(): array
+	{
+		return self::PERMANENT;
+	}
 }

@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Db;
 
+use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
 use OCP\AppFramework\Db\QBMapper;
 use OCP\DB\Exception;
@@ -57,11 +58,21 @@ class Queue extends QBMapper
 	/** Ids per chunked retention DELETE; small enough to keep locks short. */
 	private const DELETE_CHUNK = 500;
 
+	private readonly RetryPolicy $retryPolicy;
+
+	private StageEvents $stageEvents;
+
 	public function __construct(
 		IDBConnection $db,
-		private StageEvents $stageEvents,
+		StageEvents $stageEvents,
 		private ?LoggerInterface $logger = null,
+		?RetryPolicy $retryPolicy = null,
 	) {
+		$this->stageEvents = $stageEvents;
+		// The retry table already exists and has one owner; enqueue only asks
+		// it a second question (is this verdict permanent?), so it is the
+		// same policy object rather than a second vocabulary.
+		$this->retryPolicy = $retryPolicy ?? new RetryPolicy();
 		parent::__construct($db, self::JOBS, Job::class);
 	}
 
@@ -100,6 +111,24 @@ class Queue extends QBMapper
 				return null;
 			}
 			if ($this->isDoneForVersion($fileId, $etag)) {
+				return null;
+			}
+			// The verdict that must outlive the purge. Retention (#90) deletes
+			// terminal job rows — including `error` — after the retention
+			// window, and once that row is gone the guards above say nothing.
+			// The per-file ledger is never purged, so the verdict lives there:
+			// a PERMANENT failure for THIS etag means the same bytes can
+			// never succeed, and re-queueing them just re-bills the engine
+			// once per retention window, forever. New bytes (a new etag)
+			// pass: a permanent verdict is about the bytes, not the path.
+			$permanentReason = $this->permanentFailureForVersion($fileId, $etag);
+			if ($permanentReason !== null) {
+				// One line, not silence: an operator must be able to see why
+				// a scan keeps skipping a file, and how to override it.
+				$this->logger?->info(
+					'ocrflow: file skipped: permanent failure (' . $permanentReason . ')'
+					. ' for ' . $path . '; occ ocrflow:requeue "' . $path . '" to retry anyway',
+				);
 				return null;
 			}
 		} elseif ($this->findByPath($path) !== null) {
@@ -152,6 +181,14 @@ class Queue extends QBMapper
 	 */
 	private function recordEmptySource(string $path, ?int $fileId, ?int $size, ?string $etag): void
 	{
+		// The zero-byte verdict goes to the ledger too, not only to the job
+		// row: retention will purge the job row, and the file is still zero
+		// bytes — the verdict must survive so the next scan does not have to
+		// rediscover it (and so the block stays explainable).
+		if ($fileId !== null) {
+			$this->writeLedger($fileId, $path, $size, $etag, self::STATUS_SKIPPED, 'empty_source', null, null);
+		}
+
 		$existing = $fileId === null ? $this->findByPath($path) : $this->jobForVersion($fileId, $etag);
 		if ($existing !== null) {
 			$qb = $this->db->getQueryBuilder();
@@ -303,6 +340,101 @@ class Queue extends QBMapper
 			->andWhere($this->etagPredicate($qb, $etag))
 			->setMaxResults(1);
 		return $qb->executeQuery()->fetch() !== false;
+	}
+
+	/**
+	 * The permanent reason recorded in the ledger for THIS etag, or null.
+	 *
+	 * This is the half of the dedupe that survives retention: the job row is
+	 * history and gets purged, the per-file ledger is the verdict. The row
+	 * only blocks when its status is a terminal failure AND its reason is in
+	 * the permanent set AND the etag still names the failed bytes — anything
+	 * else (a retryable code, an unknown code, a missing row, new bytes)
+	 * fails open toward retrying.
+	 *
+	 * @throws Exception
+	 */
+	public function permanentFailureForVersion(int $fileId, ?string $etag): ?string
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('reason')->from(self::FILES)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->in('status', $qb->createNamedParameter(
+				[self::STATUS_ERROR, self::STATUS_SKIPPED],
+				IQueryBuilder::PARAM_STR_ARRAY,
+			)))
+			->andWhere($this->etagPredicate($qb, $etag))
+			->setMaxResults(1);
+		$row = $qb->executeQuery()->fetch();
+		if ($row === false) {
+			return null;
+		}
+		$reason = $row['reason'] ?? null;
+		return is_string($reason) && $this->retryPolicy->isPermanent($reason) ? $reason : null;
+	}
+
+	/**
+	 * The ledger row for a path, or null when this app has never seen it.
+	 *
+	 * @return array{file_id: int, path: string, status: string, reason: ?string, etag: ?string}|null
+	 * @throws Exception
+	 */
+	public function findFileByPath(string $path): ?array
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('file_id', 'path', 'status', 'reason', 'etag')->from(self::FILES)
+			->where($qb->expr()->eq('path', $qb->createNamedParameter($path)))
+			->setMaxResults(1);
+		$row = $qb->executeQuery()->fetch();
+		if ($row === false) {
+			return null;
+		}
+		return [
+			'file_id' => (int) $row['file_id'],
+			'path' => (string) $row['path'],
+			'status' => (string) $row['status'],
+			'reason' => isset($row['reason']) && is_string($row['reason']) ? $row['reason'] : null,
+			'etag' => isset($row['etag']) && is_string($row['etag']) ? $row['etag'] : null,
+		];
+	}
+
+	/**
+	 * The operator override (`occ ocrflow:requeue`): forget the permanent
+	 * verdict for one file. The ledger keeps its status history; only the
+	 * reason is cleared, which is the only column the block reads.
+	 *
+	 * @throws Exception
+	 */
+	public function clearPermanentVerdict(int $fileId): int
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->update(self::FILES)
+			->set('reason', $qb->createNamedParameter(null))
+			->set('updated_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)));
+		return $qb->executeStatement();
+	}
+
+	/**
+	 * Delete the TERMINAL job rows of one file — the escape hatch's other
+	 * half. `jobForVersion()` refuses an enqueue for any existing row of that
+	 * version, so a terminal row retention has not purged yet must go too, or
+	 * the cleared verdict alone changes nothing. Same rows retention would
+	 * delete on schedule; the stage rows they own are swept as orphans by the
+	 * next retention tick, exactly as after a purge.
+	 *
+	 * @throws Exception
+	 */
+	public function deleteTerminalForFile(int $fileId): int
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->delete(self::JOBS)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->in('status', $qb->createNamedParameter(
+				[self::STATUS_DONE, self::STATUS_SKIPPED, self::STATUS_ERROR],
+				IQueryBuilder::PARAM_STR_ARRAY,
+			)));
+		return $qb->executeStatement();
 	}
 
 	/**
@@ -544,9 +676,42 @@ class Queue extends QBMapper
 			return;
 		}
 
+		// The ledger `reason` carries the vocabulary CODE, not the worker's
+		// free text: the code is the machine verdict enqueue matches against
+		// after the job row is purged, and free text cannot be matched. The
+		// free text stays on the job row, where the status endpoint reads it.
+		$this->writeLedger(
+			$job->getFileId(),
+			$job->getPath(),
+			$job->getSize(),
+			$job->getEtag(),
+			$status,
+			$result['reason_code'] ?? $result['reason'] ?? null,
+			$result['engine'] ?? null,
+			$result['stamp_version'] ?? null,
+		);
+	}
+
+	/**
+	 * Write (or correct) the per-file ledger row. Retention never deletes
+	 * from this table: the row is the permanent verdict, so every path that
+	 * reaches a terminal decision for a file must land here.
+	 *
+	 * @throws Exception
+	 */
+	private function writeLedger(
+		int $fileId,
+		string $path,
+		?int $size,
+		?string $etag,
+		string $status,
+		?string $reason,
+		?string $engine,
+		?string $stampVersion,
+	): void {
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('id')->from(self::FILES)
-			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($job->getFileId(), IQueryBuilder::PARAM_INT)))
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
 			->setMaxResults(1);
 		$exists = $qb->executeQuery()->fetch() !== false;
 
@@ -559,12 +724,12 @@ class Queue extends QBMapper
 		$w = $this->db->getQueryBuilder();
 		$values = [
 			'status' => $w->createNamedParameter($status),
-			'reason' => $w->createNamedParameter($result['reason'] ?? null),
-			'engine' => $w->createNamedParameter($result['engine'] ?? null),
-			'stamp_version' => $w->createNamedParameter($result['stamp_version'] ?? null),
-			'path' => $w->createNamedParameter($job->getPath()),
-			'size' => $w->createNamedParameter($job->getSize(), IQueryBuilder::PARAM_INT),
-			'etag' => $w->createNamedParameter($job->getEtag()),
+			'reason' => $w->createNamedParameter($reason),
+			'engine' => $w->createNamedParameter($engine),
+			'stamp_version' => $w->createNamedParameter($stampVersion),
+			'path' => $w->createNamedParameter($path),
+			'size' => $w->createNamedParameter($size, IQueryBuilder::PARAM_INT),
+			'etag' => $w->createNamedParameter($etag),
 			'updated_at' => $w->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
 		];
 		if ($exists) {
@@ -572,11 +737,11 @@ class Queue extends QBMapper
 			foreach ($values as $column => $param) {
 				$w->set($column, $param);
 			}
-			$w->where($w->expr()->eq('file_id', $w->createNamedParameter($job->getFileId(), IQueryBuilder::PARAM_INT)));
+			$w->where($w->expr()->eq('file_id', $w->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)));
 		} else {
 			$w->insert(self::FILES)
 				->values($values + [
-					'file_id' => $w->createNamedParameter($job->getFileId(), IQueryBuilder::PARAM_INT),
+					'file_id' => $w->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
 				]);
 		}
 		$w->executeStatement();
