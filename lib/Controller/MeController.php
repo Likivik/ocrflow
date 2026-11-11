@@ -20,9 +20,9 @@ use OCP\IUserSession;
 /**
  * What the signed-in user may see and change about their own OCR.
  *
- * The per-user opt-out belongs here rather than in the admin endpoints: one
- * person turning automatic OCR off for their own files must not need an
- * administrator, and must not be able to change anybody else's.
+ * The per-user auto-OCR switch belongs here rather than in the admin
+ * endpoints: one person turning automatic OCR off for their own files must
+ * not need an administrator, and must not be able to change anybody else's.
  */
 class MeController extends OCSController
 {
@@ -48,7 +48,7 @@ class MeController extends OCSController
 		}
 
 		return new DataResponse([
-			'auto_ocr_disabled' => $this->access->isOptedOut($user->getUID()),
+			'auto_ocr_enabled' => $this->access->isAutoOcrEnabled($user->getUID()),
 			// Shown so the page can say "not configured" instead of offering a
 			// toggle that appears to do nothing.
 			'engine' => $this->engine->current(),
@@ -70,18 +70,18 @@ class MeController extends OCSController
 			throw new OCSForbiddenException('no session');
 		}
 
-		$disabled = $this->request->getParam('auto_ocr_disabled');
-		if (!is_bool($disabled) && !in_array($disabled, ['0', '1', 0, 1, 'true', 'false'], true)) {
+		$enabled = $this->request->getParam('auto_ocr_enabled');
+		if (!is_bool($enabled) && !in_array($enabled, ['0', '1', 0, 1, 'true', 'false'], true)) {
 			return new DataResponse([
-				'message' => 'auto_ocr_disabled must be a boolean',
+				'message' => 'auto_ocr_enabled must be a boolean',
 			], Http::STATUS_BAD_REQUEST);
 		}
 
-		$optedOut = in_array($disabled, [true, '1', 1, 'true'], true);
-		$this->access->setOptedOut($user->getUID(), $optedOut);
+		$autoOcr = in_array($enabled, [true, '1', 1, 'true'], true);
+		$this->access->setAutoOcrEnabled($user->getUID(), $autoOcr);
 
 		return new DataResponse([
-			'auto_ocr_disabled' => $optedOut,
+			'auto_ocr_enabled' => $autoOcr,
 		]);
 	}
 }

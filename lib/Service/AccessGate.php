@@ -96,14 +96,18 @@ final class AccessGate
 	}
 
 	/**
-	 * Per-user opt-out, stored in `oc_ocrflow_settings`.
+	 * Per-user auto-OCR switch, stored in `oc_preferences` as '1'/'0'.
+	 *
+	 * Positive on purpose: the default is "on", and a setting must not be
+	 * named after its exception. The old `auto_ocr_disabled` key is moved
+	 * (and inverted once) by the 0.1.3 migration.
 	 *
 	 * Separate from the group gate because losing auto-OCR for one folder-heavy
 	 * user should not mean editing the group list for everyone.
 	 */
-	public function isOptedOut(string $userId): bool
+	public function isAutoOcrEnabled(string $userId): bool
 	{
-		$value = (string) $this->config->getUserValue($userId, Application::APP_ID, 'auto_ocr_disabled', '0');
+		$value = (string) $this->config->getUserValue($userId, Application::APP_ID, 'auto_ocr_enabled', '1');
 		return $value === '1';
 	}
 
@@ -137,15 +141,15 @@ final class AccessGate
 	}
 
 	/**
-	 * Turn automatic OCR off (or back on) for one user.
+	 * Turn automatic OCR on (or off) for one user.
 	 */
-	public function setOptedOut(string $userId, bool $optedOut): void
+	public function setAutoOcrEnabled(string $userId, bool $enabled): void
 	{
 		$this->config->setUserValue(
 			$userId,
 			Application::APP_ID,
-			'auto_ocr_disabled',
-			$optedOut ? '1' : '0',
+			'auto_ocr_enabled',
+			$enabled ? '1' : '0',
 		);
 	}
 
@@ -158,6 +162,6 @@ final class AccessGate
 			return true;
 		}
 
-		return !$this->isOptedOut($user->getUID());
+		return $this->isAutoOcrEnabled($user->getUID());
 	}
 }

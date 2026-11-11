@@ -43,11 +43,11 @@ class SettingsWriteTest extends TestCase
         return $session;
     }
 
-    private function request(mixed $optOut): IRequest
+    private function request(mixed $autoOcr): IRequest
     {
         $request = $this->createMock(IRequest::class);
         $request->method('getParam')->willReturnCallback(
-            static fn (string $key): mixed => $key === 'auto_ocr_disabled' ? $optOut : null,
+            static fn (string $key): mixed => $key === 'auto_ocr_enabled' ? $autoOcr : null,
         );
 
         return $request;
@@ -67,11 +67,11 @@ class SettingsWriteTest extends TestCase
         );
     }
 
-    public function testTheOptOutIsWrittenForTheSessionUserOnly(): void
+    public function testTheSwitchIsWrittenForTheSessionUserOnly(): void
     {
         $writes = [];
         $config = $this->createMock(IConfig::class);
-        $config->method('getUserValue')->willReturn('0');
+        $config->method('getUserValue')->willReturn('1');
         $config->method('getAppValue')->willReturn('');
         $config->expects($this->once())
             ->method('setUserValue')
@@ -81,15 +81,15 @@ class SettingsWriteTest extends TestCase
 
         $data = $this->controller($this->user('alice'), $this->request(true), $config)->update()->getData();
 
-        $this->assertTrue($data['auto_ocr_disabled']);
-        $this->assertSame([['alice', 'auto_ocr_disabled', '1']], $writes);
+        $this->assertTrue($data['auto_ocr_enabled']);
+        $this->assertSame([['alice', 'auto_ocr_enabled', '1']], $writes);
     }
 
-    public function testTurningItBackOnWritesZero(): void
+    public function testTurningItOffWritesZero(): void
     {
         $writes = [];
         $config = $this->createMock(IConfig::class);
-        $config->method('getUserValue')->willReturn('1');
+        $config->method('getUserValue')->willReturn('0');
         $config->method('getAppValue')->willReturn('');
         $config->expects($this->once())
             ->method('setUserValue')
@@ -99,7 +99,7 @@ class SettingsWriteTest extends TestCase
 
         $data = $this->controller($this->user('alice'), $this->request(false), $config)->update()->getData();
 
-        $this->assertFalse($data['auto_ocr_disabled']);
+        $this->assertFalse($data['auto_ocr_enabled']);
         $this->assertSame(['0'], $writes);
     }
 
@@ -118,7 +118,7 @@ class SettingsWriteTest extends TestCase
     {
         $config = $this->createMock(IConfig::class);
         $config->method('getAppValue')->willReturn('');   // no engine chosen
-        $config->method('getUserValue')->willReturn('0'); // not opted out
+        $config->method('getUserValue')->willReturn('1'); // auto OCR on
 
         $data = $this->controller($this->user('alice'), $this->request(null), $config)->index()->getData();
 
@@ -127,19 +127,19 @@ class SettingsWriteTest extends TestCase
             $data['engine_configured'],
             'the page must be able to say "not configured" instead of offering a dead toggle',
         );
-        $this->assertFalse($data['auto_ocr_disabled']);
+        $this->assertTrue($data['auto_ocr_enabled']);
         $this->assertTrue($data['enabled']);
     }
 
-    public function testThePageReportsTheOptOutItRead(): void
+    public function testThePageReportsTheSwitchItRead(): void
     {
         $config = $this->createMock(IConfig::class);
         $config->method('getAppValue')->willReturn('tesseract');
-        $config->method('getUserValue')->willReturn('1');
+        $config->method('getUserValue')->willReturn('0');
 
         $data = $this->controller($this->user('alice'), $this->request(null), $config)->index()->getData();
 
-        $this->assertTrue($data['auto_ocr_disabled']);
+        $this->assertFalse($data['auto_ocr_enabled']);
         $this->assertSame('tesseract', $data['engine']);
         $this->assertTrue($data['engine_configured']);
     }

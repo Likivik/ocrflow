@@ -829,7 +829,7 @@ class TestResolutionPreservingRasterPolicy:
       (d) Page with no images          → uses the cap.
       (e) Pre-pass runs through both   → rebuilt page actually
           a real image whose dimensions match ``page_dpi``.
-      (f) ``NC_OCR_DISABLE_ORIENTATION=1`` bypass returns the
+      (f) ``NC_OCR_ORIENTATION_ENABLED=0`` bypass returns the
           original file unchanged.
 
     We also probe the env-var knobs (``NC_OCR_ORIENTATION_MAX_DPI``,
@@ -1403,7 +1403,7 @@ class TestResolutionPreservingRasterPolicy:
 
 class TestPreorientEnvBypass:
     """The whole pass is bypassed before any of the new code runs
-    when ``NC_OCR_DISABLE_ORIENTATION=1`` is set in the env. This
+    when ``NC_OCR_ORIENTATION_ENABLED=0`` is set in the env. This
     is enforced by :mod:`nc_ocr_flow.ocr`, not here, but we
     re-verify the helper itself: with no env, the
     :func:`preorient_pages_safe` wrapper must detect that no page
@@ -1442,72 +1442,76 @@ class TestPreorientEnvBypass:
         returned = preorient_pages_safe(str(in_pdf))
         assert Path(returned).resolve() == in_pdf.resolve(), (
             "no-op path must hand back the input unchanged "
-            "(same behaviour as NC_OCR_DISABLE_ORIENTATION=1)"
+            "(same behaviour as NC_OCR_ORIENTATION_ENABLED=0)"
         )
 
-    def test_disable_orientation_env_key_recognized_by_process_pdf(self, monkeypatch, tmp_path):
-        """Drive :func:`nc_ocr_flow.ocr.process_pdf` directly with
-        ``NC_OCR_DISABLE_ORIENTATION=1`` set, confirm the env key
-        short-circuits the orientation pre-pass and the engine
-        sees the original input path.
-
-        Regression target: the historical gate was case-sensitive on
-        the value (``getenv(...).strip() in ("1", "true", "yes")``),
-        so ``NC_OCR_DISABLE_ORIENTATION=TRUE`` was silently ignored.
-        The old test re-implemented the check inline (so it tested
-        its own copy) and could not catch that drift. The real gate
-        now lives in :func:`nc_ocr_flow.ocr.orientation_disabled_by_env`
-        and the test calls that helper directly so future changes
-        to the gate cannot silently diverge from this test.
+    def test_orientation_gate_is_positive_and_strict(self, monkeypatch):
+        """``NC_OCR_ORIENTATION_ENABLED`` replaces the negative
+        ``NC_OCR_DISABLE_ORIENTATION``: default on, ``1`` on, ``0`` and
+        empty off, everything else a ``ConfigError`` (one parser per
+        type — a typo must never silently pick a branch). The removed
+        negative name must have no effect at all.
         """
-        import os as _os
+        import pytest
 
         from nc_ocr_flow import ocr as ocr_mod
-        from nc_ocr_flow import orientation as orient_mod
+        from nc_ocr_flow.config import ConfigError
 
-        # State to capture what preorient_pages_safe was called with
-        # (or not called at all).
-        captured: dict = {"called_with": None}
+        # Strict 1/0/empty semantics, positive polarity.
+        for v, expected in (("1", True), ("0", False), ("", False), (" 1 ", True)):
+            assert (
+                ocr_mod.orientation_enabled_by_env({"NC_OCR_ORIENTATION_ENABLED": v}) is expected
+            ), f"NC_OCR_ORIENTATION_ENABLED={v!r} must read {expected}"
 
-        def _capture(*a, **kw):
-            captured["called_with"] = a[0] if a else kw.get("in_pdf")
-            return a[0] if a else str(kw.get("in_pdf"))
+        # Unset means the default: the pass is on.
+        assert ocr_mod.orientation_enabled_by_env({}) is True
 
-        _os.environ["NC_OCR_DISABLE_ORIENTATION"] = "1"
-        try:
-            monkeypatch.setattr(orient_mod, "preorient_pages_safe", _capture)
-            # Drive the REAL gate (no inlined copy): with
-            # NC_OCR_DISABLE_ORIENTATION=1 the gate is True, so the
-            # preorient pre-pass must be skipped.
-            if ocr_mod.orientation_disabled_by_env(_os.environ):
-                # Pre-pass bypassed.
-                pass
+        # The removed negative name must be inert, not inverted.
+        assert ocr_mod.orientation_enabled_by_env({"NC_OCR_DISABLE_ORIENTATION": "1"}) is True
+
+        # A hand-written value is a typo, not a branch.
+        with pytest.raises(ConfigError):
+            ocr_mod.orientation_enabled_by_env({"NC_OCR_ORIENTATION_ENABLED": "off"})
+
+    def test_the_gate_is_read_at_import_time(self, monkeypatch):
+        """The value is parsed once when the module loads, so a typo'd
+        value fails the worker at startup instead of at the first PDF.
+
+        Run in a subprocess: an in-process ``importlib.reload`` would hand
+        every later test a *new* ``PageMeta`` class and break their
+        ``isinstance`` checks against the old one.
+        """
+        import os as _os
+        import subprocess
+        import sys
+
+        probe = (
+            "import sys; from nc_ocr_flow import ocr; "
+            "sys.exit(0 if ocr.ORIENTATION_ENABLED_BY_ENV is False else 1)"
+        )
+
+        def run_with(value: str | None) -> subprocess.CompletedProcess[bytes]:
+            env = dict(_os.environ)
+            if value is None:
+                env.pop("NC_OCR_ORIENTATION_ENABLED", None)
             else:
-                _capture("/tmp/dummy.pdf")
-            assert captured["called_with"] is None, (
-                "NC_OCR_DISABLE_ORIENTATION=1 must short-circuit the preorient pre-pass"
+                env["NC_OCR_ORIENTATION_ENABLED"] = value
+            return subprocess.run(
+                [sys.executable, "-c", probe],
+                env=env,
+                cwd=str(Path(__file__).resolve().parent.parent),
+                capture_output=True,
             )
-        finally:
-            _os.environ.pop("NC_OCR_DISABLE_ORIENTATION", None)
 
-        # The gate must accept the documented values AND mixed-case
-        # variants — the bug we're regressing was exactly that
-        # ``TRUE`` / ``Yes`` / ``" TRUE "`` were silently ignored.
-        for v, expected in (
-            ("1", True),
-            ("true", True),
-            ("yes", True),
-            (" TRUE ", True),
-            ("Yes", True),
-            ("FALSE", False),
-            ("0", False),
-            ("", False),
-        ):
-            _os.environ["NC_OCR_DISABLE_ORIENTATION"] = v
-            assert ocr_mod.orientation_disabled_by_env(_os.environ) is expected, (
-                f"orientation_disabled_by_env({v!r}) returned {not expected}, expected {expected}"
-            )
-        _os.environ.pop("NC_OCR_DISABLE_ORIENTATION", None)
+        assert run_with("0").returncode == 0, "NC_OCR_ORIENTATION_ENABLED=0 must disable the pass"
+        assert run_with("1").returncode != 0, "NC_OCR_ORIENTATION_ENABLED=1 must enable the pass"
+        assert run_with(None).returncode != 0, "unset must fall back to the default (enabled)"
+
+        broken = run_with("off")
+        assert broken.returncode != 0, "a typo'd value must fail at import"
+        assert b"ConfigError" in broken.stderr, (
+            f"the failure must name the bad knob, stderr was: {broken.stderr!r}"
+        )
 
 
 # --- resolution policy: dominant image + page geometry --------------------
