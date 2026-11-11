@@ -5,6 +5,18 @@ written.
 
 ## Unreleased
 
+### Added
+
+- Bounded retention for the job tables: every 5 minutes the reconciler's
+  sweep deletes terminal job rows (`done`, `skipped`, `error`) older than
+  `jobs_retention_days` (default 90, `0` disables, garbage falls back to the
+  default) together with their stage-event rows, capped at 500 job rows per
+  run so one tick cannot lock the tables. `oc_ocrflow_files` — the per-file
+  dedupe ledger — is never touched. Adds indexes on
+  `ocrflow_jobs (status, finished_at)` and `ocrflow_stage_events (created_at)`
+  via the 0.1.4 migration, and guards overlapping runs with the server's
+  DB-backed lock provider.
+
 ### Fixed
 
 - A job whose source file changed while the OCR ran no longer writes its

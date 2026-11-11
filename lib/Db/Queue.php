@@ -54,6 +54,9 @@ class Queue extends QBMapper
 
 	private const MAX_CLAIM_TRIES = 8;
 
+	/** Ids per chunked retention DELETE; small enough to keep locks short. */
+	private const DELETE_CHUNK = 500;
+
 	public function __construct(
 		IDBConnection $db,
 		private StageEvents $stageEvents,
@@ -614,5 +617,167 @@ class Queue extends QBMapper
 			$out[(string) $row['status']] = (int) $row['n'];
 		}
 		return $out;
+	}
+
+	/**
+	 * Bounded retention for the job tables.
+	 *
+	 * Delete TERMINAL job rows (`done`, `skipped`, `error` — statuses after
+	 * which no further work happens for that row) older than the cutoff,
+	 * together with their `ocrflow_stage_events` rows, then sweep orphan
+	 * stage rows (their job already gone) past the same cutoff. At most
+	 * `$cap` jobs go per call, in id-ordered chunks, so one tick can never
+	 * lock the tables for an unbounded time; the remainder waits for the next
+	 * tick.
+	 *
+	 * Stage rows die first, the job row second: a crash in between leaves a
+	 * job that the next run selects and deletes again — never an orphan.
+	 *
+	 * Retention must NEVER delete from `ocrflow_files`: that table is the
+	 * permanent per-file ledger (`UNIQUE (file_id)`, `(etag, status,
+	 * stamp_version)`) that dedupe reads via {@see isDoneForVersion()} at
+	 * enqueue time; deleting from it re-opens the corpus for paid re-OCR.
+	 * This method, and every private delete below it, names only
+	 * `ocrflow_jobs` and `ocrflow_stage_events`.
+	 *
+	 * @param int $cutoff epoch seconds; rows finished before this go
+	 * @param int $cap max job rows deleted in this call
+	 * @return array{jobs: int, stage_events: int}
+	 * @throws Exception
+	 */
+	public function purgeTerminal(int $cutoff, int $cap): array
+	{
+		$deleted = ['jobs' => 0, 'stage_events' => 0];
+
+		// The id-ordered, capped select keeps every DELETE bounded: each
+		// chunk of ids produces one `IN (...)` delete on each table.
+		while ($deleted['jobs'] < $cap) {
+			$limit = min($cap - $deleted['jobs'], self::DELETE_CHUNK);
+			$ids = $this->selectExpiredTerminalIds($cutoff, $limit);
+			if ($ids === []) {
+				break;
+			}
+			$stageIds = $this->selectStageIdsForJobs($ids);
+			$deleted['stage_events'] += $this->deleteStageRowsById($stageIds);
+			$n = $this->deleteJobsById($ids);
+			$deleted['jobs'] += $n;
+			if ($n === 0) {
+				// Rows vanished under us (a concurrent sweep won them): the
+				// next select will not return them, but guard against a
+				// pathological "selected yet undeletable" loop anyway.
+				break;
+			}
+		}
+
+		// Orphan pass: stage rows whose job is already gone (a crash between
+		// the two deletes of some earlier run, or manual surgery) are swept by
+		// their own age under the same cutoff, capped the same way.
+		$orphanBudget = $cap;
+		while ($orphanBudget > 0) {
+			$limit = min($orphanBudget, self::DELETE_CHUNK);
+			$ids = $this->selectOrphanStageIds($cutoff, $limit);
+			if ($ids === []) {
+				break;
+			}
+			$n = $this->deleteStageRowsById($ids);
+			$deleted['stage_events'] += $n;
+			$orphanBudget -= max($n, count($ids));
+		}
+
+		return $deleted;
+	}
+
+	/**
+	 * Ids of terminal jobs finished before the cutoff, oldest ids first.
+	 *
+	 * `finished_at IS NOT NULL` is defensive: every terminal row written
+	 * today carries it, and a NULL timestamp must not read as "older than
+	 * everything".
+	 *
+	 * @return list<int>
+	 * @throws Exception
+	 */
+	protected function selectExpiredTerminalIds(int $cutoff, int $limit): array
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('id')->from(self::JOBS)
+			->where($qb->expr()->in('status', $qb->createNamedParameter(
+				[self::STATUS_DONE, self::STATUS_SKIPPED, self::STATUS_ERROR],
+				IQueryBuilder::PARAM_STR_ARRAY,
+			)))
+			->andWhere($qb->expr()->isNotNull('finished_at'))
+			->andWhere($qb->expr()->lt('finished_at', $qb->createNamedParameter($cutoff, IQueryBuilder::PARAM_INT)))
+			->orderBy('id', 'ASC')
+			->setMaxResults($limit);
+		return array_map(intval(...), array_column($qb->executeQuery()->fetchAll(), 'id'));
+	}
+
+	/**
+	 * Ids of stage rows whose job is gone and that predate the cutoff.
+	 *
+	 * @return list<int>
+	 * @throws Exception
+	 */
+	protected function selectOrphanStageIds(int $cutoff, int $limit): array
+	{
+		$qb = $this->db->getQueryBuilder();
+		// A DATETIME column wants the object, not a formatted string.
+		$cutoffDate = \DateTime::createFromFormat('U', (string) $cutoff);
+		$qb->select('se.id')
+			->from(self::STAGE_EVENTS, 'se')
+			->leftJoin('se', self::JOBS, 'j', $qb->expr()->eq('j.id', 'se.job_id'))
+			->where($qb->expr()->isNull('j.id'))
+			->andWhere($qb->expr()->lt('se.created_at', $qb->createNamedParameter($cutoffDate, IQueryBuilder::PARAM_DATETIME_MUTABLE)))
+			->orderBy('se.id', 'ASC')
+			->setMaxResults($limit);
+		return array_map(intval(...), array_column($qb->executeQuery()->fetchAll(), 'id'));
+	}
+
+	/**
+	 * @param list<int> $jobIds
+	 * @return list<int>
+	 * @throws Exception
+	 */
+	protected function selectStageIdsForJobs(array $jobIds): array
+	{
+		if ($jobIds === []) {
+			return [];
+		}
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('id')->from(self::STAGE_EVENTS)
+			->where($qb->expr()->in('job_id', $qb->createNamedParameter($jobIds, IQueryBuilder::PARAM_INT_ARRAY)))
+			->orderBy('id', 'ASC')
+			->setMaxResults(PHP_INT_MAX);
+		return array_map(intval(...), array_column($qb->executeQuery()->fetchAll(), 'id'));
+	}
+
+	/**
+	 * @param list<int> $ids
+	 * @throws Exception
+	 */
+	protected function deleteJobsById(array $ids): int
+	{
+		if ($ids === []) {
+			return 0;
+		}
+		$qb = $this->db->getQueryBuilder();
+		$qb->delete(self::JOBS)
+			->where($qb->expr()->in('id', $qb->createNamedParameter($ids, IQueryBuilder::PARAM_INT_ARRAY)));
+		return $qb->executeStatement();
+	}
+
+	/**
+	 * @param list<int> $ids
+	 * @throws Exception
+	 */
+	protected function deleteStageRowsById(array $ids): int
+	{
+		if ($ids === []) {
+			return 0;
+		}
+		$qb = $this->db->getQueryBuilder();
+		$qb->delete(self::STAGE_EVENTS)
+			->where($qb->expr()->in('id', $qb->createNamedParameter($ids, IQueryBuilder::PARAM_INT_ARRAY)));
+		return $qb->executeStatement();
 	}
 }
