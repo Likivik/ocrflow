@@ -12,6 +12,7 @@ use OCP\AppFramework\Db\QBMapper;
 use OCP\DB\Exception;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
+use Psr\Log\LoggerInterface;
 
 /**
  * The queue, and the only place that knows what a job row means.
@@ -36,11 +37,27 @@ class Queue extends QBMapper
 	private const JOBS = 'ocrflow_jobs';
 	private const FILES = 'ocrflow_files';
 	private const STAGE_EVENTS = 'ocrflow_stage_events';
+
+	/**
+	 * Maximum stage rows carried by ONE multi-row INSERT statement.
+	 *
+	 * The stage events used to be written one round-trip per row: at flood
+	 * scale (20k jobs x up to 7 stages) that is ~140k round-trips a night
+	 * for what is ~20k jobs' worth of data. 500 rows per statement is the
+	 * conventional safe bound — it keeps the generated SQL and its
+	 * placeholder count well inside driver and server limits on all
+	 * three supported databases. StageEvents caps a job at 200 rows, so
+	 * one statement per job is the normal case; the chunk exists so a
+	 * future cap raise cannot produce a single unbounded statement.
+	 */
+	private const STAGE_INSERT_CHUNK = 500;
+
 	private const MAX_CLAIM_TRIES = 8;
 
 	public function __construct(
 		IDBConnection $db,
 		private StageEvents $stageEvents,
+		private ?LoggerInterface $logger = null,
 	) {
 		parent::__construct($db, self::JOBS, Job::class);
 	}
@@ -439,8 +456,78 @@ class Queue extends QBMapper
 			return;
 		}
 
-		foreach ($rows as $row) {
-			$this->insertStageRow($jobId, $row);
+		$this->insertStageRows($jobId, $rows);
+	}
+
+	/**
+	 * Write the stage rows with ONE multi-row INSERT per chunk.
+	 *
+	 * The QueryBuilder cannot express a multi-row INSERT (`values()` maps
+	 * columns of a single row), so the statement is built by hand and run
+	 * on the connection, which replaces the `*PREFIX*` placeholder the
+	 * same way the builder does. Everything else is unchanged from the
+	 * per-row path: the same columns in the same order, one `created_at`
+	 * per row, and the write still happens after — and only after — the
+	 * guarded UPDATE on the job row that {@see Queue::finish()} performs,
+	 * so a worker whose claim was recovered cannot leave stage rows on a
+	 * job that now belongs to somebody else.
+	 *
+	 * Failure isolation: if the batched statement fails (a constraint a
+	 * future schema adds, a transient error), the chunk is retried one row
+	 * per statement and only a row that fails on its own is dropped, with
+	 * a warning. The per-row loop could not lose a whole chunk to one bad
+	 * row, and neither may the batch.
+	 *
+	 * @param list<array{stage: string, reason_code: ?string, duration_ms: ?int, cost_pages: ?int}> $rows
+	 * @throws Exception
+	 */
+	private function insertStageRows(int $jobId, array $rows): void
+	{
+		$columns = ['job_id', 'stage', 'reason_code', 'duration_ms', 'cost_pages', 'created_at'];
+		$tuple = '(' . implode(', ', array_fill(0, count($columns), '?')) . ')';
+
+		foreach (array_chunk($rows, self::STAGE_INSERT_CHUNK) as $chunk) {
+			$sql = 'INSERT INTO *PREFIX*' . self::STAGE_EVENTS
+				. ' (' . implode(', ', $columns) . ') VALUES '
+				. implode(', ', array_fill(0, count($chunk), $tuple));
+
+			$params = [];
+			$types = [];
+			foreach ($chunk as $row) {
+				$params[] = $jobId;
+				$types[] = IQueryBuilder::PARAM_INT;
+				$params[] = $row['stage'];
+				$types[] = IQueryBuilder::PARAM_STR;
+				$params[] = $row['reason_code'];
+				$types[] = IQueryBuilder::PARAM_STR;
+				$params[] = $row['duration_ms'];
+				$types[] = IQueryBuilder::PARAM_INT;
+				$params[] = $row['cost_pages'];
+				$types[] = IQueryBuilder::PARAM_INT;
+				// A DATETIME column: the driver wants the object, not a
+				// formatted string, or the value lands as "0000-00-00".
+				$params[] = new \DateTime();
+				$types[] = IQueryBuilder::PARAM_DATETIME_MUTABLE;
+			}
+
+			try {
+				$this->db->executeStatement($sql, $params, $types);
+			} catch (\Exception $batchFailure) {
+				$this->logger?->warning(
+					'ocrflow: the batched stage insert for job ' . $jobId . ' failed ('
+					. $batchFailure->getMessage() . '); retrying the rows one by one',
+				);
+				foreach ($chunk as $row) {
+					try {
+						$this->insertStageRow($jobId, $row);
+					} catch (\Exception $rowFailure) {
+						$this->logger?->warning(
+							'ocrflow: stage row for job ' . $jobId . ', stage ' . $row['stage']
+							. ', could not be written (' . $rowFailure->getMessage() . ')',
+						);
+					}
+				}
+			}
 		}
 	}
 
