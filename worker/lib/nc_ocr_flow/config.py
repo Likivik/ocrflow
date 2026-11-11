@@ -32,6 +32,7 @@ can be imported from anywhere without changing behaviour.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 
 __all__ = [
     "ConfigError",
@@ -51,7 +52,7 @@ class ConfigError(ValueError):
     """
 
 
-def env_flag(name: str, default: bool) -> bool:
+def env_flag(name: str, default: bool, env: Mapping[str, str | None] | None = None) -> bool:
     """Read a boolean environment variable.
 
     Accepts exactly what the Nix producer emits:
@@ -70,8 +71,11 @@ def env_flag(name: str, default: bool) -> bool:
     typos or hand-written values, and silently reading one of them as either
     branch is exactly how the source image was kept when it should have been
     trashed.
+
+    The environment defaults to ``os.environ``; passing a mapping keeps the
+    helper pure for callers that want to test without touching global state.
     """
-    raw = os.environ.get(name)
+    raw = (os.environ if env is None else env).get(name)
     if raw is None:
         return default
     value = raw.strip()

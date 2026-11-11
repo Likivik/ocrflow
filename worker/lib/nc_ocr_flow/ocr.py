@@ -35,7 +35,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import env_str
+from .config import env_flag, env_str
 from .ocr_models import OcrResult
 from .pdfio import write_in_place
 
@@ -152,12 +152,10 @@ def process_pdf(
     # needed (and engines that *do* detect orientation on their own
     # are a no-op because the input is already upright).
     #
-    # Set NC_OCR_DISABLE_ORIENTATION=1 to bypass the preorient pass
+    # Set NC_OCR_ORIENTATION_ENABLED=0 to bypass the preorient pass
     # (useful for benchmarking / tests that compare orientation-on
     # vs off on the same input).
-    import os as _os
-
-    if orientation_disabled_by_env(_os.environ):
+    if not ORIENTATION_ENABLED_BY_ENV:
         engine_input = str(input_pdf)
         log.info("process_pdf: orientation correction disabled by env")
     else:
@@ -196,20 +194,26 @@ def process_pdf(
     return _finalize(engine_result, chosen, str(out_pdf), str(input_pdf))
 
 
-def orientation_disabled_by_env(env: os._Environ[str] | dict[str, str]) -> bool:
-    """True iff the process should skip the orientation pre-pass.
+def orientation_enabled_by_env(
+    env: os._Environ[str] | dict[str, str | None] | None = None,
+) -> bool:
+    """Whether the orientation pre-pass runs (``NC_OCR_ORIENTATION_ENABLED``).
 
-    Recognises the documented keys (``1`` / ``true`` / ``yes``)
-    case-insensitively after whitespace stripping. The historical
-    gate was case-sensitive on the value, so ``NC_OCR_DISABLE_ORIENTATION=TRUE``
-    was silently ignored — the only test covering the env key
-    re-implemented the check inline (so it tested its own copy and
-    could not catch the drift). Both the production gate and the
-    regression test now call this helper, so future changes to the
-    gate cannot silently diverge from the test.
+    Positive on purpose: the pass is on by default, and the old negative name
+    (``NC_OCR_DISABLE_ORIENTATION``) is gone — setting it has no effect at all.
+    Parsing goes through :func:`nc_ocr_flow.config.env_flag`, so exactly
+    ``1`` (on), ``0`` and empty (off) are accepted and anything else is a
+    :class:`~nc_ocr_flow.config.ConfigError`: a typo must never silently pick
+    a branch. The historical hand-rolled gate here accepted ``true``/``yes``
+    case-insensitively, which is precisely the drift one strict parser
+    exists to stop.
     """
-    raw = (env.get("NC_OCR_DISABLE_ORIENTATION", "") or "").strip().lower()
-    return raw in ("1", "true", "yes")
+    return env_flag("NC_OCR_ORIENTATION_ENABLED", True, env)
+
+
+# Read once at import so an invalid value fails the worker at startup,
+# not at the first PDF.
+ORIENTATION_ENABLED_BY_ENV = orientation_enabled_by_env()
 
 
 def _finalize(

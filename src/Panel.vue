@@ -54,10 +54,10 @@
 		</p>
 		<NcCheckboxRadioSwitch
 			type="switch"
-			:checked="autoOcrDisabled"
+			:checked="autoOcrEnabled"
 			:disabled="busy"
-			@update:checked="setOptOut">
-			{{ t('Do not process my uploads automatically') }}
+			@update:checked="setAutoOcrEnabled">
+			{{ t('Process my uploads automatically') }}
 		</NcCheckboxRadioSwitch>
 
 		<div class="ocrflow-panel__actions">
@@ -95,7 +95,7 @@ export default {
 			updatedAt: '',
 			engine: '',
 			engineConfigured: true,
-			autoOcrDisabled: false,
+			autoOcrEnabled: true,
 		}
 	},
 	computed: {
@@ -132,7 +132,7 @@ export default {
 			try {
 				const { data } = await axios.get(`${BASE}/me`, { headers: { 'OCS-APIRequest': 'true' } })
 				const me = data?.ocs?.data ?? {}
-				this.autoOcrDisabled = me.auto_ocr_disabled === true
+				this.autoOcrEnabled = me.auto_ocr_enabled !== false
 				this.engine = me.engine ?? ''
 				this.engineConfigured = me.engine_configured !== false
 			} catch (e) {
@@ -141,7 +141,7 @@ export default {
 				this.engineConfigured = true
 			}
 		},
-		async setOptOut(value) {
+		async setAutoOcrEnabled(value) {
 			// One-way binding: the switch shows what the server last confirmed.
 			// Inverting on failure would show the opposite of the truth — the
 			// state is the server's answer, not the click.
@@ -150,10 +150,10 @@ export default {
 			try {
 				await axios.put(
 					`${BASE}/me`,
-					{ auto_ocr_disabled: value === true },
+					{ auto_ocr_enabled: value === true },
 					{ headers: { 'OCS-APIRequest': 'true' } },
 				)
-				this.autoOcrDisabled = value === true
+				this.autoOcrEnabled = value === true
 			} catch (e) {
 				this.error = `Could not save your choice: ${e?.response?.status ?? e?.message ?? 'unknown error'}`
 			} finally {

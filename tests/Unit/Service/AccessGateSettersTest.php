@@ -54,7 +54,7 @@ class AccessGateSettersTest extends TestCase
         $this->assertTrue($gate->isEnabledFor(null));
     }
 
-    public function testOptOutIsPerUserAndReversible(): void
+    public function testThePerUserSwitchIsReversible(): void
     {
         $values = [];
         $config = $this->createMock(IConfig::class);
@@ -70,12 +70,31 @@ class AccessGateSettersTest extends TestCase
 
         $gate = new AccessGate($config, $this->createMock(IGroupManager::class));
 
-        $gate->setOptedOut('alice', true);
-        $this->assertTrue($gate->isOptedOut('alice'));
-        $this->assertFalse($gate->isOptedOut('bob'), 'one user opting out must not affect another');
+        $gate->setAutoOcrEnabled('alice', false);
+        $this->assertFalse($gate->isAutoOcrEnabled('alice'));
+        $this->assertTrue($gate->isAutoOcrEnabled('bob'), 'one user switching off must not affect another');
 
-        $gate->setOptedOut('alice', false);
-        $this->assertFalse($gate->isOptedOut('alice'));
+        $gate->setAutoOcrEnabled('alice', true);
+        $this->assertTrue($gate->isAutoOcrEnabled('alice'));
+    }
+
+    public function testTheKeyIsStoredAsAStringAndInvertedNowhereElse(): void
+    {
+        $writes = [];
+        $config = $this->createMock(IConfig::class);
+        $config->method('getUserValue')->willReturn('1');
+        $config->expects($this->once())
+            ->method('setUserValue')
+            ->willReturnCallback(static function (string $uid, string $app, string $key, string $value) use (&$writes): void {
+                $writes[] = [$key, $value];
+            });
+
+        $gate = new AccessGate($config, $this->createMock(IGroupManager::class));
+        $gate->setAutoOcrEnabled('alice', false);
+
+        // '1'/'0' strings, exactly one key: the inversion belongs to the
+        // migration, not to every reader of the row.
+        $this->assertSame([['auto_ocr_enabled', '0']], $writes);
     }
 
     public function testTheAppIdIsTheOneTheRestOfTheAppUses(): void

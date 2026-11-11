@@ -24,15 +24,15 @@ use PHPUnit\Framework\TestCase;
  */
 class AccessGateTest extends TestCase
 {
-    private function gate(string $rawGroups, array $membership = [], string $optOut = '0'): AccessGate
+    private function gate(string $rawGroups, array $membership = [], string $autoOcr = '1'): AccessGate
     {
         $config = $this->createMock(IConfig::class);
         $config->method('getAppValue')
             ->with(Application::APP_ID, 'enabled_groups', '')
             ->willReturn($rawGroups);
         $config->method('getUserValue')
-            ->with('alice', Application::APP_ID, 'auto_ocr_disabled', '0')
-            ->willReturn($optOut);
+            ->with('alice', Application::APP_ID, 'auto_ocr_enabled', '1')
+            ->willReturn($autoOcr);
 
         $groups = $this->createMock(IGroupManager::class);
         $groups->method('isInGroup')->willReturnCallback(
@@ -77,8 +77,17 @@ class AccessGateTest extends TestCase
 
     public function testOptOutWinsOverGroupMembership(): void
     {
-        $gate = $this->gate('["staff"]', ['staff'], optOut: '1');
+        $gate = $this->gate('["staff"]', ['staff'], autoOcr: '0');
         $this->assertFalse($gate->canProcess($this->user()), 'a user who turned auto-OCR off stays off');
+    }
+
+    public function testAutoOcrIsEnabledWhenTheKeyIsUnset(): void
+    {
+        // The default is "on": a user who never touched the panel must not be
+        // silently switched off by the rename (a fresh key that defaulted to
+        // "off" would be exactly that).
+        $gate = $this->gate('["staff"]', ['staff'], autoOcr: '1');
+        $this->assertTrue($gate->canProcess($this->user()), 'unset key means enabled');
     }
 
     public function testWorkerPlaneIsNeverGatedByGroups(): void
