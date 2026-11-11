@@ -178,5 +178,21 @@ jobs:
       - name: The committed bundle matches src/
         run: git diff --exit-code js/
 
-
-
+  metadata:
+    name: metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # appinfo/info.xml must validate against the app-store XSD. The schema is
+      # vendored at schema/info.xsd (sha256 in schema/README.md) so this check is
+      # deterministic: fetching the live schema on every run would let an upstream
+      # schema change silently change what the check means, and an element
+      # reorder would silently regress.
+      - name: Install xmllint
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libxml2-utils
+          xmllint --version | head -1
+      - name: info.xml validates against the vendored app-store XSD
+        run: xmllint --noout --schema schema/info.xsd appinfo/info.xml
