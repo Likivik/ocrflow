@@ -25,7 +25,7 @@ Behaviour worth knowing:
   errors and the file is left untouched.
 	]]></description>
 	<version>0.1.3</version>
-	<licence>agpl</licence>
+	<licence>AGPL-3.0-or-later</licence>
 	<author mail="likivik@likivik.com" homepage="https://likivik.com">Likivik</author>
 	<namespace>OcrFlow</namespace>
 	<category>files</category>
@@ -34,21 +34,30 @@ Behaviour worth knowing:
 	<bugs>https://github.com/Likivik/ocrflow/issues</bugs>
 	<repository type="git">https://github.com/Likivik/ocrflow</repository>
 	<dependencies>
+		<!-- Schema order inside <dependencies> is php, database, nextcloud.
+		     php: 8.3.36 is what CI runs, 8.4.26 is what the production fpm
+		     pool runs — no max is declared that has not been tested.
+		     database: pgsql only; it is the only engine this app has ever
+		     run. sqlite/mysql stay undeclared until someone tests them. -->
+		<php min-version="8.3" max-version="8.4"/>
+		<database>pgsql</database>
 		<nextcloud min-version="32" max-version="35"/>
 	</dependencies>
-	<settings>
-		<personal>OCA\OcrFlow\Settings\Personal</personal>
-		<personal-section>OCA\OcrFlow\Settings\PersonalSection</personal-section>
-		<admin>OCA\OcrFlow\Settings\Admin</admin>
-		<admin-section>OCA\OcrFlow\Settings\AdminSection</admin-section>
-	</settings>
+	<background-jobs>
+		<job>OCA\OcrFlow\BackgroundJob\ReconcileJob</job>
+	</background-jobs>
 	<commands>
 		<command>OCA\OcrFlow\Command\WorkerSecret</command>
 		<command>OCA\OcrFlow\Command\Engine</command>
 	</commands>
-	<background-jobs>
-		<job>OCA\OcrFlow\BackgroundJob\ReconcileJob</job>
-	</background-jobs>
+	<settings>
+		<!-- Schema order inside <settings>: admin, admin-section, personal,
+		     personal-section — not personal first. -->
+		<admin>OCA\OcrFlow\Settings\Admin</admin>
+		<admin-section>OCA\OcrFlow\Settings\AdminSection</admin-section>
+		<personal>OCA\OcrFlow\Settings\Personal</personal>
+		<personal-section>OCA\OcrFlow\Settings\PersonalSection</personal-section>
+	</settings>
 	<!-- AppAPI / ExApp metadata. The app works without AppAPI too: the same
 	     image runs under systemd, and the worker talks to this app's OCS
 	     endpoints with the shared secret either way. This block only tells

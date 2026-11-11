@@ -12,12 +12,27 @@
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-IMAGE="${NC_IMAGE:-docker.io/library/nextcloud:34-apache}"
+# Pinned by digest, on purpose. The app declares `php max-version 8.4` and a
+# `pgsql`-only database dependency (appinfo/info.xml), and the install-time
+# dependency check enforces both. The floating `34-apache` tag now ships PHP
+# 8.5 and the smoke used to install on SQLite — outside the declared envelope
+# on both counts, so `occ app:enable` correctly refused and the whole job
+# failed on the metadata instead of the app. 34.0.0-apache is the last 34.x
+# image built on PHP 8.4 (34.0.1+ are PHP 8.5), so it is what CI can run the
+# app on; the digest makes the PHP version part of the test, not of the
+# registry's rebuild schedule.
+IMAGE="${NC_IMAGE:-docker.io/library/nextcloud@sha256:5baecc7baf8991ca0d4b202c349c75c1c83129568284fd1ec6bb7e4417e0a5bb}"
+PG_IMAGE="${PG_IMAGE:-docker.io/library/postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac}"
 NAME="ocrflow-it-$$"
+PGNAME="ocrflow-it-pg-$$"
+NET="ocrflow-it-net-$$"
 PORT="${NC_PORT:-8089}"
 ADMIN_USER="admin"
 ADMIN_PASS="integration-pass-123"
 BASE="http://127.0.0.1:${PORT}"
+PG_DB="nextcloud"
+PG_USER="ocrflow"
+PG_PASS="integration-pg-pass-123"
 # Cold runners with a loaded disk took over 120s to install the image; the fix
 # for a slow install is a longer budget, not a rerun.
 INSTALL_TIMEOUT_S="${INSTALL_TIMEOUT_S:-420}"
@@ -62,22 +77,40 @@ curl() {
   return 1
 }
 
-cleanup() { $ENGINE rm -f "$NAME" >/dev/null 2>&1 || true; }
+cleanup() {
+  $ENGINE rm -f "$NAME" >/dev/null 2>&1 || true
+  $ENGINE rm -f "$PGNAME" >/dev/null 2>&1 || true
+  $ENGINE network rm "$NET" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 occ() { $ENGINE exec -u www-data "$NAME" php occ "$@" 2>&1; }
 
-# php inside the container, so no host sqlite3 client is needed
-sqlite() {
+# Query the instance's Postgres from php inside the Nextcloud container, so no
+# host psql client is needed. The connection settings are the same env vars
+# the entrypoint installed the instance with.
+sql() {
   $ENGINE exec "$NAME" php -r '
-$p = new PDO("sqlite:/var/www/html/data/nextcloud.db");
+$p = new PDO(sprintf("pgsql:host=%s;dbname=%s", $_SERVER["POSTGRES_HOST"], $_SERVER["POSTGRES_DB"]),
+  $_SERVER["POSTGRES_USER"], $_SERVER["POSTGRES_PASSWORD"]);
 foreach ($p->query($argv[1])->fetchAll(PDO::FETCH_NUM) as $row) { echo implode("|", $row), PHP_EOL; }
 ' "$1"
 }
 
+echo "== starting $PG_IMAGE as $PGNAME"
+$ENGINE network create "$NET" >/dev/null
+$ENGINE run -d --name "$PGNAME" --network "$NET" \
+  -e POSTGRES_DB="$PG_DB" \
+  -e POSTGRES_USER="$PG_USER" \
+  -e POSTGRES_PASSWORD="$PG_PASS" \
+  "$PG_IMAGE" >/dev/null
+
 echo "== starting $IMAGE as $NAME"
-$ENGINE run -d --name "$NAME" -p "127.0.0.1:${PORT}:80" \
-  -e SQLITE_DATABASE=nextcloud \
+$ENGINE run -d --name "$NAME" --network "$NET" -p "127.0.0.1:${PORT}:80" \
+  -e POSTGRES_HOST="$PGNAME" \
+  -e POSTGRES_DB="$PG_DB" \
+  -e POSTGRES_USER="$PG_USER" \
+  -e POSTGRES_PASSWORD="$PG_PASS" \
   -e NEXTCLOUD_ADMIN_USER="$ADMIN_USER" \
   -e NEXTCLOUD_ADMIN_PASSWORD="$ADMIN_PASS" \
   -e NEXTCLOUD_TRUSTED_DOMAINS="127.0.0.1 localhost" \
@@ -179,7 +212,7 @@ ok "settings and me answer the admin session"
 
 echo "== migration landed on the real database"
 for table in "$JOBS" "$FILES" "$SETTINGS"; do
-  n=$(sqlite "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='${table}'")
+  n=$(sql "SELECT count(*) FROM information_schema.tables WHERE table_name='${table}'")
   [ "$n" = "1" ] || fail "table ${table} missing"
 done
 ok "tables exist: ${JOBS} ${FILES} ${SETTINGS}"
@@ -188,14 +221,19 @@ ok "tables exist: ${JOBS} ${FILES} ${SETTINGS}"
 # an instance that installed before it has a jobs table without the column and
 # dies on the first insert. A fresh install gets it from Version001000; assert
 # it either way, so schema drift fails here and not on a user's instance.
-engcol=$(sqlite "SELECT COALESCE((SELECT 1 FROM pragma_table_info('${JOBS}') WHERE name='engine'),0)")
+engcol=$(sql "SELECT COALESCE((SELECT 1 FROM information_schema.columns WHERE table_name='${JOBS}' AND column_name='engine'),0)")
 [ "$engcol" = "1" ] || fail "${JOBS} has no engine column (upgrade path broken)"
 ok "jobs table has the engine column"
 
 echo "== the constraint that makes 'do the work once' true"
-indexes=$(sqlite "SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='index' AND tbl_name='${JOBS}'")
-echo "$indexes" | grep -qiE 'file_id.*etag' || fail "no unique index on (file_id, etag); got: $indexes"
-if echo "$indexes" | grep -qiE 'UNIQUE.*\(.*path'; then
+# One index definition per line (pg_indexes), then each assertion is made
+# against a single definition: matching over the concatenation of all of
+# them lets a UNIQUE on (file_id, etag) followed by the plain (path) index
+# satisfy both regexes at once and defeat the check.
+indexes=$(sql "SELECT COALESCE(string_agg(indexdef, E'\n'), '') FROM pg_indexes WHERE tablename='${JOBS}'")
+echo "$indexes" | grep -qE 'UNIQUE.*\(.*file_id.*etag|UNIQUE.*\(.*etag.*file_id' \
+  || fail "no unique index on (file_id, etag); got: $indexes"
+if echo "$indexes" | grep -E 'UNIQUE.*\(\s*"?path"?\s*[,)]' | grep -qv '^$'; then
   fail "a unique index on path is back; that re-OCRs every renamed file"
 fi
 ok "jobs unique on (file_id, etag), not on path"
@@ -241,7 +279,7 @@ curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp
   "$BASE/remote.php/dav/files/${ADMIN_USER}/scan.jpg" || fail "WebDAV upload failed"
 sleep 2
 
-jobs=$(sqlite "SELECT count(*) FROM ${JOBS}")
+jobs=$(sql "SELECT count(*) FROM ${JOBS}")
 [ "${jobs:-0}" -ge 1 ] || fail "an upload produced no job (listener or enqueue is broken)"
 ok "upload produced ${jobs} job(s)"
 
@@ -251,7 +289,7 @@ ok "upload produced ${jobs} job(s)"
 # fetching job N", while the claim itself stayed green — the failure was only
 # visible to a byte-level fetch.
 echo "== the worker can fetch a job's bytes from the app"
-jobfile=$(sqlite "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
+jobfile=$(sql "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
 code=$(curl -s -o /tmp/ocrflow-bytes -w '%{http_code}' -H 'OCS-APIRequest: true' -H "X-OcrFlow-Secret: ${secret}" \
   "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobfile}/file")
 [ "$code" = "200" ] || fail "file fetch should be 200, got $code"
@@ -284,7 +322,7 @@ ok "claim -> 200 with a job"
 # The claim payload must carry the engine: an earlier build dropped it, and the
 # worker then used its own env — on the api transport that is unset, so every
 # job died with "no engine configured" no matter what the admin chose.
-eng=$(sqlite "SELECT COALESCE(engine,'') FROM ${JOBS} ORDER BY id DESC LIMIT 1")
+eng=$(sql "SELECT COALESCE(engine,'') FROM ${JOBS} ORDER BY id DESC LIMIT 1")
 [ "$eng" = "tesseract" ] || fail "the claimed job carries engine='${eng}', expected tesseract"
 ok "claimed job carries engine: tesseract"
 
@@ -300,12 +338,12 @@ ok "claim response carries engine: tesseract"
 # still on a huge PDF; its late result must be discarded, not written over the
 # new claimant's row (that row is what the UI and the billing read).
 echo "== only the claim holder may finish a job"
-jobid=$(sqlite "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
+jobid=$(sql "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
   -H "X-OcrFlow-Secret: ${secret}" -H 'X-OcrFlow-Worker: someone-else' \
   -d 'status=done' "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result")
 [ "$code" = "200" ] || fail "a non-claimant's result should still be 200, got $code"
-status=$(sqlite "SELECT status FROM ${JOBS} WHERE id=${jobid}")
+status=$(sql "SELECT status FROM ${JOBS} WHERE id=${jobid}")
 [ "$status" = "claimed" ] || fail "a non-claimant's result changed the row to ${status}"
 ok "a non-claimant's result is discarded"
 
@@ -315,27 +353,27 @@ code=$(claim)
 ok "second claim -> 204"
 
 echo "== a reported failure is recorded, not lost"
-id=$(sqlite "SELECT id FROM ${JOBS} LIMIT 1")
+id=$(sql "SELECT id FROM ${JOBS} LIMIT 1")
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
   -H "X-OcrFlow-Secret: ${secret}" -d 'error=integration-test' \
   "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${id}/failure")
 [ "$code" = "200" ] || fail "failure report should be 200, got $code"
-status=$(sqlite "SELECT status FROM ${JOBS} WHERE id=${id}")
+status=$(sql "SELECT status FROM ${JOBS} WHERE id=${id}")
 [ "$status" = "error" ] || fail "job status should be error after a reported failure, got ${status}"
 ok "failure recorded as ${status}"
 
 echo "== a dead worker's claim is taken back, and the attempt is counted"
-id=$(sqlite "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
+id=$(sql "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
 stale=$(( $(date +%s) - 1000 ))   # older than Application::STALE_CLAIM_SECONDS (900)
-sqlite "UPDATE ${JOBS} SET status='claimed', claimed_at=${stale}, attempts=0 WHERE id=${id}" >/dev/null
+sql "UPDATE ${JOBS} SET status='claimed', claimed_at=${stale}, attempts=0 WHERE id=${id}" >/dev/null
 # Reset the job's last_run so Nextcloud considers it due; matching on the class
 # name needs LIKE, because every backslash in a PHP namespace is an escape in
 # two languages at once and the first attempt silently matched nothing.
-sqlite "UPDATE oc_jobs SET last_run=0 WHERE class LIKE '%ReconcileJob'" >/dev/null 2>&1 || true
-jobid=$(sqlite "SELECT id FROM oc_jobs WHERE class LIKE '%ReconcileJob' LIMIT 1")
+sql "UPDATE oc_jobs SET last_run=0 WHERE class LIKE '%ReconcileJob'" >/dev/null 2>&1 || true
+jobid=$(sql "SELECT id FROM oc_jobs WHERE class LIKE '%ReconcileJob' LIMIT 1")
 reconcile_out=$(occ background-job:execute --force-execute "$jobid" 2>&1 || true)
 echo "   (reconcile: $(echo "$reconcile_out" | tr -d '\n' | cut -c1-160))"
-status=$(sqlite "SELECT status FROM ${JOBS} WHERE id=${id}")
+status=$(sql "SELECT status FROM ${JOBS} WHERE id=${id}")
 [ "$status" = "queued" ] || fail "a claim older than the stale window must go back to queued, still ${status}"
 ok "stale claim requeued"
 
