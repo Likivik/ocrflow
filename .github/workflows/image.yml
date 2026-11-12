@@ -43,7 +43,28 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The ruleset demands BOTH build checks on every PR, but a PR that
+      # touches nothing the image is made of cannot change it -- building
+      # twice for a README edit is pure cost. paths-filter only runs on
+      # pull_request events; on every other trigger (push to main, tags,
+      # workflow_dispatch) its output stays unset, so the gated steps below
+      # read "not 'false'" and a REAL build always happens outside PRs.
+      - name: Can this PR change the image?
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            image:
+              - 'worker/**'
+              - 'docker/**'
+              - 'nix/package-worker.nix'
+              - 'flake.nix'
+              - 'flake.lock'
+              - '.github/workflows/image.yml'
+
       - name: Set up Buildx
+        if: steps.filter.outputs.image != 'false'
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
@@ -56,6 +77,7 @@ jobs:
 
       - name: Compute tags
         id: tags
+        if: steps.filter.outputs.image != 'false'
         run: |
           IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ocrflow-worker"
           if [ "${{ matrix.variant }}" = "google" ]; then
@@ -76,6 +98,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
+        if: steps.filter.outputs.image != 'false'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -91,7 +114,7 @@ jobs:
       # A built image that cannot answer /heartbeat is worthless to AppAPI, so
       # the arm64 image is smoke-tested through emulation when we push one.
       - name: Smoke the image
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.filter.outputs.image != 'false'
         run: |
           docker build -f docker/Dockerfile \
             --build-arg INSTALL_GOOGLE=${{ matrix.google }} \
@@ -137,3 +160,10 @@ jobs:
             sleep 2
           done
           docker logs ocrflow-ci; exit 1
+
+      # The job itself must stay green (a skipped job would report `skipped`
+      # and NOT satisfy the required check), so this step -- not an `if:` on
+      # the job -- is what lets an image-unrelated PR merge in seconds.
+      - name: Nothing image-related changed
+        if: steps.filter.outputs.image == 'false'
+        run: echo "no image-affecting paths in this PR; skipping the build"
