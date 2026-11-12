@@ -400,4 +400,25 @@ status=$(sql "SELECT status FROM ${JOBS} WHERE id=${id}")
 [ "$status" = "queued" ] || fail "a claim older than the stale window must go back to queued, still ${status}"
 ok "stale claim requeued"
 
+# The attention worklist has two front doors reading the same list(), and
+# the shipped 0.1.6 killed both at once: predicate() was declared `: string`
+# while orX() returns a CompositeExpression, so PHP threw a TypeError on the
+# real Nextcloud — while the unit suite stayed green, because no unit test
+# built a query builder. Assert BOTH doors here, on the real instance,
+# where a type lie cannot hide: the endpoint must answer 200 with a JSON
+# body carrying rows, and the occ command must exit 0.
+echo "== the attention worklist answers on both front doors"
+code=$(curl -s -o /tmp/ocrflow-attention.json -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/attention")
+[ "$code" = "200" ] || fail "GET /api/v1/attention should be 200, got $code body=$(cat /tmp/ocrflow-attention.json)"
+grep -q '"rows"' /tmp/ocrflow-attention.json || fail "attention response has no rows field: $(cat /tmp/ocrflow-attention.json)"
+ok "attention endpoint -> 200 with rows"
+
+if ! occ ocrflow:errors >/tmp/ocrflow-errors.log 2>&1; then
+  echo "-- occ ocrflow:errors said:"; tail -8 /tmp/ocrflow-errors.log || true
+  fail "occ ocrflow:errors exited non-zero"
+fi
+ok "occ ocrflow:errors exits 0 ($(grep -c '' /tmp/ocrflow-errors.log) lines)"
+
 echo "ALL INTEGRATION ASSERTIONS PASSED"
