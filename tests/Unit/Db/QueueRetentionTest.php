@@ -11,6 +11,7 @@ use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
 use OCP\DB\IResult;
+use OCP\DB\QueryBuilder\ICompositeExpression;
 use OCP\DB\QueryBuilder\IExpressionBuilder;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
@@ -44,13 +45,31 @@ class QueueRetentionTest extends TestCase
 
 	/**
 	 * @param int $ageSeconds seconds before self::NOW the row finished
+	 * @param ?string $code the reason_code the row carries (null: none)
 	 */
-	private function job(int $id, string $status, ?int $ageSeconds): void
+	private function job(int $id, string $status, ?int $ageSeconds, ?string $code = null): void
 	{
 		$this->queue->jobs[$id] = [
 			'id' => $id,
 			'status' => $status,
 			'finished_at' => $ageSeconds === null ? null : self::NOW - $ageSeconds,
+			'reason_code' => $code,
+			'reason' => $code,
+		];
+	}
+
+	/**
+	 * A pre-0.1.5 row: no reason_code column value, the code spelled in
+	 * `reason` the old way.
+	 */
+	private function legacyJob(int $id, string $status, ?int $ageSeconds, string $code): void
+	{
+		$this->queue->jobs[$id] = [
+			'id' => $id,
+			'status' => $status,
+			'finished_at' => $ageSeconds === null ? null : self::NOW - $ageSeconds,
+			'reason_code' => null,
+			'reason' => $code,
 		];
 	}
 
@@ -186,6 +205,34 @@ class QueueRetentionTest extends TestCase
 		$this->assertSame(['jobs' => 0, 'stage_events' => 0], $this->sweep());
 	}
 
+	/**
+	 * The needs_fix rows are the operator's worklist: retention must not
+	 * eat the work. Old spellings read through the alias map, and the
+	 * ledger is still never touched.
+	 */
+	public function testNeedsFixRowsSurviveTheSweepAndTheRestStillGoes(): void
+	{
+		$this->job(1, Queue::STATUS_ERROR, 91 * 86400, 'error_file_broken');     // needs_fix, new name
+		$this->legacyJob(2, Queue::STATUS_ERROR, 91 * 86400, 'broken_pdf');       // needs_fix, old name
+		$this->job(3, Queue::STATUS_ERROR, 91 * 86400, 'error_app_answered_5xx'); // wait
+		$this->legacyJob(4, Queue::STATUS_SKIPPED, 91 * 86400, 'no_text_detected'); // nothing_to_do
+		$this->job(5, Queue::STATUS_ERROR, 91 * 86400);                          // no code at all
+		$this->queue->files = [
+			['file_id' => 7, 'etag' => 'a', 'status' => 'error', 'reason' => 'error_file_broken'],
+		];
+
+		$deleted = $this->sweep();
+
+		$this->assertSame(3, $deleted['jobs'], 'the wait / nothing_to_do / uncoded rows still go');
+		$this->assertSameCanonical([1, 2], array_keys($this->queue->jobs), 'needs_fix rows survive, in both spellings');
+		$this->assertSame(
+			[['file_id' => 7, 'etag' => 'a', 'status' => 'error', 'reason' => 'error_file_broken']],
+			$this->queue->files,
+			'the ledger is still never touched',
+		);
+		$this->assertNotContains('ocrflow_files', $this->queue->deletedTables);
+	}
+
 	public function testTheProductionSelectIsBoundedAndNeverNamesFiles(): void
 	{
 		// The SQL half: the select that feeds the loop must filter terminal
@@ -303,6 +350,63 @@ class QueueRetentionTest extends TestCase
 	}
 
 	/**
+	 * The SQL half of the worklist rule: the retention select must exclude
+	 * the needs_fix spellings — new names and pre-0.1.5 aliases in ONE set,
+	 * because old rows keep their old names.
+	 */
+	public function testTheProductionSelectExcludesTheNeedsFixSpellings(): void
+	{
+		$params = [];
+		$composite = $this->createMock(ICompositeExpression::class);
+		$expr = $this->createMock(IExpressionBuilder::class);
+		$expr->method('in')->willReturn('in');
+		$expr->method('lt')->willReturn('lt');
+		$expr->method('isNotNull')->willReturn('nn');
+		$expr->method('eq')->willReturn('eq');
+		$expr->method('isNull')->willReturn('null');
+		$expr->method('neq')->willReturn('neq');
+		$expr->method('notIn')->willReturn('not_in');
+		$expr->method('orX')->willReturn($composite);
+		$expr->method('andX')->willReturn($composite);
+
+		$result = $this->createMock(IResult::class);
+		$result->method('fetchAll')->willReturn([]);
+		$result->method('fetch')->willReturn(false);
+
+		$qb = $this->createMock(IQueryBuilder::class);
+		$qb->method('expr')->willReturn($expr);
+		foreach (['select', 'from', 'where', 'andWhere', 'orderBy', 'leftJoin'] as $m) {
+			$qb->method($m)->willReturnSelf();
+		}
+		$qb->method('setMaxResults')->willReturnSelf();
+		$qb->method('createNamedParameter')->willReturnCallback(
+			static function ($value, $type = null) use (&$params) {
+				$params[] = $value;
+				return ':p' . count($params);
+			}
+		);
+		$qb->method('executeQuery')->willReturn($result);
+		$qb->method('executeStatement')->willReturn(0);
+
+		$db = $this->createMock(IDBConnection::class);
+		$db->method('getQueryBuilder')->willReturn($qb);
+
+		$queue = new Queue(
+			$db,
+			new StageEvents(new RetryPolicy(), $this->createMock(LoggerInterface::class)),
+		);
+
+		$queue->purgeTerminal(self::NOW, 100);
+
+		$spellings = array_values(array_filter($params, 'is_array'));
+		$this->assertNotEmpty($spellings);
+		$merged = array_merge(...$spellings);
+		$this->assertContains('error_file_broken', $merged, 'new needs_fix names must be excluded from the purge');
+		$this->assertContains('broken_pdf', $merged, 'pre-0.1.5 aliases must be excluded from the purge too');
+		$this->assertNotContains('error_app_answered_5xx', $merged, 'wait codes are not the worklist: they still purge');
+	}
+
+	/**
 	 * @param list<int> $expected
 	 * @param list<int> $actual
 	 */
@@ -330,6 +434,7 @@ class StoreQueue extends Queue
 	public array $files = [];
 	/** @var list<string> */
 	public array $deletedTables = [];
+	private RetryPolicy $policy;
 
 	public function __construct(IDBConnection $db)
 	{
@@ -365,6 +470,7 @@ class StoreQueue extends Queue
 				}
 			}),
 		);
+		$this->policy = new RetryPolicy();
 	}
 
 	protected function selectExpiredTerminalIds(int $cutoff, int $limit): array
@@ -374,9 +480,22 @@ class StoreQueue extends Queue
 			$status = (string) $row['status'];
 			$terminal = in_array($status, [Queue::STATUS_DONE, Queue::STATUS_SKIPPED, Queue::STATUS_ERROR], true);
 			$finishedAt = $row['finished_at'];
-			if ($terminal && $finishedAt !== null && $finishedAt < $cutoff) {
-				$ids[] = (int) $row['id'];
+			if (!($terminal && $finishedAt !== null && $finishedAt < $cutoff)) {
+				continue;
 			}
+			// The same predicate the production SQL applies: a row whose
+			// code (reason_code, or reason when reason_code is empty — the
+			// pre-0.1.5 shape) carries the needs_fix verdict is the
+			// operator's worklist and survives.
+			$code = $row['reason_code'] ?? null;
+			if ($code === null || $code === '') {
+				$code = $row['reason'] ?? null;
+			}
+			if (is_string($code) && $code !== ''
+				&& $this->policy->verdict($code) === RetryPolicy::VERDICT_NEEDS_FIX) {
+				continue;
+			}
+			$ids[] = (int) $row['id'];
 		}
 		sort($ids);
 		return array_slice($ids, 0, $limit);

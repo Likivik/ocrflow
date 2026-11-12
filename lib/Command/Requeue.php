@@ -7,7 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Command;
 
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Service\Attention;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
@@ -24,15 +24,16 @@ use Symfony\Component\Console\Output\OutputInterface;
  *
  *   occ ocrflow:requeue alice/files/scan.pdf
  *
- * It clears the verdict and deletes the file's terminal job rows (the same
- * rows retention would delete on schedule), so the next scan queues the file
- * again. The smallest version: one path, no --all, no etag handling — the
- * new upload path already earns its own attempt without help.
+ * The retry itself lives in the Attention service, so the command and the
+ * admin panel's Retry button are two front doors to one implementation.
+ * The smallest version: one path, no --all — the panel's capped
+ * "retry all" is the bulk door, and new uploads earn their own attempt
+ * without help.
  */
 class Requeue extends Command
 {
 	public function __construct(
-		private Queue $queue,
+		private Attention $attention,
 	) {
 		parent::__construct();
 	}
@@ -57,24 +58,22 @@ class Requeue extends Command
 			return Command::FAILURE;
 		}
 
-		$file = $this->queue->findFileByPath($path);
-		if ($file === null) {
+		$result = $this->attention->retryPath($path);
+
+		if ($result['status'] === 'missing') {
 			$output->writeln('<comment>no ocrflow record for this path; nothing to clear, and nothing blocking it either.</comment>');
 			return Command::SUCCESS;
 		}
-		if ($file['status'] === Queue::STATUS_DONE) {
+		if ($result['status'] === 'done') {
 			$output->writeln('<comment>this file is recorded as done, not failed; nothing to retry.</comment>');
 			return Command::SUCCESS;
 		}
 
-		$deleted = $this->queue->deleteTerminalForFile($file['file_id']);
-		$this->queue->clearPermanentVerdict($file['file_id']);
-
 		$output->writeln(sprintf(
 			'cleared the failure verdict (%s) for %s; deleted %d terminal job row(s); the next scan will queue it again',
-			$file['reason'] ?? 'no reason recorded',
+			$result['reason'] ?? 'no reason recorded',
 			$path,
-			$deleted,
+			$result['deleted'],
 		));
 		return Command::SUCCESS;
 	}

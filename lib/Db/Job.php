@@ -68,6 +68,28 @@ class Job extends Entity
 	}
 
 	/**
+	 * A nullable bool column: DBAL returns true/false on pgsql but a driver
+	 * or a test harness may hand back '0'/'1'/'t', and (bool) '0' is true —
+	 * exactly the wrong answer for a retry flag.
+	 */
+	private static function toOptionalBool(mixed $value): ?bool
+	{
+		if ($value === null) {
+			return null;
+		}
+		if (is_bool($value)) {
+			return $value;
+		}
+		if (is_int($value)) {
+			return $value !== 0;
+		}
+		if (is_string($value)) {
+			return strtolower($value) === 't' || $value === '1' || strtolower($value) === 'true';
+		}
+		return (bool) $value;
+	}
+
+	/**
 	 * @param array<string, mixed> $row
 	 */
 	public static function fromRow(array $row): static
@@ -78,6 +100,12 @@ class Job extends Entity
 		$job->setPath((string) $row['path']);
 		$job->setStatus((string) $row['status']);
 		$job->setReason($row['reason'] === null ? null : (string) $row['reason']);
+		// reason_code and retryable joined the table in 0.1.2 and must
+		// survive a read: the attention worklist reads the code through
+		// `getById()`, and a dropped code made every needs_fix row look
+		// uncoded — unlistable and unretryable.
+		$job->setReasonCode(($row['reason_code'] ?? null) === null ? null : (string) $row['reason_code']);
+		$job->setRetryable(self::toOptionalBool($row['retryable'] ?? null));
 		$job->setEngine($row['engine'] === null ? null : (string) $row['engine']);
 		$job->setClaimedBy($row['claimed_by'] === null ? null : (string) $row['claimed_by']);
 		$job->setAttempts((int) ($row['attempts'] ?? 0));

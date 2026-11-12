@@ -11,6 +11,7 @@ use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
 use OCP\AppFramework\Db\QBMapper;
 use OCP\DB\Exception;
+use OCP\DB\QueryBuilder\ICompositeExpression;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
 use Psr\Log\LoggerInterface;
@@ -867,11 +868,18 @@ class Queue extends QBMapper
 	}
 
 	/**
-	 * Ids of terminal jobs finished before the cutoff, oldest ids first.
+	 * Ids of terminal jobs finished before the cutoff, oldest ids first —
+	 * EXCEPT the rows whose reason code has the `needs_fix` verdict.
 	 *
-	 * `finished_at IS NOT NULL` is defensive: every terminal row written
-	 * today carries it, and a NULL timestamp must not read as "older than
-	 * everything".
+	 * Those rows are the operator's worklist (see the Attention service):
+	 * purging them would delete the work instead of doing it. Old spellings
+	 * read through the alias map, so a pre-0.1.5 row named `broken_pdf` is
+	 * kept exactly like a row named `error_file_broken`.
+	 *
+	 * A row with NO code (or a code nobody knows) is still purged: the
+	 * worklist only holds rows the vocabulary can name, and silence is not
+	 * a work item. Everything else about the sweep is unchanged, and
+	 * `ocrflow_files` is never touched.
 	 *
 	 * @return list<int>
 	 * @throws Exception
@@ -886,9 +894,45 @@ class Queue extends QBMapper
 			)))
 			->andWhere($qb->expr()->isNotNull('finished_at'))
 			->andWhere($qb->expr()->lt('finished_at', $qb->createNamedParameter($cutoff, IQueryBuilder::PARAM_INT)))
+			->andWhere($this->purgeablePredicate($qb))
 			->orderBy('id', 'ASC')
 			->setMaxResults($limit);
 		return array_map(intval(...), array_column($qb->executeQuery()->fetchAll(), 'id'));
+	}
+
+	/**
+	 * True for rows retention may delete: the row's code (reason_code, or
+	 * reason when reason_code is empty — the pre-0.1.5 shape) does NOT
+	 * carry the needs_fix verdict.
+	 *
+	 * The empty/NULL cases are spelled out because SQL three-valued logic
+	 * turns `NOT IN` on a NULL into "unknown", and a NULL must read as
+	 * "no verdict", not as "needs_fix".
+	 */
+	private function purgeablePredicate(IQueryBuilder $qb): ICompositeExpression
+	{
+		$spellings = $this->retryPolicy->spellingsForVerdict(RetryPolicy::VERDICT_NEEDS_FIX);
+		$empty = $qb->expr()->orX(
+			$qb->expr()->isNull('reason_code'),
+			$qb->expr()->eq('reason_code', $qb->createNamedParameter('')),
+		);
+		return $qb->expr()->orX(
+			// A code is recorded and it is not a needs_fix spelling.
+			$qb->expr()->andX(
+				$qb->expr()->isNotNull('reason_code'),
+				$qb->expr()->neq('reason_code', $qb->createNamedParameter('')),
+				$qb->expr()->notIn('reason_code', $qb->createNamedParameter($spellings, IQueryBuilder::PARAM_STR_ARRAY)),
+			),
+			// No code recorded: fall back to reason (old rows), and a NULL
+			// reason is no verdict either — both keep today's behaviour.
+			$qb->expr()->andX(
+				$empty,
+				$qb->expr()->orX(
+					$qb->expr()->isNull('reason'),
+					$qb->expr()->notIn('reason', $qb->createNamedParameter($spellings, IQueryBuilder::PARAM_STR_ARRAY)),
+				),
+			),
+		);
 	}
 
 	/**
