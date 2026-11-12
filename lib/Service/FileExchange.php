@@ -145,6 +145,8 @@ class FileExchange
 		try {
 			$node = $this->resolve($owner, $relative);
 		} catch (NotFoundException) {
+			// Degraded result, by design: a gone node has no etag, and null is
+			// this method's documented answer for "nothing to compare".
 			return null;
 		}
 		return (string) $node->getEtag();

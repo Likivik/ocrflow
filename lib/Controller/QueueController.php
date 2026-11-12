@@ -143,6 +143,9 @@ class QueueController extends OCSController
 		try {
 			$written = $this->files->replace($owner, $relative, $body);
 		} catch (NotFoundException) {
+			// Degraded result, by design: the file was moved or deleted while
+			// the worker held the job. A 404 tells the worker the bytes have
+			// nowhere to go, so it closes the row instead of retrying.
 			return new DataResponse(['message' => 'file no longer exists'], Http::STATUS_NOT_FOUND);
 		} finally {
 			if (is_resource($body)) {
@@ -216,8 +219,14 @@ class QueueController extends OCSController
 		try {
 			$stored = $this->files->createBeside($owner, $relative, $requested, $body);
 		} catch (NotFoundException) {
+			// Degraded result, by design: the target folder vanished while the
+			// job ran. A 404 closes the job as "source gone" rather than retrying
+			// a write that can never land.
 			return new DataResponse(['message' => 'target folder no longer exists'], Http::STATUS_NOT_FOUND);
 		} catch (\InvalidArgumentException $exc) {
+			// Degraded result, by design: the worker asked for a name we refuse
+			// (a path, a traversal). The validation message is the answer, and
+			// 422 tells the worker not to retry the same request.
 			return new DataResponse(['message' => $exc->getMessage()], Http::STATUS_UNPROCESSABLE_ENTITY);
 		} finally {
 			if (is_resource($body)) {
