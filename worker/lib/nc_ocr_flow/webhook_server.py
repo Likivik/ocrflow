@@ -37,6 +37,7 @@ from .config import env_flag, env_float, env_int, env_str
 from .ocr import process_pdf
 from .pdf_classify import classify_pdf
 from .pdfio import write_in_place
+from .provenance import LayerOrigin, build_stamp_token, ocr_layer_origin
 from .queue_client import QueueClient
 from .scheduler import scheduler
 from .stage_events import StageTimer, verdict_code
@@ -141,8 +142,13 @@ MIN_TEXT_CHARS_PER_PAGE = 25
 #: still be a broken pre-existing text layer that we DO want to
 #: re-OCR).  The PR keeps the runtime skip behaviour identical — only
 #: the *reason* string is split.
-SKIP_REASON_STAMPED_BY_US = "stamped_good_by_us"
-SKIP_REASON_BORN_DIGITAL = "born_digital_text_based"
+SKIP_REASON_STAMPED_BY_US = "skip_ocred_by_ocrflow"
+SKIP_REASON_BORN_DIGITAL = "skip_text_native"
+#: Someone else's OCR already wrote a text layer (best guess from an OCR
+#: product named in the metadata, or invisible text under a page image).
+#: Never re-OCR'd automatically: it becomes a redo candidate the owner
+#: picks from.
+SKIP_REASON_SUSPECTED_FOREIGN = "skip_ocred_by_suspected_foreign"
 #: Reserved for the text-density guard branch.  Today that branch
 #: FORCES OCR (returns ``needs_ocr=True`` when per-page chars fall
 #: below MIN_TEXT_CHARS_PER_PAGE) and so does not produce a skip —
@@ -1130,6 +1136,11 @@ def _stamp_metadata(
     meta["subject"] = " ".join(parts)
 
     kw = f"nc-ocr-flow, ocr, stamp_version={STAMP_VERSION}"
+    # The machine-readable stamp token: one keyword, four fields, the first
+    # of which says WHO wrote the text layer. The legacy ``nc-ocr-flow``
+    # keyword stays for one release so an older reader still recognises us;
+    # the app's reader accepts both.
+    kw += f", {build_stamp_token(STAMP_VERSION, engine, engine_ver)}"
     if vlm_failed:
         kw += ", vlm-failed"
     escalated = [p for p, v in (l2_pages or {}).items() if v.get("escalate")]
@@ -1450,17 +1461,22 @@ def _needs_ocr_decision(
     path: Path,
     force: bool,
     nc_path: str | None = None,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, LayerOrigin | None]:
     """Decide whether ``path`` actually needs OCR, and report WHY if not.
 
-    Returns ``(needs_ocr, skip_reason)``:
-      * ``(True,  None)``  — OCR must run; no skip was decided.
-      * ``(False, reason)`` — skip; ``reason`` is one of
+    Returns ``(needs_ocr, skip_reason, origin)``:
+      * ``(True,  None, origin)``  — OCR must run; no skip was decided.
+      * ``(False, reason, origin)`` — skip; ``reason`` is one of
         :data:`SKIP_REASON_STAMPED_BY_US` /
         :data:`SKIP_REASON_BORN_DIGITAL` /
-        :data:`SKIP_REASON_TEXT_DENSITY_GUARD` /
+        :data:`SKIP_REASON_SUSPECTED_FOREIGN` /
         :data:`SKIP_REASON_BROKEN_PDF` /
         :data:`REASON_FOREIGN_REWRITE`.
+      * ``origin`` is the :class:`~nc_ocr_flow.provenance.LayerOrigin`
+        the classification read (engine + engine_version for the ours
+        branch, the provenance token otherwise), or ``None`` when the
+        decision was made before classification ran (force, the
+        fingerprint guard's branches, a damaged PDF).
 
     A skip is taken when ``force`` is False AND one of:
       - The file already carries a Google-engine stamp from us
@@ -1510,9 +1526,13 @@ def _needs_ocr_decision(
     temporary policy — not as a confident assertion.
     """
     if force:
-        return True, None
+        return True, None, None
 
     if _already_stamped_by_us(path):
+        # A current-version stamp means ours; the XMP carries the engine and
+        # its version, which is what the ledger row wants. Re-read it from
+        # the token side so the provenance fields ride along.
+        origin = ocr_layer_origin(path)
         if nc_path:
             skip, reason = _check_fingerprint_guard(nc_path)
             if skip:
@@ -1522,61 +1542,54 @@ def _needs_ocr_decision(
                 # SKIP_REASON_STAMPED_BY_US), or one of
                 # SKIP_REASON_STAMPED_BY_US / REASON_FOREIGN_REWRITE.
                 if reason is None:
-                    return False, SKIP_REASON_STAMPED_BY_US
-                return False, reason
+                    return False, SKIP_REASON_STAMPED_BY_US, origin
+                return False, reason, origin
             # Mismatch, still under the limit — re-OCR.
-            return True, None
-        return False, SKIP_REASON_STAMPED_BY_US
+            return True, None, origin
+        return False, SKIP_REASON_STAMPED_BY_US, origin
 
     try:
         cls = classify_pdf(path)
         # A damaged file is not a text question. Decided here, on the normal
-        # path: `force=true` returns earlier, because an operator insisting on a
-        # specific file is entitled to hear the engine's 400 for himself.
+        # path: `force=true` returns earlier, because an operator insisting on
+        # a specific file is entitled to hear the engine's 400 for himself.
         if cls.get("broken_reason"):
             log.warning(
                 "skipping %s: damaged PDF (%s)",
                 nc_path or path,
                 cls["broken_reason"],
             )
-            return False, SKIP_REASON_BROKEN_PDF
+            return False, SKIP_REASON_BROKEN_PDF, None
         needs = bool(cls.get("needs_ocr", True))
     except Exception as exc:
         # Classifier crashed — default to OCR (better safe than skip).
         log.warning("pdf_classify raised (%s); defaulting to OCR", exc)
-        return True, None
+        return True, None, None
 
-    if needs:
-        return True, None
+    # Who wrote the text layer: ours, native, suspected foreign, or nobody.
+    # Read-only and free — it never triggers OCR. This replaces the old
+    # "has a text layer → born digital" shortcut: a bare raster document
+    # with no text layer is work (needs_ocr), not a skip.
+    origin = ocr_layer_origin(path)
+    if origin.origin == "ours":
+        # Ours — the engine bar (app side) decides nothing_to_do vs redo
+        # from the (engine, engine_version) this origin carries.
+        return False, SKIP_REASON_STAMPED_BY_US, origin
+    if origin.origin == "suspected_foreign":
+        # Someone else's OCR, best guess. Never re-OCR'd automatically: the
+        # code records the redo candidate; the owner picks from the list.
+        log.info("skip %s: suspected foreign text layer (%s)", nc_path or path, origin.token)
+        return False, SKIP_REASON_SUSPECTED_FOREIGN, origin
+    if origin.origin == "native" and not needs:
+        # A text layer with no OCR trace. The inspector still gets a veto:
+        # garbled/encoding-broken text (needs=True) is OCR work, not a skip.
+        # The old text-density guard is subsumed: a page with essentially no
+        # extractable text classifies as `none` below, i.e. needs_ocr.
+        return False, SKIP_REASON_BORN_DIGITAL, origin
 
-    # Text-density guard. The inspector (pdf-inspector / heuristic)
-    # calls a page "text_based" whenever it finds text objects, even
-    # when the page is really an image scan carrying a stamp or a
-    # watermark. Measured on real uploads: two phone-photo scans
-    # classified as text_based with 1 and 4 characters of extractable
-    # text, and were silently skipped — no OCR, no text layer. If
-    # there is essentially no text per page, treat it as a scan.
-    try:
-        import fitz
-
-        with fitz.open(str(path)) as doc:
-            pages = max(1, doc.page_count)
-            chars = sum(len(page.get_text().strip()) for page in doc)
-        per_page = chars / pages
-        if per_page < MIN_TEXT_CHARS_PER_PAGE:
-            log.info(
-                "pdf_classify said text_based but only %.1f chars/page on %s; OCR-ing anyway",
-                per_page,
-                path.name,
-            )
-            # Force OCR — this branch does NOT produce a skip today.
-            # ``SKIP_REASON_TEXT_DENSITY_GUARD`` is reserved for a future
-            # skip path through this guard (see its definition).
-            return True, None
-    except Exception as exc:
-        log.warning("text-density guard failed (%s); trusting classifier", exc)
-
-    return False, SKIP_REASON_BORN_DIGITAL
+    # `none`: a raster document nobody has read yet, a blank page, or a
+    # text layer the inspector says is broken. All of it is work.
+    return True, None, origin
 
 
 def _assert_ocr_produced_blocks(result, nc_path: str) -> str | None:
@@ -1870,7 +1883,7 @@ def _process_file(
             # row names, and the code the decision carries rides on it.
             classify_timer = StageTimer("classify")
             with classify_timer:
-                needs_ocr, skip_reason = _needs_ocr_decision(
+                needs_ocr, skip_reason, origin = _needs_ocr_decision(
                     local_file,
                     force,
                     nc_path=nc_path,
@@ -1887,11 +1900,20 @@ def _process_file(
                     skip_reason,
                     force,
                 )
-                return {
+                outcome: dict[str, object] = {
                     "path": nc_path,
                     "skipped": True,
                     "reason": skip_reason,
                 }
+                if origin is not None:
+                    # The provenance the classification read rides on the
+                    # result: the app's ledger row stores the parsed engine
+                    # and engine_version, and the engine bar decides
+                    # nothing_to_do vs redo from them.
+                    outcome["engine"] = origin.engine or None
+                    outcome["engine_version"] = origin.engine_version or None
+                    outcome["stamp_version"] = origin.stamp_version or None
+                return outcome
 
             log.info("OCR-ing PDF (engine=%s force=%s): %s", engine, force, nc_path)
             recognize_timer = StageTimer("recognize")
@@ -1931,6 +1953,10 @@ def _process_file(
                 "path": nc_path,
                 "output": nc_path,
                 "engine": result.engine_used,
+                # What the stamp we just wrote carries: the app's ledger row
+                # stores the pair, and the engine bar decides from it.
+                "engine_version": _engine_api_version(result.engine_used)[1],
+                "stamp_version": STAMP_VERSION,
                 "vlm_pages": result.vlm_pages,
                 **_page_stats_keys(result.output_pdf),
             }

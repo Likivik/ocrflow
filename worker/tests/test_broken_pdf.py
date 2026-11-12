@@ -65,7 +65,7 @@ def test_classifier_marks_broken_files_and_keeps_them_out_of_ocr(tmp_path):
         assert verdict["needs_ocr"] is False
         assert expected in verdict["broken_reason"]
 
-        needs_ocr, reason = webhook_server._needs_ocr_decision(path, force=False)
+        needs_ocr, reason, _origin = webhook_server._needs_ocr_decision(path, force=False)
         assert needs_ocr is False
         assert reason == webhook_server.SKIP_REASON_BROKEN_PDF
 

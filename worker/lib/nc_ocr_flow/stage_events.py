@@ -44,18 +44,23 @@ COST_STAGE = "recognize"
 #: The classifier's verdicts: decisions, not failures.
 #:
 #: The app owns the vocabulary of reason codes; the worker reports which
-#: verdict it reached. These three mean "this file needs no work" -- the PDF
+#: verdict it reached. These mean "this file needs no work" -- the PDF
 #: already carries a text layer, the image is a photo, our own earlier OCR
 #: output is there. They are terminal: retrying cannot change the answer,
 #: and re-OCR-ing a born-digital PDF costs money to learn the same thing.
 #:
-#: The free-text skip reasons the worker already produced are spelled the
-#: same as the codes, so the mapping is the identity -- but it is written
-#: down, so a divergence later is a one-line change and not a hunt.
+#: Old names (left of the arrow) are what a pre-0.1.5 worker emitted; the
+#: app aliases them on read, and this worker writes only the new codes.
 VERDICT_CODES: dict[str, str] = {
-    "born_digital_text_based": "born_digital_text_based",
-    "mobilenet": "mobilenet",
-    "stamped_good_by_us": "stamped_good_by_us",
+    # The outcomes vocabulary (2026-11-12 plan): read old, write new.
+    "skip_text_native": "skip_text_native",
+    "skip_ocred_by_ocrflow": "skip_ocred_by_ocrflow",
+    "skip_ocred_by_suspected_foreign": "skip_ocred_by_suspected_foreign",
+    "needs_ocr": "needs_ocr",
+    # Legacy aliases — still accepted, never emitted by a current worker.
+    "born_digital_text_based": "skip_text_native",
+    "mobilenet": "skip_classifier_says_photo",
+    "stamped_good_by_us": "skip_ocred_by_ocrflow",
 }
 
 

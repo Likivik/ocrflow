@@ -120,6 +120,12 @@ def _report(
             # with a code. Without it the job row would say only "born digital"
             # in prose, and the table that answers "why" would say nothing.
             reason_code=verdict_code(outcome.get("reason")),
+            # Provenance for the ours branch: the app's ledger row stores the
+            # parsed engine and engine_version, and its engine bar decides
+            # nothing_to_do vs redo from them.
+            engine=outcome.get("engine"),
+            engine_version=outcome.get("engine_version"),
+            stamp_version=outcome.get("stamp_version"),
             stage_events=stage_events,
         )
         return
@@ -127,6 +133,7 @@ def _report(
         job.id,
         status="done",
         engine=outcome.get("engine"),
+        engine_version=outcome.get("engine_version"),
         pages=outcome.get("pages"),
         chars=outcome.get("chars"),
         stamp_version=outcome.get("stamp_version"),
