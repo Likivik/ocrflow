@@ -360,7 +360,7 @@ class QueuePermanentFailureTest extends TestCase
 		$this->assertTrue($updated);
 		$this->assertCount(1, $this->files);
 		$this->assertSame('error', $this->files[0]['status']);
-		$this->assertSame('broken_pdf', $this->files[0]['reason'], 'the ledger reason must be the code, so the verdict is matchable');
+		$this->assertSame('error_file_broken', $this->files[0]['reason'], 'the ledger reason must be the code, so the verdict is matchable — and written in the new vocabulary, even when the worker still said the old name');
 	}
 
 	public function testAnEmptySourceWritesItsVerdictToTheLedger(): void
@@ -369,6 +369,6 @@ class QueuePermanentFailureTest extends TestCase
 
 		$this->assertCount(1, $this->files, 'the zero-byte verdict must be recorded where the purge cannot reach it');
 		$this->assertSame('skipped', $this->files[0]['status']);
-		$this->assertSame('empty_source', $this->files[0]['reason']);
+		$this->assertSame('error_source_file_zero_bytes', $this->files[0]['reason']);
 	}
 }

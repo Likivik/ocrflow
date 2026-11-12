@@ -207,7 +207,7 @@ class QueueEmptySourceTest extends TestCase
 
 		$this->assertCount(1, $this->jobs);
 		$this->assertSame('skipped', $this->jobs[0]['status']);
-		$this->assertSame('empty_source', $this->jobs[0]['reason_code']);
+		$this->assertSame('error_source_file_zero_bytes', $this->jobs[0]['reason_code']);
 		$this->assertFalse($this->jobs[0]['retryable']);
 	}
 
@@ -218,7 +218,7 @@ class QueueEmptySourceTest extends TestCase
 		$this->assertCount(1, $this->stageRows, 'the decision must be recorded exactly once');
 		$row = $this->stageRows[0];
 		$this->assertSame('intake', $row['stage']);
-		$this->assertSame('empty_source', $row['reason_code']);
+		$this->assertSame('error_source_file_zero_bytes', $row['reason_code']);
 		$this->assertSame(0, $row['duration_ms']);
 		$this->assertSame(0, $row['cost_pages']);
 		$this->assertSame($this->jobs[0]['id'], $row['job_id'], 'the stage row must point at the job it belongs to');

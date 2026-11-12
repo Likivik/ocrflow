@@ -186,7 +186,7 @@ class Queue extends QBMapper
 		// bytes — the verdict must survive so the next scan does not have to
 		// rediscover it (and so the block stays explainable).
 		if ($fileId !== null) {
-			$this->writeLedger($fileId, $path, $size, $etag, self::STATUS_SKIPPED, 'empty_source', null, null);
+			$this->writeLedger($fileId, $path, $size, $etag, self::STATUS_SKIPPED, 'error_source_file_zero_bytes', null, null, null);
 		}
 
 		$existing = $fileId === null ? $this->findByPath($path) : $this->jobForVersion($fileId, $etag);
@@ -194,15 +194,15 @@ class Queue extends QBMapper
 			$qb = $this->db->getQueryBuilder();
 			$qb->update(self::JOBS)
 				->set('status', $qb->createNamedParameter('skipped'))
-				->set('reason', $qb->createNamedParameter('empty_source'))
-				->set('reason_code', $qb->createNamedParameter('empty_source'))
+				->set('reason', $qb->createNamedParameter('error_source_file_zero_bytes'))
+				->set('reason_code', $qb->createNamedParameter('error_source_file_zero_bytes'))
 				->set('retryable', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL))
 				->set('error', $qb->createNamedParameter(null))
 				->set('claimed_by', $qb->createNamedParameter(null))
 				->set('finished_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
 				->where($qb->expr()->eq('id', $qb->createNamedParameter((int) $existing->getId(), IQueryBuilder::PARAM_INT)));
 			$qb->executeStatement();
-			$this->recordDecision((int) $existing->getId(), 'empty_source');
+			$this->recordDecision((int) $existing->getId(), 'error_source_file_zero_bytes');
 			return;
 		}
 
@@ -212,8 +212,8 @@ class Queue extends QBMapper
 				'path' => $qb->createNamedParameter($path),
 				'file_id' => $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
 				'status' => $qb->createNamedParameter('skipped'),
-				'reason' => $qb->createNamedParameter('empty_source'),
-				'reason_code' => $qb->createNamedParameter('empty_source'),
+				'reason' => $qb->createNamedParameter('error_source_file_zero_bytes'),
+				'reason_code' => $qb->createNamedParameter('error_source_file_zero_bytes'),
 				'retryable' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
 				'created_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
 				'finished_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
@@ -221,7 +221,7 @@ class Queue extends QBMapper
 				'etag' => $qb->createNamedParameter($etag),
 			]);
 		$qb->executeStatement();
-		$this->recordDecision((int) $qb->getLastInsertId(), 'empty_source');
+		$this->recordDecision((int) $qb->getLastInsertId(), 'error_source_file_zero_bytes');
 	}
 
 	/**
@@ -503,7 +503,7 @@ class Queue extends QBMapper
 	 * history table being complete.
 	 *
 	 * @param array{status: string, reason?: ?string, reason_code?: ?string, retryable?: ?bool,
-	 *              engine?: ?string, pages?: ?int,
+	 *              engine?: ?string, engine_version?: ?string, pages?: ?int,
 	 *              chars?: ?int, stamp_version?: ?string, error?: ?string,
 	 *              stage_events?: mixed} $result
 	 * @throws Exception
@@ -680,14 +680,24 @@ class Queue extends QBMapper
 		// free text: the code is the machine verdict enqueue matches against
 		// after the job row is purged, and free text cannot be matched. The
 		// free text stays on the job row, where the status endpoint reads it.
+		// Codes are written in the NEW vocabulary: an old-spelling code from
+		// a pre-0.1.5 worker is canonicalised on the way in, so the ledger
+		// never grows another old name.
+		$reason = $result['reason_code'] ?? null;
+		if (is_string($reason)) {
+			$reason = $this->retryPolicy->canonical($reason);
+		} elseif ($reason === null && isset($result['reason']) && is_string($result['reason'])) {
+			$reason = $result['reason'];
+		}
 		$this->writeLedger(
 			$job->getFileId(),
 			$job->getPath(),
 			$job->getSize(),
 			$job->getEtag(),
 			$status,
-			$result['reason_code'] ?? $result['reason'] ?? null,
+			$reason,
 			$result['engine'] ?? null,
+			$result['engine_version'] ?? null,
 			$result['stamp_version'] ?? null,
 		);
 	}
@@ -707,6 +717,7 @@ class Queue extends QBMapper
 		string $status,
 		?string $reason,
 		?string $engine,
+		?string $engineVersion,
 		?string $stampVersion,
 	): void {
 		$qb = $this->db->getQueryBuilder();
@@ -726,6 +737,9 @@ class Queue extends QBMapper
 			'status' => $w->createNamedParameter($status),
 			'reason' => $w->createNamedParameter($reason),
 			'engine' => $w->createNamedParameter($engine),
+			// What the engine bar is compared against: a file OCR'd below
+			// the bar is a redo candidate, not a frozen verdict.
+			'engine_version' => $w->createNamedParameter($engineVersion),
 			'stamp_version' => $w->createNamedParameter($stampVersion),
 			'path' => $w->createNamedParameter($path),
 			'size' => $w->createNamedParameter($size, IQueryBuilder::PARAM_INT),

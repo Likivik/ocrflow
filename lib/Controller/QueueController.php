@@ -307,6 +307,7 @@ class QueueController extends OCSController
 			'reason_code' => $reasonCode,
 			'retryable' => $reasonCode === null ? null : $decision['retryable'],
 			'engine' => $this->nullableString('engine'),
+			'engine_version' => $this->nullableString('engine_version'),
 			'pages' => $this->nullableInt('pages'),
 			'chars' => $this->nullableInt('chars'),
 			'stamp_version' => $this->nullableString('stamp_version'),
