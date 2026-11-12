@@ -11,6 +11,7 @@ use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Job;
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\FileExchange;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\AppFramework\Http;
@@ -54,7 +55,11 @@ class QueueControllerTrashTest extends TestCase
 
         $request = $this->createMock(IRequest::class);
         $request->method('getHeader')->willReturnCallback(
-            static fn (string $name): string => $name === Application::WORKER_SECRET_HEADER ? 's3cret' : ''
+            static fn (string $name): string => match ($name) {
+                Application::WORKER_SECRET_HEADER => 's3cret',
+                Application::CLAIM_HEADER => 'tok-7',
+                default => '',
+            }
         );
         $request->method('getParam')->willReturnCallback(
             static fn (string $key, mixed $default = null): mixed => $params[$key] ?? $default
@@ -63,6 +68,8 @@ class QueueControllerTrashTest extends TestCase
         $job = new Job();
         $job->setId(7);
         $job->setPath(self::JOB_PATH);
+        $job->setStatus(Queue::STATUS_CLAIMED);
+        $job->setClaimToken('tok-7');
 
         $queue ??= $this->createMock(Queue::class);
         $queue->method('getById')->willReturn($job);
@@ -75,6 +82,7 @@ class QueueControllerTrashTest extends TestCase
             $this->createMock(LoggerInterface::class),
             $files ?? $this->createMock(FileExchange::class),
             new RetryPolicy(),
+            $this->createMock(WorkerRegistry::class),
         );
     }
 

@@ -24,8 +24,27 @@ class Application extends App implements IBootstrap
 	/** Header carrying the worker's shared secret on the queue endpoints. */
 	public const WORKER_SECRET_HEADER = 'X-OcrFlow-Secret';
 
-	/** How long a claim may sit untouched before the reconciler takes it back. */
-	public const STALE_CLAIM_SECONDS = 900;
+	/** Header carrying the worker's self-reported name (informational). */
+	public const WORKER_HEADER = 'X-OcrFlow-Worker';
+
+	/**
+	 * Header carrying the claim token: minted by `claim()`, required by
+	 * `file` / `result` / `failure` (and the byte endpoints). A request
+	 * without the matching token is a stale claim reference, answered 409.
+	 */
+	public const CLAIM_HEADER = 'X-OcrFlow-Claim';
+
+	/** Header carrying the registry row id a worker got at registration. */
+	public const WORKER_ID_HEADER = 'X-OcrFlow-Worker-Id';
+
+	/**
+	 * How stale a worker's heartbeat may be before its claims are taken back
+	 * and its registry row pruned. The worker heartbeats every
+	 * `NC_OCR_HEARTBEAT_SECONDS` (default 60); this budget is ~3x that, so
+	 * one lost beat does not kill a claim, and a dead worker is noticed
+	 * within minutes instead of the old blind 900-second window.
+	 */
+	public const HEARTBEAT_STALE_SECONDS = 180;
 
 	public function __construct(array $urlParams = [])
 	{

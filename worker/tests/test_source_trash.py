@@ -28,7 +28,7 @@ class _Client:
 
 def test_the_runner_forwards_the_trash_intent() -> None:
     client = _Client()
-    job = type("Job", (), {"id": 7})()
+    job = type("Job", (), {"id": 7, "claim_token": None})()
 
     runner._report(
         client,
@@ -52,7 +52,7 @@ def test_the_runner_forwards_the_trash_intent() -> None:
 
 def test_a_job_that_converted_nothing_asks_for_no_trash() -> None:
     client = _Client()
-    job = type("Job", (), {"id": 7})()
+    job = type("Job", (), {"id": 7, "claim_token": None})()
 
     runner._report(client, job, {"engine": "google", "pages": 1, "chars": 120})
 
@@ -64,7 +64,7 @@ def test_a_job_that_converted_nothing_asks_for_no_trash() -> None:
 
 def test_a_skipped_job_asks_for_no_trash() -> None:
     client = _Client()
-    job = type("Job", (), {"id": 7})()
+    job = type("Job", (), {"id": 7, "claim_token": None})()
 
     runner._report(client, job, {"skipped": True, "reason": "source_image_kept"})
 

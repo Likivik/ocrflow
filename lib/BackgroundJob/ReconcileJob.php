@@ -9,6 +9,7 @@ namespace OCA\OcrFlow\BackgroundJob;
 
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Db\WorkerRegistry;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\TimedJob;
 use OCP\IConfig;
@@ -63,6 +64,7 @@ class ReconcileJob extends TimedJob
 		private LoggerInterface $logger,
 		private IConfig $config,
 		private ILockingProvider $locks,
+		private WorkerRegistry $workers,
 	) {
 		parent::__construct($time);
 		$this->setInterval(300);
@@ -70,9 +72,19 @@ class ReconcileJob extends TimedJob
 
 	protected function run($argument): void
 	{
-		$requeued = $this->queue->requeueStale(Application::STALE_CLAIM_SECONDS);
+		// Evidence-based recovery: a claim goes back only when its holder's
+		// heartbeat is stale (or the holder is unknown), never on a timer —
+		// the old window requeued a live worker's long job from under it.
+		$requeued = $this->queue->requeueStale(Application::HEARTBEAT_STALE_SECONDS);
 		if ($requeued > 0) {
-			$this->logger->info('ocrflow: requeued ' . $requeued . ' stale claim(s)');
+			$this->logger->info('ocrflow: requeued ' . $requeued . ' claim(s) whose worker stopped heartbeating');
+		}
+
+		// Same tick, same job: prune the registry rows the claims above just
+		// relied on. No new scheduler for either.
+		$pruned = $this->workers->pruneStale(Application::HEARTBEAT_STALE_SECONDS);
+		if ($pruned > 0) {
+			$this->logger->info('ocrflow: pruned ' . $pruned . ' worker row(s) whose heartbeat was stale');
 		}
 
 		$this->sweepRetention();

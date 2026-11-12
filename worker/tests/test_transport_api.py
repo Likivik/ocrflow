@@ -25,16 +25,18 @@ class _StubQueueClient:
         self.calls: list[tuple] = []
         self.served = b"%PDF-1.7\nserved by the app\n"
 
-    def fetch_file(self, job_id: int, dest: Path) -> Path:
+    def fetch_file(self, job_id: int, dest: Path, claim: str | None = None) -> Path:
         self.calls.append(("fetch", job_id))
         Path(dest).write_bytes(self.served)
         return Path(dest)
 
-    def put_file(self, job_id: int, source: Path) -> dict:
+    def put_file(self, job_id: int, source: Path, claim: str | None = None) -> dict:
         self.calls.append(("put", job_id, Path(source).read_bytes()))
         return {"size": len(Path(source).read_bytes()), "etag": "abc"}
 
-    def result_file(self, job_id: int, source: Path, name: str | None = None) -> dict:
+    def result_file(
+        self, job_id: int, source: Path, name: str | None = None, claim: str | None = None
+    ) -> dict:
         self.calls.append(("result_file", job_id, name, Path(source).read_bytes()))
         return {"path": "/likivik/files/scan.pdf", "name": "scan.pdf", "file_id": 99}
 

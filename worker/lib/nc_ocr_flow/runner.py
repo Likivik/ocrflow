@@ -17,14 +17,15 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from . import quota_gate
-from .config import env_float, env_str
-from .queue_client import Job, QueueClient
+from .config import env_float, env_int, env_str
+from .queue_client import ClaimStale, Job, QueueClient
 from .quota_gate import QuotaGate
 from .readiness import report_configured_engine
 from .stage_events import StageCollector, collector_scope, verdict_code
@@ -47,6 +48,11 @@ def classify_failure(exc: BaseException) -> str:
     if status is not None:
         if status in (401, 403):
             return "credentials_missing"
+        if status == 409:
+            # The app's 409 is not generic 4xx: it names our own code. The
+            # claim is gone; retrying is wrong and so is calling it
+            # app_4xx (which reads as "the document is the problem").
+            return "error_worker_job_reference_stale"
         if 400 <= status < 500:
             return "app_4xx"
         if 500 <= status < 600:
@@ -127,6 +133,7 @@ def _report(
             engine_version=outcome.get("engine_version"),
             stamp_version=outcome.get("stamp_version"),
             stage_events=stage_events,
+            claim=job.claim_token,
         )
         return
     client.result(
@@ -146,6 +153,7 @@ def _report(
         source_converted="1" if outcome.get("source_converted") else None,
         source_path=outcome.get("source_path"),
         result_path=outcome.get("result_path"),
+        claim=job.claim_token,
     )
 
 
@@ -181,7 +189,24 @@ def run_once(
     collector = StageCollector()
     try:
         with collector_scope(collector):
-            outcome = process(job.path, job.file_id or 0, engine=job.engine, job_id=job.id)
+            outcome = process(
+                job.path,
+                job.file_id or 0,
+                engine=job.engine,
+                job_id=job.id,
+                claim_token=job.claim_token,
+            )
+    except ClaimStale as exc:
+        # 409: this claim is no longer ours — requeued or finished elsewhere
+        # while we worked. Stop, do not retry, and do NOT report a failure:
+        # the report would be refused with the same 409, and the job belongs
+        # to whoever holds the claim now.
+        log.warning(
+            "job %s abandoned: the claim reference is stale (error_worker_job_reference_stale): %s",
+            job.id,
+            exc,
+        )
+        return True
     except Exception as exc:
         code = classify_failure(exc)
         log.warning("job %s failed (%s): %s", job.id, code, exc)
@@ -195,6 +220,7 @@ def run_once(
             reason="worker_error",
             reason_code=code,
             stage_events=collector.as_json(),
+            claim=job.claim_token,
         )
         return True
 
@@ -208,7 +234,15 @@ def run_once(
         if verdict is not None:
             collector.mark_last_reason(verdict)
 
-    _report(client, job, outcome, collector.as_json())
+    try:
+        _report(client, job, outcome, collector.as_json())
+    except ClaimStale as exc:
+        # The same rule as mid-job: the claim went stale between our last
+        # byte and this report. Abandon — the new holder owns the row, and
+        # our stage events would land on their job.
+        log.warning(
+            "job %s abandoned at report time: the claim reference is stale: %s", job.id, exc
+        )
     return True
 
 
@@ -223,6 +257,47 @@ def _default_stop():
     from .webhook_server import stop_scheduler
 
     return stop_scheduler
+
+
+def start_heartbeat(client: QueueClient, seconds: int | float = 60) -> threading.Event:
+    """Register the worker, then beat until the returned event is set.
+
+    One daemon thread, one job: keep our registry row's `last_seen_at`
+    fresh so the app's stale-claim recovery never mistakes us for dead.
+    The heartbeat IS the evidence — a worker on a 30-minute PDF must not
+    have its claim requeued from under it, which is what the old blind
+    timer window did.
+
+    Registration happens inline (the caller needs to know it happened
+    before claiming); a failed registration is a warning, not a crash: an
+    app older than the registry answers 404 and the worker keeps working
+    the way it did before, its claims simply recover on the timer-less
+    "unknown holder" rule.
+
+    ``seconds`` comes from ``NC_OCR_HEARTBEAT_SECONDS`` (default 60); the
+    app prunes rows ~3x that, so one lost beat kills nothing.
+    """
+    from . import __version__
+
+    stop = threading.Event()
+    try:
+        client.register(__version__)
+    except Exception as exc:
+        log.warning("worker registration failed (%s); claims will carry no holder", exc)
+        return stop
+
+    def _beat() -> None:
+        while not stop.wait(seconds if seconds > 0 else 1):
+            try:
+                if not client.heartbeat():
+                    # Pruned while we ran (a long sleep, a suspended
+                    # container): re-register and get a fresh row.
+                    client.register(__version__)
+            except Exception as exc:
+                log.warning("heartbeat failed: %s", exc)
+
+    threading.Thread(target=_beat, name="ocrflow-heartbeat", daemon=True).start()
+    return stop
 
 
 def _default_requeue():
@@ -328,6 +403,12 @@ def main(argv: list[str] | None = None) -> int:
         secret=secret,
         worker_name=env_str("NC_OCR_WORKER_NAME", "worker"),
     )
+
+    # Register with the app's worker registry and keep the heartbeat going:
+    # it is the evidence stale-claim recovery reads. Without it a claim of
+    # ours would be requeued as soon as its holder looked unknown — which
+    # is every claim, for a worker the registry has never heard of.
+    start_heartbeat(client, env_int("NC_OCR_HEARTBEAT_SECONDS", 60))
 
     # Probe surface. Off unless NC_OCR_HEALTH_PORT is set, so native deployments
     # keep their current behaviour. Started before the checks below: a container

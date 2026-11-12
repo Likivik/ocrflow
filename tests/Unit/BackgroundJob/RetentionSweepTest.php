@@ -8,7 +8,9 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Tests\Unit\BackgroundJob;
 
 use OCA\OcrFlow\BackgroundJob\ReconcileJob;
+use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Db\WorkerRegistry;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\IConfig;
 use OCP\Lock\ILockingProvider;
@@ -40,6 +42,8 @@ class RetentionSweepTest extends TestCase
 	private IConfig&MockObject $config;
 	private ILockingProvider&MockObject $locks;
 
+	private WorkerRegistry&MockObject $workers;
+
 	/** @var list<string> */
 	private array $logLines = [];
 
@@ -52,6 +56,8 @@ class RetentionSweepTest extends TestCase
 		$this->logger = $this->createMock(LoggerInterface::class);
 		$this->config = $this->createMock(IConfig::class);
 		$this->locks = $this->createMock(ILockingProvider::class);
+		$this->workers = $this->createMock(WorkerRegistry::class);
+		$this->workers->method('pruneStale')->willReturn(0);
 
 		$this->time->method('getTime')->willReturn(self::NOW);
 
@@ -82,6 +88,23 @@ class RetentionSweepTest extends TestCase
 
 	private string $retentionDays = '90';
 
+	public function testStaleWorkersArePrunedInTheSameTick(): void
+	{
+		$this->queue->method('requeueStale')->willReturn(0);
+		$this->queue->method('purgeTerminal')->willReturn(['jobs' => 0, 'stage_events' => 0]);
+		$this->workers = $this->createMock(WorkerRegistry::class);
+		$this->workers->expects($this->once())->method('pruneStale')
+			->with(Application::HEARTBEAT_STALE_SECONDS)
+			->willReturn(2);
+
+		$this->runJob();
+
+		$this->assertNotEmpty(array_filter(
+			$this->logLines,
+			fn (string $line): bool => str_contains($line, 'pruned 2'),
+		));
+	}
+
 	private function runJob(): void
 	{
 		$job = new ReconcileJob(
@@ -90,6 +113,7 @@ class RetentionSweepTest extends TestCase
 			$this->logger,
 			$this->config,
 			$this->locks,
+			$this->workers,
 		);
 		$method = new \ReflectionMethod(ReconcileJob::class, 'run');
 		$method->invoke($job, null);

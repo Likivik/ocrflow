@@ -54,7 +54,7 @@ def test_run_once_hands_the_claimed_engine_to_the_orchestrator():
 
     seen = {}
 
-    def process(path, node_id, engine=None, job_id=None):
+    def process(path, node_id, engine=None, job_id=None, claim_token=None):
         seen["engine"] = engine
         seen["job_id"] = job_id
         return {"status": "done"}
