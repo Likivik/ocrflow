@@ -75,6 +75,45 @@ class ErrorsCommandTest extends TestCase
 		$this->assertStringContainsString('3 needing attention', $display);
 	}
 
+	/**
+	 * A row the write path recorded under the canonical unknown code is a
+	 * needs_fix: it must appear in the attention worklist through BOTH doors
+	 * (the endpoint and `occ ocrflow:errors`), because a version skew is
+	 * operator work, not silence.
+	 */
+	public function testACanonicalUnknownCodeRowIsInTheWorklistThroughBothDoors(): void
+	{
+		$queue = $this->queueMock();
+		$attention = new StoreAttention($queue);
+		$attention->rows = [
+			['id' => 21, 'path' => 'alice/files/a.pdf', 'reason_code' => 'error_worker_sent_unknown_code', 'reason' => 'error_worker_sent_unknown_code', 'error' => 'x', 'attempts' => 1, 'finished_at' => 500],
+		];
+
+		$session = $this->createMock(IUserSession::class);
+		$user = $this->createMock(IUser::class);
+		$user->method('getUID')->willReturn('root');
+		$session->method('getUser')->willReturn($user);
+		$groups = $this->createMock(IGroupManager::class);
+		$groups->method('isAdmin')->willReturn(true);
+		$request = $this->createMock(IRequest::class);
+		$request->method('getParam')->willReturnCallback(
+			static fn (string $key, mixed $default = null): mixed => $key === 'limit' ? 200 : $default,
+		);
+		$controller = new AttentionController('ocrflow', $request, $attention, $session, $groups, new RetryPolicy());
+		$endpointIds = array_column($controller->index()->getData()['rows'], 'id');
+
+		$tester = new CommandTester(new Errors($attention));
+		$tester->execute([]);
+		$display = $tester->getDisplay();
+
+		preg_match_all('/^\s*(\d+)\s+\S*\//m', $display, $matches);
+		$commandIds = array_map(intval(...), $matches[1] ?? []);
+
+		$this->assertSame([21], $endpointIds, 'the canonical unknown code is a needs_fix worklist row');
+		$this->assertSame($endpointIds, $commandIds, 'occ ocrflow:errors shows the same row');
+		$this->assertStringContainsString('1 needing attention', $display);
+	}
+
 	public function testTheEmptyWorklistSaysSo(): void
 	{
 		$attention = new StoreAttention($this->queueMock());

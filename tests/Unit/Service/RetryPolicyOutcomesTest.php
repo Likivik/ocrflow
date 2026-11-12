@@ -212,6 +212,38 @@ class RetryPolicyOutcomesTest extends TestCase
 		}
 	}
 
+	/**
+	 * The write path records a freshly-unknown code under its canonical name
+	 * `error_worker_sent_unknown_code`, so the verdict -- not the frozen
+	 * legacy answer for the `unknown` spelling -- decides the row: a version
+	 * skew is a needs_fix, never a retry. Rows that genuinely stored the old
+	 * spellings keep their frozen answers.
+	 */
+	public function testTheCanonicalUnknownCodeIsNotRetryableWhileLegacySpellingsKeepTheirFrozenAnswers(): void
+	{
+		$this->assertFalse(
+			$this->policy->isRetryable('error_worker_sent_unknown_code'),
+			'the canonical unknown code carries the needs_fix verdict and must not retry',
+		);
+		$this->assertSame('needs_fix', $this->policy->verdict('error_worker_sent_unknown_code'));
+
+		// The frozen legacy answers, pinned here as regression guards.
+		foreach ([
+			'app_5xx' => true,
+			'engine_timeout' => true,
+			'empty_stream' => false,
+			'broken_pdf' => false,
+			'save_refused' => false,
+			'unknown' => true,
+		] as $code => $retryable) {
+			$this->assertSame($retryable, $this->policy->isRetryable($code), $code . ' keeps its frozen legacy answer');
+		}
+
+		// The read paths for legacy rows are unchanged.
+		$this->assertFalse($this->policy->isPermanent('unknown'));
+		$this->assertSame('error_worker_sent_unknown_code', $this->policy->canonical('unknown'));
+	}
+
 	public function testAnUnknownNameResolvesSafely(): void
 	{
 		// Unknown: still a bounded retry (the old fail-open rule), but the
