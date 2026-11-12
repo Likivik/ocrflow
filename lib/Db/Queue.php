@@ -797,7 +797,12 @@ class Queue extends QBMapper
 			->andWhere($select->expr()->orX(
 				$select->expr()->isNull('j.claimed_by_worker_id'),
 				$select->expr()->isNull('w.id'),
-				$select->expr()->lt('w.last_seen_at', $select->createNamedParameter($cutoff))
+				// The type parameter is not decoration: without it Doctrine
+				// binds the DateTime as a string and the whole reconcile
+				// tick dies with "Object of class DateTime could not be
+				// converted to string" — caught by the integration smoke,
+				// not by any unit test.
+				$select->expr()->lt('w.last_seen_at', $select->createNamedParameter($cutoff, IQueryBuilder::PARAM_DATETIME_MUTABLE))
 			));
 		$ids = [];
 		foreach ($select->executeQuery()->fetchAll() as $row) {

@@ -45,6 +45,9 @@ class QueueRecoveryTest extends TestCase
 	/** @var list<list<mixed>> */
 	private array $queryParams = [];
 
+	/** @var array<string, mixed> */
+	private array $paramTypes = [];
+
 	private int $builderCalls = 0;
 
 	/** @var list<array{id: int}> */
@@ -93,6 +96,9 @@ class QueueRecoveryTest extends TestCase
 				function ($value, $type = null) use (&$params): string {
 					$name = 'p' . count($params);
 					$params[$name] = $value;
+					if ($value instanceof \DateTimeInterface) {
+						$this->paramTypes[$name] = $type;
+					}
 					return ':' . $name;
 				}
 			);
@@ -170,6 +176,13 @@ class QueueRecoveryTest extends TestCase
 		$this->assertStringContainsString('lt:w.last_seen_at', $joined);
 		$this->assertStringContainsString('isnull:j.claimed_by_worker_id', $joined);
 		$this->assertStringNotContainsString('lt:j.claimed_at', $joined);
+		// The cutoff must be bound as a datetime, not as a string: without
+		// the type, Doctrine dies mid-bind and the reconcile tick crashes —
+		// the integration smoke caught this, no unit test did.
+		$this->assertNotEmpty($this->paramTypes, 'the cutoff must be a typed datetime parameter');
+		foreach ($this->paramTypes as $type) {
+			$this->assertNotNull($type, 'the DateTime cutoff was bound without a type');
+		}
 	}
 
 	public function testTheRequeueOnlyTouchesClaimedRows(): void
