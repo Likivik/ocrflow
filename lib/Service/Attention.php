@@ -11,6 +11,7 @@ use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Db\Queue;
 use OCP\IConfig;
 use OCP\IDBConnection;
+use OCP\DB\QueryBuilder\ICompositeExpression;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use Psr\Log\LoggerInterface;
 
@@ -237,7 +238,7 @@ class Attention
 	 *
 	 * @param list<string> $spellings
 	 */
-	private function predicate(IQueryBuilder $qb, array $spellings): string
+	private function predicate(IQueryBuilder $qb, array $spellings): ICompositeExpression
 	{
 		return $qb->expr()->orX(
 			$qb->expr()->in('reason_code', $qb->createNamedParameter($spellings, IQueryBuilder::PARAM_STR_ARRAY)),
