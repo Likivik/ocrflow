@@ -9,7 +9,9 @@ namespace OCA\OcrFlow\Tests\Unit\Service;
 
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
+use OCA\OcrFlow\Db\Job;
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\FileExchange;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
@@ -126,6 +128,14 @@ final class ClassifierVerdictTest extends TestCase
 	{
 		$queue = $this->createMock(Queue::class);
 		$captured = null;
+		$queue->method('getById')->willReturnCallback(static function (): Job {
+			$job = new Job();
+			$job->setId(7);
+			$job->setPath('/u/files/a.pdf');
+			$job->setStatus(Queue::STATUS_CLAIMED);
+			$job->setClaimToken('tok-7');
+			return $job;
+		});
 		$queue->method('finish')->willReturnCallback(
 			function (int $id, array $result) use (&$captured): bool {
 				$captured = $result;
@@ -135,7 +145,11 @@ final class ClassifierVerdictTest extends TestCase
 
 		$request = $this->createMock(IRequest::class);
 		$request->method('getHeader')->willReturnCallback(
-			static fn (string $name): string => $name === Application::WORKER_SECRET_HEADER ? 'the-secret' : ''
+			static fn (string $name): string => match ($name) {
+				Application::WORKER_SECRET_HEADER => 'the-secret',
+				Application::CLAIM_HEADER => 'tok-7',
+				default => '',
+			}
 		);
 		$request->method('getParam')->willReturnCallback(
 			static fn (string $key, mixed $default = null): mixed => match ($key) {
@@ -158,6 +172,7 @@ final class ClassifierVerdictTest extends TestCase
 			$this->createMock(LoggerInterface::class),
 			$this->createMock(FileExchange::class),
 			new RetryPolicy(),
+			$this->createMock(WorkerRegistry::class),
 		);
 		$controller->result(7);
 

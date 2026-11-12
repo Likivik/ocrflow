@@ -28,6 +28,14 @@ log = logging.getLogger(__name__)
 
 SECRET_HEADER = "X-OcrFlow-Secret"
 WORKER_HEADER = "X-OcrFlow-Worker"
+# The claim token, minted by the app at claim time and required by every
+# endpoint that acts on a claimed job. A missing or wrong token is a 409
+# (`ClaimStale`), not an auth error: the shared secret stays the gate, the
+# token scopes what the claim holder may touch.
+CLAIM_HEADER = "X-OcrFlow-Claim"
+# The registry row id from `register()`; ties a claim to a worker whose
+# heartbeat the app can read.
+WORKER_ID_HEADER = "X-OcrFlow-Worker-Id"
 API_PATH = "/ocs/v2.php/apps/ocrflow/api/v1"
 
 
@@ -56,6 +64,17 @@ class FileGone(QueueProtocolError):
     """
 
 
+class ClaimStale(QueueProtocolError):
+    """The app answered 409: this claim reference is no longer ours.
+
+    The claim was requeued or finished elsewhere (our worker died past the
+    heartbeat budget, or a second instance took the job). Retrying cannot
+    help — the work belongs to whoever holds the claim now — so the caller
+    must stop work on this job and NOT report a failure: the report itself
+    would be refused with the same 409.
+    """
+
+
 @dataclass(frozen=True)
 class Job:
     """One unit of work, exactly as the app describes it."""
@@ -70,6 +89,11 @@ class Job:
     # older app build does not send it; None then means "decide as before"
     # (the worker's own env, and fail closed when that is unset too).
     engine: str | None = None
+    # The claim token minted by the app at claim time: unforgeable proof this
+    # job is ours. Held in memory for the duration of one job only — no
+    # persistent state, because the token's whole point is that a restarted
+    # worker must NOT be able to keep a claim it cannot finish.
+    claim_token: str | None = None
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> Job:
@@ -86,6 +110,7 @@ class Job:
                 size=None if data.get("size") is None else int(data["size"]),
                 attempts=int(data.get("attempts") or 0),
                 engine=None if data.get("engine") is None else str(data["engine"]),
+                claim_token=None if data.get("claim_token") is None else str(data["claim_token"]),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise QueueProtocolError(f"claim returned a job we cannot read: {data!r}") from exc
@@ -107,18 +132,62 @@ class QueueClient:
         self.worker_name = worker_name[:64]
         self.timeout = timeout
         self.session = session or requests.Session()
+        # The registry row id from `register()`, sent on every claim so the
+        # app can tie a claim to a worker whose heartbeat it can ask for.
+        # None until registration succeeds; claims then carry no holder and
+        # are recovered by the first reconcile tick.
+        self.worker_id: int | None = None
 
     # -- worker plane ----------------------------------------------------
 
     def claim(self) -> Job | None:
         """Ask for one job. ``None`` means the queue is empty, not that we failed."""
-        response = self._post("queue/next")
+        headers = {WORKER_ID_HEADER: str(self.worker_id)} if self.worker_id is not None else None
+        response = self._post("queue/next", extra_headers=headers)
         if response.status_code == 204:
             return None
         return Job.from_api(self._data(response))
 
-    def result(self, job_id: int, **fields: Any) -> None:
+    def register(self, version: str | None = None) -> int:
+        """Register in the app's worker registry; answer our row id.
+
+        Called once at startup; the id is what `heartbeat()` refreshes and
+        what a claim points at. A restart is a new row — by design, since
+        the old process is gone.
+        """
+        data = {"version": version} if version else {}
+        response = self._post("worker/register", data=data)
+        payload = self._data(response)
+        if "id" not in payload:
+            raise QueueProtocolError(f"worker registration answered without an id: {payload!r}")
+        self.worker_id = int(payload["id"])
+        return self.worker_id
+
+    def heartbeat(self) -> bool:
+        """One beat: `last_seen_at` = now on our registry row.
+
+        Returns False when the row is gone (pruned while we were down): the
+        caller must register again. The heartbeat is the evidence the app's
+        stale-claim recovery reads — a live worker never has a claim taken
+        from under it, however long the job runs.
+        """
+        if self.worker_id is None:
+            raise QueueProtocolError("heartbeat before register: no worker id")
+        response = self._post(
+            "worker/heartbeat",
+            extra_headers={WORKER_ID_HEADER: str(self.worker_id)},
+        )
+        if response.status_code == 404:
+            return False
+        self._data(response)
+        return True
+
+    def result(self, job_id: int, claim: str | None = None, **fields: Any) -> None:
         """Report success. Only the keys the app documents are sent.
+
+        ``claim`` is the token from the job's claim; the app refuses the
+        result (409, :class:`ClaimStale`) without it — it is how "this job
+        is mine" is proved.
 
         ``stage_events`` is the JSON list of per-stage events, as a string:
         the payload is a flat form body, and the app decodes it. It is
@@ -126,7 +195,7 @@ class QueueClient:
         nothing rather than claiming an empty run.
         """
         payload = {k: v for k, v in fields.items() if v is not None}
-        self._post(f"queue/{job_id}/result", data=payload)
+        self._post(f"queue/{job_id}/result", data=payload, claim=claim)
 
     def failure(
         self,
@@ -136,6 +205,7 @@ class QueueClient:
         reason_code: str | None = None,
         retryable: bool | None = None,
         stage_events: str | None = None,
+        claim: str | None = None,
     ) -> None:
         # ``reason_code`` is the app's vocabulary, not ours to invent: the app
         # records anything it does not know as ``unknown`` and decides retry
@@ -149,9 +219,9 @@ class QueueClient:
             # A JSON string, because this payload is typed as strings: the
             # stage events travel as one opaque blob the app decodes.
             payload["stage_events"] = stage_events
-        self._post(f"queue/{job_id}/failure", data=payload)
+        self._post(f"queue/{job_id}/failure", data=payload, claim=claim)
 
-    def fetch_file(self, job_id: int, dest: Path) -> Path:
+    def fetch_file(self, job_id: int, dest: Path, claim: str | None = None) -> Path:
         """Download a job's bytes into ``dest``.
 
         This is what replaces the WebDAV download. The app opens the file as its
@@ -159,12 +229,16 @@ class QueueClient:
         worker needs no Nextcloud identity at all — and a container cannot read
         anything the queue did not hand it.
 
+        ``claim`` is the job's claim token: since the token gate, the app
+        answers 409 (:class:`ClaimStale`) to a secret holder that does not
+        hold *this* job — reading any job's bytes by id is over.
+
         A 404 here is a real answer, not a transport error: the file was moved or
         deleted after it was queued, and the caller should close the job.
         """
         response = self.session.get(
             f"{self.base_url}{API_PATH}/queue/{job_id}/file",
-            headers=self._headers(),
+            headers=self._headers(claim),
             timeout=self.timeout,
             stream=True,
         )
@@ -174,6 +248,11 @@ class QueueClient:
             )
         if response.status_code == 404:
             raise FileGone(f"job {job_id}: the app reports the file no longer exists")
+        if response.status_code == 409:
+            raise ClaimStale(
+                f"job {job_id}: the app refused the claim reference on the file endpoint",
+                status_code=409,
+            )
         if response.status_code >= 500:
             raise QueueProtocolError(
                 f"server error {response.status_code} fetching job {job_id}",
@@ -200,7 +279,7 @@ class QueueClient:
             raise QueueProtocolError(f"job {job_id}: the app streamed an empty file")
         return dest
 
-    def put_file(self, job_id: int, source: Path) -> dict[str, Any]:
+    def put_file(self, job_id: int, source: Path, claim: str | None = None) -> dict[str, Any]:
         """Send the processed file back; the app stores it as the owner.
 
         The counterpart to :meth:`fetch_file`, and the reason the worker can hold
@@ -212,7 +291,7 @@ class QueueClient:
             response = self.session.put(
                 f"{self.base_url}{API_PATH}/queue/{job_id}/file",
                 data=handle,
-                headers={**self._headers(), "Content-Type": "application/pdf"},
+                headers={**self._headers(claim), "Content-Type": "application/pdf"},
                 timeout=self.timeout,
             )
         if response.status_code in (401, 403):
@@ -221,6 +300,11 @@ class QueueClient:
             )
         if response.status_code == 404:
             raise FileGone(f"job {job_id}: the target file no longer exists")
+        if response.status_code == 409:
+            raise ClaimStale(
+                f"job {job_id}: the app refused the claim reference while storing",
+                status_code=409,
+            )
         if response.status_code >= 500:
             raise QueueProtocolError(
                 f"server error {response.status_code} storing job {job_id}",
@@ -228,7 +312,9 @@ class QueueClient:
             )
         return self._data(response)
 
-    def result_file(self, job_id: int, source: Path, name: str | None = None) -> dict[str, Any]:
+    def result_file(
+        self, job_id: int, source: Path, name: str | None = None, claim: str | None = None
+    ) -> dict[str, Any]:
         """Create a NEW file beside the job's file and return where it landed.
 
         The worker sends a *name* and bytes; the app chooses the directory from
@@ -243,7 +329,7 @@ class QueueClient:
                 f"{self.base_url}{API_PATH}/queue/{job_id}/result-file",
                 params=params,
                 data=handle,
-                headers={**self._headers(), "Content-Type": "application/pdf"},
+                headers={**self._headers(claim), "Content-Type": "application/pdf"},
                 timeout=self.timeout,
             )
         if response.status_code in (401, 403):
@@ -252,6 +338,11 @@ class QueueClient:
             )
         if response.status_code == 404:
             raise FileGone(f"job {job_id}: the target folder no longer exists")
+        if response.status_code == 409:
+            raise ClaimStale(
+                f"job {job_id}: the app refused the claim reference on result-file",
+                status_code=409,
+            )
         if response.status_code >= 500:
             raise QueueProtocolError(
                 f"server error {response.status_code} storing job {job_id}",
@@ -259,26 +350,33 @@ class QueueClient:
             )
         return self._data(response)
 
-    def _headers(self) -> dict[str, str]:
-        return {
+    def _headers(self, claim: str | None = None) -> dict[str, str]:
+        headers = {
             "OCS-APIRequest": "true",
             "Accept": "application/json",
             SECRET_HEADER: self.secret,
             WORKER_HEADER: self.worker_name,
         }
+        if claim is not None:
+            headers[CLAIM_HEADER] = claim
+        return headers
 
     # -- plumbing --------------------------------------------------------
 
-    def _post(self, path: str, data: dict[str, Any] | None = None) -> requests.Response:
+    def _post(
+        self,
+        path: str,
+        data: dict[str, Any] | None = None,
+        claim: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> requests.Response:
+        headers = self._headers(claim)
+        if extra_headers:
+            headers.update(extra_headers)
         response = self.session.post(
             f"{self.base_url}{API_PATH}/{path}",
             data=data or {},
-            headers={
-                "OCS-APIRequest": "true",
-                "Accept": "application/json",
-                SECRET_HEADER: self.secret,
-                WORKER_HEADER: self.worker_name,
-            },
+            headers=headers,
             timeout=self.timeout,
         )
         if response.status_code in (401, 403):
@@ -286,6 +384,18 @@ class QueueClient:
                 f"the app rejected the worker secret ({response.status_code}); "
                 "rotate with `occ ocrflow:worker:secret` and update the worker, "
                 "then reload php-fpm"
+            )
+        if response.status_code == 409:
+            # The app names the code in the body; echo it so the log says why.
+            body = ""
+            try:
+                ocs = response.json()
+                body = str((ocs.get("ocs") or {}).get("data", {}).get("reason_code", ""))
+            except Exception:
+                pass
+            raise ClaimStale(
+                f"the app refused this claim reference on {path}" + (f" ({body})" if body else ""),
+                status_code=409,
             )
         if response.status_code >= 500:
             raise QueueProtocolError(

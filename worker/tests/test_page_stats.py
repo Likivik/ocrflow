@@ -58,7 +58,7 @@ class TestTheRunnerForwardsThem:
                 calls["id"] = job_id
                 calls.update(kwargs)
 
-        job = type("Job", (), {"id": 7})()
+        job = type("Job", (), {"id": 7, "claim_token": None})()
 
         runner._report(
             Client(),
@@ -78,7 +78,7 @@ class TestTheRunnerForwardsThem:
             def result(self, job_id, **kwargs):
                 calls.update(kwargs)
 
-        job = type("Job", (), {"id": 7})()
+        job = type("Job", (), {"id": 7, "claim_token": None})()
 
         runner._report(Client(), job, {"skipped": True, "reason": "born_digital_text_based"})
 

@@ -435,25 +435,33 @@ def _api_client() -> QueueClient:
     return _api_client_singleton
 
 
-def _transport_download(nc_path: str, dest: Path, job_id: int | None) -> None:
+def _transport_download(
+    nc_path: str, dest: Path, job_id: int | None, claim: str | None = None
+) -> None:
     if TRANSPORT == "api":
         if job_id is None:
             raise RuntimeError("NC_OCR_TRANSPORT=api needs a job id to fetch bytes")
-        _api_client().fetch_file(job_id, dest)
+        _api_client().fetch_file(job_id, dest, claim=claim)
         return
     _webdav_download(nc_path, dest)
 
 
-def _transport_upload(nc_path: str, src: Path, job_id: int | None, in_place: bool = True) -> str:
+def _transport_upload(
+    nc_path: str,
+    src: Path,
+    job_id: int | None,
+    in_place: bool = True,
+    claim: str | None = None,
+) -> str:
     """Store the result. Returns the path it landed on (the API decides names)."""
     if TRANSPORT == "api":
         if job_id is None:
             raise RuntimeError("NC_OCR_TRANSPORT=api needs a job id to store bytes")
         client = _api_client()
         if in_place:
-            client.put_file(job_id, src)
+            client.put_file(job_id, src, claim=claim)
             return nc_path
-        stored = client.result_file(job_id, src)
+        stored = client.result_file(job_id, src, claim=claim)
         return str(stored.get("path") or nc_path)
     # In place, DAV keeps the temp-PUT + atomic MOVE dance: a plain PUT that
     # dies midway leaves a truncated PDF where the original used to be.
@@ -1712,6 +1720,7 @@ def _process_file(
     engine: str | None = None,
     force: bool = False,
     job_id: int | None = None,
+    claim_token: str | None = None,
 ) -> dict:
     """Download, OCR, upload back. Returns result dict.
 
@@ -1733,7 +1742,7 @@ def _process_file(
         tmp = Path(tmpdir)
         local_file = tmp / filename
         with StageTimer("intake"):
-            _transport_download(nc_path, local_file, job_id)
+            _transport_download(nc_path, local_file, job_id, claim=claim_token)
 
         if ext in IMAGE_EXTS:
             log.info("classifying image: %s", nc_path)
@@ -1816,7 +1825,7 @@ def _process_file(
             # filesystem API, which is what the trashbin hooks catch.
             with StageTimer("deliver"):
                 pdf_nc_path = _transport_upload(
-                    pdf_nc_path, Path(result.output_pdf), job_id, in_place=False
+                    pdf_nc_path, Path(result.output_pdf), job_id, in_place=False, claim=claim_token
                 )
             kept_source = False
             if _KEEP_SOURCE_IMAGE:
@@ -1947,7 +1956,9 @@ def _process_file(
             # with no way to recover. We PUT to a sibling temp path
             # and then MOVE it atomically onto the target.
             with StageTimer("deliver"):
-                _transport_upload(nc_path, Path(result.output_pdf), job_id, in_place=True)
+                _transport_upload(
+                    nc_path, Path(result.output_pdf), job_id, in_place=True, claim=claim_token
+                )
 
             return {
                 "path": nc_path,

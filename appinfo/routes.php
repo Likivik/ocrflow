@@ -22,6 +22,12 @@ return [
         ['name' => 'queue#result', 'url' => '/api/v1/queue/{id}/result', 'verb' => 'POST'],
         ['name' => 'queue#failure', 'url' => '/api/v1/queue/{id}/failure', 'verb' => 'POST'],
 
+        // Worker registry: one registration at startup, then heartbeats.
+        // The row id is the identity a claim points at; the heartbeat is the
+        // evidence stale-claim recovery reads instead of a timer.
+        ['name' => 'queue#workerRegister', 'url' => '/api/v1/worker/register', 'verb' => 'POST'],
+        ['name' => 'queue#workerHeartbeat', 'url' => '/api/v1/worker/heartbeat', 'verb' => 'POST'],
+
         // --- user plane: the Files sidebar / admin settings -------------------
         ['name' => 'status#index', 'url' => '/api/v1/status', 'verb' => 'GET'],
         ['name' => 'status#job', 'url' => '/api/v1/jobs/{id}', 'verb' => 'GET'],

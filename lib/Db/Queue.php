@@ -199,7 +199,8 @@ class Queue extends QBMapper
 				->set('reason_code', $qb->createNamedParameter('error_source_file_zero_bytes'))
 				->set('retryable', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL))
 				->set('error', $qb->createNamedParameter(null))
-				->set('claimed_by', $qb->createNamedParameter(null))
+				->set('claim_token', $qb->createNamedParameter(null))
+				->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
 				->set('finished_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
 				->where($qb->expr()->eq('id', $qb->createNamedParameter((int) $existing->getId(), IQueryBuilder::PARAM_INT)));
 			$qb->executeStatement();
@@ -455,7 +456,7 @@ class Queue extends QBMapper
 	 *
 	 * @throws Exception
 	 */
-	public function claim(string $worker): ?Job
+	public function claim(string $worker, ?int $workerId = null): ?Job
 	{
 		for ($try = 0; $try < self::MAX_CLAIM_TRIES; $try++) {
 			$qb = $this->db->getQueryBuilder();
@@ -469,10 +470,15 @@ class Queue extends QBMapper
 			}
 			$id = (int) $row['id'];
 
+			// The token IS the claim: 32 random bytes, known to this row and
+			// the one worker that asked for it. Every later call on this job
+			// must present it; the old `claimed_by` name guarded nothing.
+			$token = bin2hex(random_bytes(32));
 			$up = $this->db->getQueryBuilder();
 			$up->update(self::JOBS)
 				->set('status', $up->createNamedParameter(self::STATUS_CLAIMED))
-				->set('claimed_by', $up->createNamedParameter($worker))
+				->set('claim_token', $up->createNamedParameter($token))
+				->set('claimed_by_worker_id', $up->createNamedParameter($workerId, IQueryBuilder::PARAM_INT))
 				->set('claimed_at', $up->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
 				->set('attempts', $up->createFunction('attempts + 1'))
 				->where($up->expr()->eq('id', $up->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
@@ -509,7 +515,7 @@ class Queue extends QBMapper
 	 *              stage_events?: mixed} $result
 	 * @throws Exception
 	 */
-	public function finish(int $id, array $result, string $worker): bool
+	public function finish(int $id, array $result, string $claimToken): bool
 	{
 		$job = $this->getById($id);
 		if ($job === null) {
@@ -530,14 +536,18 @@ class Queue extends QBMapper
 			->set('chars', $qb->createNamedParameter($result['chars'] ?? null, IQueryBuilder::PARAM_INT))
 			->set('error', $qb->createNamedParameter($result['error'] ?? null))
 			->set('finished_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
+			->set('claim_token', $qb->createNamedParameter(null))
+			->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
 			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
-			// Only the worker holding the claim may finish it. A stale claim
-			// older than the recovery window is requeued and can be re-claimed
-			// by another worker while the first is still processing (a very
-			// large PDF); the late worker's result must then be discarded,
-			// not written over the new claimant's row.
+			// Only the worker holding the claim may finish it, and the claim
+			// is the token minted at claim time. A stale claim is requeued
+			// and can be re-claimed by another worker while the first is
+			// still processing (a very large PDF); the late worker's result
+			// must then be discarded, not written over the new claimant's
+			// row. The caller has already refused a non-matching token with
+			// a logged 409; this guard is the database's own say.
 			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
-			->andWhere($qb->expr()->eq('claimed_by', $qb->createNamedParameter($worker)));
+			->andWhere($qb->expr()->eq('claim_token', $qb->createNamedParameter($claimToken)));
 		$updated = $qb->executeStatement() === 1;
 
 		if ($updated) {
@@ -560,7 +570,8 @@ class Queue extends QBMapper
 				$retry->update(self::JOBS)
 					->set('status', $retry->createNamedParameter(self::STATUS_QUEUED))
 					->set('attempts', $retry->createNamedParameter($attempts + 1, IQueryBuilder::PARAM_INT))
-					->set('claimed_by', $retry->createNamedParameter(null))
+					->set('claim_token', $retry->createNamedParameter(null))
+					->set('claimed_by_worker_id', $retry->createNamedParameter(null, IQueryBuilder::PARAM_INT))
 					->set('claimed_at', $retry->createNamedParameter(null))
 					->set('finished_at', $retry->createNamedParameter(null))
 					->where($retry->expr()->eq('id', $retry->createNamedParameter($id, IQueryBuilder::PARAM_INT)));
@@ -763,21 +774,47 @@ class Queue extends QBMapper
 	}
 
 	/**
-	 * Put a claimed job back in the queue — used when a worker dies mid-job and
-	 * its claim goes stale.
+	 * Put a claimed job back in the queue — evidence-based recovery.
 	 *
+	 * The OLD rule was a blind timer (`claimed_at` older than N seconds),
+	 * which requeued a live worker's 30-minute PDF from under it. The rule
+	 * now is the holder's heartbeat: a claim goes back only when its worker
+	 * row is missing (a pre-registry claim, or the row was pruned) or its
+	 * `last_seen_at` fell behind the staleness budget. A worker that keeps
+	 * heartbeating never loses the claim, however long the job runs.
+	 *
+	 * @param int $heartbeatStaleSeconds how stale a worker's heartbeat may be
 	 * @throws Exception
 	 */
-	public function requeueStale(int $olderThanSeconds): int
+	public function requeueStale(int $heartbeatStaleSeconds): int
 	{
-		$cutoff = time() - $olderThanSeconds;
+		$cutoff = new \DateTime('@' . (time() - $heartbeatStaleSeconds));
+		$select = $this->db->getQueryBuilder();
+		$select->select('j.id')
+			->from(self::JOBS, 'j')
+			->leftJoin('j', 'ocrflow_workers', 'w', $select->expr()->eq('w.id', 'j.claimed_by_worker_id'))
+			->where($select->expr()->eq('j.status', $select->createNamedParameter(self::STATUS_CLAIMED)))
+			->andWhere($select->expr()->orX(
+				$select->expr()->isNull('j.claimed_by_worker_id'),
+				$select->expr()->isNull('w.id'),
+				$select->expr()->lt('w.last_seen_at', $select->createNamedParameter($cutoff))
+			));
+		$ids = [];
+		foreach ($select->executeQuery()->fetchAll() as $row) {
+			$ids[] = (int) $row['id'];
+		}
+		if ($ids === []) {
+			return 0;
+		}
+
 		$qb = $this->db->getQueryBuilder();
 		$qb->update(self::JOBS)
 			->set('status', $qb->createNamedParameter(self::STATUS_QUEUED))
-			->set('claimed_by', $qb->createNamedParameter(null))
+			->set('claim_token', $qb->createNamedParameter(null))
+			->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
 			->set('claimed_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
 			->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
-			->andWhere($qb->expr()->lt('claimed_at', $qb->createNamedParameter($cutoff, IQueryBuilder::PARAM_INT)));
+			->andWhere($qb->expr()->in('id', $qb->createNamedParameter($ids, IQueryBuilder::PARAM_INT_ARRAY)));
 		return $qb->executeStatement();
 	}
 

@@ -10,6 +10,7 @@ namespace OCA\OcrFlow\Controller;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Db\Job;
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Db\WorkerRegistry;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\PublicPage;
 use OCP\AppFramework\Http\DataResponse;
@@ -41,6 +42,7 @@ class QueueController extends OCSController
 		private LoggerInterface $logger,
 		private FileExchange $files,
 		private RetryPolicy $retryPolicy,
+		private WorkerRegistry $workers,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -62,8 +64,8 @@ class QueueController extends OCSController
 		}
 
 		$job = $this->queue->getById($id);
-		if ($job === null) {
-			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
+		if (($refused = $this->claimGuard($id, $job)) !== null) {
+			return $refused;
 		}
 
 		$split = self::splitPath((string) $job->getPath());
@@ -122,8 +124,8 @@ class QueueController extends OCSController
 		}
 
 		$job = $this->queue->getById($id);
-		if ($job === null) {
-			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
+		if (($refused = $this->claimGuard($id, $job)) !== null) {
+			return $refused;
 		}
 
 		$split = self::splitPath((string) $job->getPath());
@@ -175,8 +177,8 @@ class QueueController extends OCSController
 		}
 
 		$job = $this->queue->getById($id);
-		if ($job === null) {
-			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
+		if (($refused = $this->claimGuard($id, $job)) !== null) {
+			return $refused;
 		}
 
 		$split = self::splitPath((string) $job->getPath());
@@ -192,7 +194,7 @@ class QueueController extends OCSController
 		// source" — would destroy the user's newer file. Terminal skip:
 		// the new version is enqueued as its own job by the next scan.
 		if ($this->sourceChanged($job, $owner, $relative)) {
-			return $this->skipSourceChanged($id);
+			return $this->skipSourceChanged($id, (string) $this->request->getHeader(Application::CLAIM_HEADER));
 		}
 
 		$directory = dirname($relative);
@@ -246,6 +248,40 @@ class QueueController extends OCSController
 		return [$parts[0], $parts[2]];
 	}
 
+	/**
+	 * The claim guard: only the worker that holds this job's claim token may
+	 * act on it. Every endpoint that touches a claimed job (bytes in, bytes
+	 * out, result, failure) calls this right after the 404 check.
+	 *
+	 * A refusal is a 409 with the machine code in the body and a log line —
+	 * both are new. Until now a stale result was discarded *silently* (200,
+	 * `applied: false`, nothing logged) and `/file` checked only the shared
+	 * secret, so any secret holder could read any job's bytes by id.
+	 */
+	private function claimGuard(int $id, ?Job $job): ?DataResponse
+	{
+		$token = (string) $this->request->getHeader(Application::CLAIM_HEADER);
+		if ($job === null) {
+			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
+		}
+		if (
+			$job->getStatus() !== Queue::STATUS_CLAIMED
+			|| $job->getClaimToken() === null
+			|| $token === ''
+			|| !hash_equals($job->getClaimToken(), $token)
+		) {
+			$this->logger->warning(
+				'ocrflow: job ' . $id . ' refused: the claim reference is stale or wrong '
+				. '(error_worker_job_reference_stale); nothing was written'
+			);
+			return new DataResponse([
+				'message' => 'this claim is no longer yours to act on; stop work on this job and do not retry',
+				'reason_code' => 'error_worker_job_reference_stale',
+			], Http::STATUS_CONFLICT);
+		}
+		return null;
+	}
+
 	#[PublicPage]
 	public function claim(): DataResponse
 	{
@@ -253,11 +289,60 @@ class QueueController extends OCSController
 			return $denied;
 		}
 
-		$job = $this->queue->claim($this->workerName());
+		$job = $this->queue->claim($this->workerName(), $this->workerId());
 		if ($job === null) {
 			return new DataResponse(null, Http::STATUS_NO_CONTENT);
 		}
 		return new DataResponse($job->toApi());
+	}
+
+	/**
+	 * A worker registers once at startup: its name and its own version, and
+	 * back comes the registry row id it heartbeats with. Same secret gate as
+	 * the rest of the worker plane — the registry is identity for claims,
+	 * not authentication (a stolen secret can still register; see the plan).
+	 */
+	#[PublicPage]
+	public function workerRegister(): DataResponse
+	{
+		if (($denied = $this->denyIfNotWorker()) !== null) {
+			return $denied;
+		}
+		$id = $this->workers->register($this->workerName(), $this->nullableString('version'));
+		return new DataResponse(['id' => $id]);
+	}
+
+	/**
+	 * One beat: `last_seen_at` = now. A 404 means the row was pruned (the
+	 * worker was down past the staleness budget); the caller must register
+	 * again — silently retrying the heartbeat against a gone row is the
+	 * spin the false answer prevents.
+	 */
+	#[PublicPage]
+	public function workerHeartbeat(): DataResponse
+	{
+		if (($denied = $this->denyIfNotWorker()) !== null) {
+			return $denied;
+		}
+		$id = $this->workerId();
+		if ($id === null) {
+			return new DataResponse(['message' => 'X-OcrFlow-Worker-Id is required; register first'], Http::STATUS_UNPROCESSABLE_ENTITY);
+		}
+		if (!$this->workers->heartbeat($id)) {
+			return new DataResponse(['message' => 'unknown worker id; register again'], Http::STATUS_NOT_FOUND);
+		}
+		return new DataResponse(['id' => $id, 'seen' => true]);
+	}
+
+	/**
+	 * The registry row id, when this caller registered. Optional on `claim`:
+	 * a claim without one is recovered by the first reconcile tick (its
+	 * holder is unknown, therefore presumed dead).
+	 */
+	private function workerId(): ?int
+	{
+		$raw = (string) $this->request->getHeader(Application::WORKER_ID_HEADER);
+		return $raw === '' || !ctype_digit($raw) ? null : (int) $raw;
 	}
 
 	#[PublicPage]
@@ -270,13 +355,17 @@ class QueueController extends OCSController
 		// The finish and the trash below both act on the job's source; a
 		// job must only ever act on the exact file version it was queued
 		// for, so a source that changed mid-run is refused here before
-		// either can run (see `sourceChanged`).
+		// either can run (see `sourceChanged`). The claim token gates all
+		// of it: a worker without the token gets the 409 below and writes
+		// nothing anywhere.
 		$job = $this->queue->getById($id);
-		if ($job !== null) {
-			$split = self::splitPath((string) $job->getPath());
-			if ($split !== null && $this->sourceChanged($job, $split[0], $split[1])) {
-				return $this->skipSourceChanged($id);
-			}
+		if (($refused = $this->claimGuard($id, $job)) !== null) {
+			return $refused;
+		}
+		$claimToken = (string) $this->request->getHeader(Application::CLAIM_HEADER);
+		$split = self::splitPath((string) $job->getPath());
+		if ($split !== null && $this->sourceChanged($job, $split[0], $split[1])) {
+			return $this->skipSourceChanged($id, $claimToken);
 		}
 
 		// A worker may legitimately decide that a file needs no work: a
@@ -312,7 +401,7 @@ class QueueController extends OCSController
 			'chars' => $this->nullableInt('chars'),
 			'stamp_version' => $this->nullableString('stamp_version'),
 			'stage_events' => $this->stageEventsParam(),
-		], $this->workerName());
+		], $claimToken);
 		// The source image of an image→PDF conversion is moved to the
 		// user's trash bin here, not deleted by the worker over WebDAV: a
 		// WebDAV DELETE is a permanent removal (measured: 23 conversions, 0
@@ -411,7 +500,7 @@ class QueueController extends OCSController
 	 *
 	 * Same response shape the other terminal skips use.
 	 */
-	private function skipSourceChanged(int $id): DataResponse
+	private function skipSourceChanged(int $id, string $claimToken): DataResponse
 	{
 		$this->logger->warning('ocrflow: job ' . $id . ' skipped: the source file changed while the job ran (source_changed); the result was not written');
 		$applied = $this->queue->finish($id, [
@@ -420,7 +509,7 @@ class QueueController extends OCSController
 			'reason_code' => 'source_changed',
 			'retryable' => false,
 			'stage_events' => $this->stageEventsParam(),
-		], $this->workerName());
+		], $claimToken);
 		return new DataResponse([
 			'id' => $id,
 			'status' => Queue::STATUS_SKIPPED,
@@ -434,6 +523,12 @@ class QueueController extends OCSController
 		if (($denied = $this->denyIfNotWorker()) !== null) {
 			return $denied;
 		}
+
+		$job = $this->queue->getById($id);
+		if (($refused = $this->claimGuard($id, $job)) !== null) {
+			return $refused;
+		}
+
 		$error = (string) $this->request->getParam('error', '');
 		$this->logger->warning('ocrflow: job ' . $id . ' failed: ' . $error);
 		$reasonCode = $this->reasonCodeParam();
@@ -448,7 +543,7 @@ class QueueController extends OCSController
 			'retryable' => $reasonCode === null ? null : $decision['retryable'],
 			'error' => $error === '' ? null : $error,
 			'stage_events' => $this->stageEventsParam(),
-		], $this->workerName());
+		], (string) $this->request->getHeader(Application::CLAIM_HEADER));
 		return new DataResponse([
 			'id' => $id,
 			'status' => Queue::STATUS_ERROR,
@@ -525,7 +620,7 @@ class QueueController extends OCSController
 	 */
 	private function workerName(): string
 	{
-		$worker = (string) $this->request->getHeader('X-OcrFlow-Worker');
+		$worker = (string) $this->request->getHeader(Application::WORKER_HEADER);
 		return $worker === '' ? 'worker' : substr($worker, 0, 64);
 	}
 

@@ -9,7 +9,9 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
+use OCA\OcrFlow\Db\Job;
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\AppFramework\Http;
 use OCA\OcrFlow\Service\FileExchange;
@@ -50,7 +52,21 @@ class QueueControllerTest extends TestCase
             $this->createMock(LoggerInterface::class),
             $this->createMock(FileExchange::class),
             new RetryPolicy(),
+            $this->createMock(WorkerRegistry::class),
         );
+    }
+
+    /**
+     * A claimed job row, as the queue hands it back after `claim()`.
+     */
+    private function claimedJob(string $token = 'tok-7'): Job
+    {
+        $job = new Job();
+        $job->setId(7);
+        $job->setPath('/u/files/a.pdf');
+        $job->setStatus(Queue::STATUS_CLAIMED);
+        $job->setClaimToken($token);
+        return $job;
     }
 
     public function testUnconfiguredSecretRejectsEverything(): void
@@ -208,23 +224,26 @@ class QueueControllerTest extends TestCase
     /**
      * The job is closed by the worker that holds the claim, and only that one.
      *
-     * `finish()` takes the caller's name, so a worker whose stale claim was
-     * recovered and re-claimed elsewhere cannot write its late result over the
-     * new claimant's row. The name comes from the same header `claim()` uses;
-     * if these two disagreed, every result would be silently discarded.
+     * `finish()` takes the claim token, so a worker whose stale claim was
+     * recovered and re-claimed elsewhere cannot write its late result over
+     * the new claimant's row. The token comes from the header `claim()` minted
+     * it into; if the worker did not present it, the endpoint answers 409
+     * before `finish()` is ever called.
      */
-    public function testResultPassesTheClaimingWorkerNameToFinish(): void
+    public function testResultPassesTheClaimingWorkersTokenToFinish(): void
     {
         $queue = $this->createMock(Queue::class);
+        $queue->method('getById')->willReturn($this->claimedJob('tok-7'));
         $queue->expects($this->once())
             ->method('finish')
-            ->with(7, $this->isType('array'), 'worker-7')
+            ->with(7, $this->isType('array'), 'tok-7')
             ->willReturn(true);
 
         $request = $this->createMock(IRequest::class);
         $request->method('getHeader')->willReturnCallback(
             static fn (string $name): string => match ($name) {
                 Application::WORKER_SECRET_HEADER => 'the-secret',
+                Application::CLAIM_HEADER => 'tok-7',
                 'X-OcrFlow-Worker' => 'worker-7',
                 default => '',
             },
@@ -246,6 +265,7 @@ class QueueControllerTest extends TestCase
             $this->createMock(LoggerInterface::class),
             $this->createMock(FileExchange::class),
             new RetryPolicy(),
+            $this->createMock(WorkerRegistry::class),
         );
 
         $data = $controller->result(7)->getData();
@@ -255,11 +275,16 @@ class QueueControllerTest extends TestCase
     public function testAWorkerThatLostTheClaimIsToldTheResultWasDiscarded(): void
     {
         $queue = $this->createMock(Queue::class);
+        $queue->method('getById')->willReturn($this->claimedJob('tok-7'));
         $queue->method('finish')->willReturn(false);
 
         $request = $this->createMock(IRequest::class);
         $request->method('getHeader')->willReturnCallback(
-            static fn (string $name): string => $name === Application::WORKER_SECRET_HEADER ? 'the-secret' : '',
+            static fn (string $name): string => match ($name) {
+                Application::WORKER_SECRET_HEADER => 'the-secret',
+                Application::CLAIM_HEADER => 'tok-7',
+                default => '',
+            },
         );
         $request->method('getParam')->willReturnCallback(
             static fn (string $key, mixed $default = null): mixed => $key === 'status' ? 'done' : $default,
@@ -278,9 +303,11 @@ class QueueControllerTest extends TestCase
             $this->createMock(LoggerInterface::class),
             $this->createMock(FileExchange::class),
             new RetryPolicy(),
+            $this->createMock(WorkerRegistry::class),
         );
 
-        // Not an error status: the job simply belongs to someone else now.
+        // Not an error status: the job simply belongs to someone else now
+        // (the token matched the endpoint check but lost the database race).
         $response = $controller->result(7);
         $this->assertSame(Http::STATUS_OK, $response->getStatus());
         $this->assertFalse($response->getData()['applied']);

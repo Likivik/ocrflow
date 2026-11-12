@@ -7,6 +7,28 @@ written.
 
 ### Added
 
+- Unforgeable claims: `queue/next` mints a 64-hex claim token per claim, and
+  `file`, `putFile`, `resultFile`, `result` and `failure` all require it in
+  `X-OcrFlow-Claim`. A missing or wrong token is a logged 409 with the
+  machine code `error_worker_job_reference_stale` in the body — replacing
+  today's silent discard (200, `applied: false`, nothing logged) and closing
+  the hole where any holder of the shared worker secret could read any
+  job's bytes by id. `Queue::finish()` guards on the token in the database
+  as well.
+- Worker registry (`ocrflow_workers`, landed unused in 0.1.5): the worker
+  registers at startup (`POST /api/v1/worker/register`, name from
+  `NC_OCR_WORKER_NAME`, its own version) and heartbeats every
+  `NC_OCR_HEARTBEAT_SECONDS` (default 60). The claim stores the holder's
+  row id (`claimed_by_worker_id`), and stale-claim recovery is now
+  evidence-based: a claim is requeued only when its holder's heartbeat is
+  stale or the holder is unknown — the old blind 900-second window on
+  `claimed_at` could requeue a live worker's 30-minute PDF from under it.
+  The same reconcile tick prunes worker rows whose heartbeat fell behind
+  (~3x the interval); no new scheduler.
+- The worker holds the token in memory for one job only, sends it on every
+  call, treats a 409 as "this claim is gone" (stop, do not retry, do not
+  report a failure — the report would be refused too), and classifies it
+  as `error_worker_job_reference_stale`.
 - The attention worklist: every job row whose reason code carries the
   `needs_fix` verdict (a broken file, missing engine credentials, a rejected
   worker secret — a problem a retry cannot fix) is surfaced to the
@@ -22,6 +44,17 @@ written.
   button and a confirmed Retry-all. The endpoint retry and
   `occ ocrflow:requeue <path>` share one retry implementation and log one
   line per retried file.
+
+### Changed
+
+- 0.1.6 (migration `Version001007...`) drops `ocrflow_jobs.claimed_by` —
+  the worker NAME a claim used to be guarded on. It was never an identity:
+  it came from a header, defaulted to `worker`, and was truncated to 64
+  chars. Its last writer was removed in this release; the column had been
+  kept since the 0.1.5 migration so this drop is deployable in one step.
+
+### Added
+
 - Bounded retention for the job tables: every 5 minutes the reconciler's
   sweep deletes terminal job rows (`done`, `skipped`, `error`) older than
   `jobs_retention_days` (default 90, `0` disables, garbage falls back to the

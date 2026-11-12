@@ -343,7 +343,7 @@ class QueuePermanentFailureTest extends TestCase
 	{
 		$this->jobs[] = [
 			'id' => 9, 'path' => '/alice/files/scan.pdf', 'file_id' => 7, 'status' => 'claimed',
-			'etag' => 'e1', 'size' => 123, 'engine' => 'tesseract', 'claimed_by' => 'w', 'pages' => null,
+			'etag' => 'e1', 'size' => 123, 'engine' => 'tesseract', 'claim_token' => 'w', 'pages' => null,
 			'chars' => null, 'error' => null, 'claimed_at' => 1, 'reason' => null, 'retryable' => null,
 			'finished_at' => null, 'reason_code' => null, 'attempts' => 0, 'created_at' => 1,
 		];

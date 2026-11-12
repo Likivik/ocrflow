@@ -24,7 +24,8 @@ use OCP\AppFramework\Db\Entity;
  * @method ?string getReasonCode()
  * @method ?bool getRetryable()
  * @method ?string getEngine()
- * @method ?string getClaimedBy()
+ * @method ?string getClaimToken()
+ * @method ?int getClaimedByWorkerId()
  * @method int getAttempts()
  * @method ?int getSize()
  * @method ?string getEtag()
@@ -44,7 +45,8 @@ class Job extends Entity
 	protected ?string $reasonCode = null;
 	protected ?bool $retryable = null;
 	protected ?string $engine = null;
-	protected ?string $claimedBy = null;
+	protected ?string $claimToken = null;
+	protected ?int $claimedByWorkerId = null;
 	protected int $attempts = 0;
 	protected ?int $size = null;
 	protected ?string $etag = null;
@@ -65,6 +67,7 @@ class Job extends Entity
 		$this->addType('createdAt', 'integer');
 		$this->addType('claimedAt', 'integer');
 		$this->addType('finishedAt', 'integer');
+		$this->addType('claimedByWorkerId', 'integer');
 	}
 
 	/**
@@ -107,7 +110,8 @@ class Job extends Entity
 		$job->setReasonCode(($row['reason_code'] ?? null) === null ? null : (string) $row['reason_code']);
 		$job->setRetryable(self::toOptionalBool($row['retryable'] ?? null));
 		$job->setEngine($row['engine'] === null ? null : (string) $row['engine']);
-		$job->setClaimedBy($row['claimed_by'] === null ? null : (string) $row['claimed_by']);
+		$job->setClaimToken(isset($row['claim_token']) && $row['claim_token'] !== null ? (string) $row['claim_token'] : null);
+		$job->setClaimedByWorkerId(isset($row['claimed_by_worker_id']) && $row['claimed_by_worker_id'] !== null ? (int) $row['claimed_by_worker_id'] : null);
 		$job->setAttempts((int) ($row['attempts'] ?? 0));
 		$job->setSize($row['size'] === null ? null : (int) $row['size']);
 		$job->setEtag($row['etag'] === null ? null : (string) $row['etag']);
@@ -137,6 +141,7 @@ class Job extends Entity
 			'status' => $this->getStatus(),
 			'reason' => $this->getReason(),
 			'engine' => $this->getEngine(),
+			'claim_token' => $this->getClaimToken(),
 			'attempts' => $this->getAttempts(),
 			'size' => $this->getSize(),
 			'etag' => $this->getEtag(),

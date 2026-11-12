@@ -290,11 +290,33 @@ ok "upload produced ${jobs} job(s)"
 # visible to a byte-level fetch.
 echo "== the worker can fetch a job's bytes from the app"
 jobfile=$(sql "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
+code=$(claim)
+[ "$code" = "200" ] || fail "claim on a non-empty queue should be 200, got $code"
+ok "claim -> 200 with a job"
+
+# The claim response must carry the token: it is how every later call on
+# this job proves it is the claim holder. An earlier build guarded nothing —
+# `claimed_by` was a name from a header, so any secret holder could finish
+# any job by sending the same name.
+grep -q '"claim_token"' /tmp/ocrflow-claim-body || fail "claim response has no claim_token field"
+token=$(grep -oE '"claim_token":"[^"]+"' /tmp/ocrflow-claim-body | cut -d'"' -f4)
+[ -n "$token" ] || fail "claim_token could not be extracted from the claim response"
+ok "claim response carries a claim token (${#token} chars)"
+
+# Without the token, the byte endpoint refuses: the shared secret gates the
+# worker plane, the token scopes WHAT a claim holder may touch. Until 0.1.6
+# any secret holder could read any job's bytes by id.
 code=$(curl -s -o /tmp/ocrflow-bytes -w '%{http_code}' -H 'OCS-APIRequest: true' -H "X-OcrFlow-Secret: ${secret}" \
   "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobfile}/file")
-[ "$code" = "200" ] || fail "file fetch should be 200, got $code"
+[ "$code" = "409" ] || fail "file fetch without the claim token should be 409, got $code"
+ok "file fetch without the token -> 409"
+
+code=$(curl -s -o /tmp/ocrflow-bytes -w '%{http_code}' -H 'OCS-APIRequest: true' -H "X-OcrFlow-Secret: ${secret}" \
+  -H "X-OcrFlow-Claim: ${token}" \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobfile}/file")
+[ "$code" = "200" ] || fail "file fetch with the claim token should be 200, got $code"
 [ -s /tmp/ocrflow-bytes ] || fail "file fetch returned an empty body"
-ok "job bytes served by the app ($(wc -c < /tmp/ocrflow-bytes) bytes)"
+ok "job bytes served by the app to the claim holder ($(wc -c < /tmp/ocrflow-bytes) bytes)"
 
 echo "== the instance logged no error while handling our events"
 log_errors=$($ENGINE exec "$NAME" sh -c 'grep -i ocrflow /var/www/html/data/nextcloud.log 2>/dev/null | grep -E "\"level\":(3|4)"' 2>/dev/null | tail -3 || true)
@@ -315,10 +337,6 @@ if [ -n "$log_errors" ]; then
 fi
 ok "no level-3+ log lines mentioning ocrflow"
 
-code=$(claim)
-[ "$code" = "200" ] || fail "claim on a non-empty queue should be 200, got $code"
-ok "claim -> 200 with a job"
-
 # The claim payload must carry the engine: an earlier build dropped it, and the
 # worker then used its own env — on the api transport that is unset, so every
 # job died with "no engine configured" no matter what the admin chose.
@@ -333,19 +351,21 @@ grep -q '"engine"' /tmp/ocrflow-claim-body || fail "claim response has no engine
 grep -q 'tesseract' /tmp/ocrflow-claim-body || fail "claim response does not carry the engine"
 ok "claim response carries engine: tesseract"
 
-# Only the worker holding the claim may close a job. A stale claim is requeued
-# after the recovery window and can be re-claimed while the first worker is
-# still on a huge PDF; its late result must be discarded, not written over the
-# new claimant's row (that row is what the UI and the billing read).
+# Only the worker holding the claim may close a job. A stale claim is
+# requeued (its worker stopped heartbeating) and can be re-claimed while
+# the first worker is still on a huge PDF; its late result must be refused
+# with a 409 naming error_worker_job_reference_stale, and logged — until
+# 0.1.6 it was discarded silently (200, applied=false, no log line).
 echo "== only the claim holder may finish a job"
 jobid=$(sql "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
-  -H "X-OcrFlow-Secret: ${secret}" -H 'X-OcrFlow-Worker: someone-else' \
+code=$(curl -s -o /tmp/ocrflow-stale-body -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
+  -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: definitely-not-the-token" \
   -d 'status=done' "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result")
-[ "$code" = "200" ] || fail "a non-claimant's result should still be 200, got $code"
+[ "$code" = "409" ] || fail "a wrong token's result should be 409, got $code"
+grep -q 'error_worker_job_reference_stale' /tmp/ocrflow-stale-body || fail "the 409 body does not name the reason code"
 status=$(sql "SELECT status FROM ${JOBS} WHERE id=${jobid}")
-[ "$status" = "claimed" ] || fail "a non-claimant's result changed the row to ${status}"
-ok "a non-claimant's result is discarded"
+[ "$status" = "claimed" ] || fail "a wrong token's result changed the row to ${status}"
+ok "a wrong token's result is refused with 409 and the row is untouched"
 
 echo "== the queue does not hand the same version out twice"
 code=$(claim)
@@ -353,9 +373,9 @@ code=$(claim)
 ok "second claim -> 204"
 
 echo "== a reported failure is recorded, not lost"
-id=$(sql "SELECT id FROM ${JOBS} LIMIT 1")
+id=$(sql "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
-  -H "X-OcrFlow-Secret: ${secret}" -d 'error=integration-test' \
+  -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" -d 'error=integration-test' \
   "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${id}/failure")
 [ "$code" = "200" ] || fail "failure report should be 200, got $code"
 status=$(sql "SELECT status FROM ${JOBS} WHERE id=${id}")
@@ -364,8 +384,11 @@ ok "failure recorded as ${status}"
 
 echo "== a dead worker's claim is taken back, and the attempt is counted"
 id=$(sql "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
-stale=$(( $(date +%s) - 1000 ))   # older than Application::STALE_CLAIM_SECONDS (900)
-sql "UPDATE ${JOBS} SET status='claimed', claimed_at=${stale}, attempts=0 WHERE id=${id}" >/dev/null
+# A claim with no registered holder (the curl claim sent no worker id) is
+# recovered by the first reconcile tick: the holder is unknown, therefore
+# presumed dead. Recovery is evidence-based — the holder's heartbeat — not
+# a clock window on claimed_at.
+sql "UPDATE ${JOBS} SET status='claimed', claimed_at=$(date +%s), attempts=0 WHERE id=${id}" >/dev/null
 # Reset the job's last_run so Nextcloud considers it due; matching on the class
 # name needs LIKE, because every backslash in a PHP namespace is an escape in
 # two languages at once and the first attempt silently matched nothing.
