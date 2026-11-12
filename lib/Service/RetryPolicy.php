@@ -328,6 +328,67 @@ final class RetryPolicy
 		'error_source_file_zero_bytes',
 	];
 
+	/**
+	 * The codes (new names only) whose verdict is $verdict.
+	 *
+	 * @return list<string>
+	 */
+	public function codesForVerdict(string $verdict): array
+	{
+		$codes = [];
+		foreach (self::VOCAB as $code => $entry) {
+			if ($entry['verdict'] === $verdict) {
+				$codes[] = $code;
+			}
+		}
+		return $codes;
+	}
+
+	/**
+	 * Every spelling that reads as one of these codes: the code itself plus
+	 * the pre-0.1.5 names that resolve to it. SQL sets are flat lists of
+	 * strings, so both eras must be in one list — old rows keep their old
+	 * names by design.
+	 *
+	 * @param list<string> $codes
+	 * @return list<string>
+	 */
+	public function spellingsFor(array $codes): array
+	{
+		$out = $codes;
+		foreach (self::ALIASES as $old => $new) {
+			if (in_array($new, $codes, true)) {
+				$out[] = $old;
+			}
+		}
+		return array_values(array_unique($out));
+	}
+
+	/**
+	 * Every spelling (current name and pre-0.1.5 aliases) of every code whose
+	 * verdict is $verdict. The retention sweep and the attention worklist
+	 * both need this: one asks "which rows must survive", the other "which
+	 * rows are the operator's queue".
+	 *
+	 * @return list<string>
+	 */
+	public function spellingsForVerdict(string $verdict): array
+	{
+		return $this->spellingsFor($this->codesForVerdict($verdict));
+	}
+
+	/**
+	 * Every spelling of ONE code: the code itself plus its pre-0.1.5
+	 * aliases. The worklist filter matches stored spellings, so filtering
+	 * by the new name must also find the rows stored under the old one.
+	 *
+	 * @return list<string>
+	 */
+	public function spellingsOf(string $code): array
+	{
+		return $this->spellingsFor([$this->canonical($code)]);
+	}
+
 	public function isKnown(?string $code): bool
 	{
 		return $code !== null

@@ -7,6 +7,21 @@ written.
 
 ### Added
 
+- The attention worklist: every job row whose reason code carries the
+  `needs_fix` verdict (a broken file, missing engine credentials, a rejected
+  worker secret — a problem a retry cannot fix) is surfaced to the
+  administrator instead of dying in `nextcloud.log`. Retention no longer
+  purges these rows — the row IS the work — while `wait`/`nothing_to_do`
+  rows still age out and `ocrflow_files` is still never touched. Three
+  front doors over one data source: `GET /apps/ocrflow/api/v1/attention`
+  (admin only, paginated, filterable by code, error prose truncated to
+  500 chars), `POST /apps/ocrflow/api/v1/attention/retry` (`{id}` or
+  `{all: true}`, CSRF-checked, `all` capped by `attention_retry_cap`
+  config, default 500), `occ ocrflow:errors`, plus an admin panel section
+  with a count badge, per-row label/fix hint/error text/attempts, a Retry
+  button and a confirmed Retry-all. The endpoint retry and
+  `occ ocrflow:requeue <path>` share one retry implementation and log one
+  line per retried file.
 - Bounded retention for the job tables: every 5 minutes the reconciler's
   sweep deletes terminal job rows (`done`, `skipped`, `error`) older than
   `jobs_retention_days` (default 90, `0` disables, garbage falls back to the

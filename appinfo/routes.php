@@ -33,5 +33,14 @@ return [
         ['name' => 'settings#update', 'url' => '/api/v1/settings', 'verb' => 'PUT'],
         ['name' => 'me#index', 'url' => '/api/v1/me', 'verb' => 'GET'],
         ['name' => 'me#update', 'url' => '/api/v1/me', 'verb' => 'PUT'],
+
+        // --- attention: the admin's needs_fix worklist (see RetryPolicy) ---
+        // Rows whose reason code has the needs_fix verdict — the operator's
+        // queue. Admin only; the paths and error prose are other people's
+        // documents.
+        ['name' => 'attention#index', 'url' => '/api/v1/attention', 'verb' => 'GET'],
+        // One implementation, two front doors: this and occ ocrflow:requeue
+        // share the Attention service's retry. POST, so CSRF is checked.
+        ['name' => 'attention#retry', 'url' => '/api/v1/attention/retry', 'verb' => 'POST'],
     ],
 ];
