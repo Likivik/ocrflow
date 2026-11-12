@@ -105,6 +105,72 @@ class QueueControllerTest extends TestCase
         $this->assertSame(Http::STATUS_NO_CONTENT, $response->getStatus());
     }
 
+    /**
+     * The worker may only report codes from the closed vocabulary. Anything
+     * else is recorded under the canonical name for that fact --
+     * `error_worker_sent_unknown_code`, whose needs_fix verdict decides the
+     * row -- so the job row cannot inherit the frozen retry answer of the
+     * legacy `unknown` spelling. A second attempt cannot fix a version skew.
+     */
+    public function testFailureWithAnUnrecognizedReasonCodeStoresTheCanonicalCodeAndDoesNotRetry(): void
+    {
+        $queue = $this->createMock(Queue::class);
+        $queue->method('getById')->willReturn($this->claimedJob('tok-7'));
+        $captured = null;
+        $queue->expects($this->once())
+            ->method('finish')
+            ->with(7, $this->callback(function (array $payload) use (&$captured): bool {
+                $captured = $payload;
+                return true;
+            }), 'tok-7')
+            ->willReturn(true);
+
+        $request = $this->createMock(IRequest::class);
+        $request->method('getHeader')->willReturnCallback(
+            static fn (string $name): string => match ($name) {
+                Application::WORKER_SECRET_HEADER => 'the-secret',
+                Application::CLAIM_HEADER => 'tok-7',
+                default => '',
+            },
+        );
+        $request->method('getParam')->willReturnCallback(
+            static fn (string $key, mixed $default = null): mixed => match ($key) {
+                'reason_code' => 'made_up_engine_fault',
+                'error' => 'engine exploded',
+                default => $default,
+            },
+        );
+
+        $config = $this->createMock(IConfig::class);
+        $config->method('getAppValue')
+            ->with(Application::APP_ID, 'worker_secret', '')
+            ->willReturn('the-secret');
+
+        $controller = new QueueController(
+            Application::APP_ID,
+            $request,
+            $queue,
+            $config,
+            $this->createMock(LoggerInterface::class),
+            $this->createMock(FileExchange::class),
+            new RetryPolicy(),
+            $this->createMock(WorkerRegistry::class),
+        );
+
+        $data = $controller->failure(7)->getData();
+        $this->assertTrue($data['applied']);
+        $this->assertSame(Queue::STATUS_ERROR, $captured['status']);
+        $this->assertSame(
+            'error_worker_sent_unknown_code',
+            $captured['reason_code'],
+            'a freshly-unknown code must be recorded under its canonical name, not the legacy unknown spelling',
+        );
+        $this->assertFalse(
+            $captured['retryable'],
+            'a version skew cannot be fixed by a second attempt: the verdict decides, not the frozen legacy answer',
+        );
+    }
+
     public function testFailureEndpointRejectsAWrongSecret(): void
     {
         $response = $this->controller('s3cret', 'nope')->failure(7);

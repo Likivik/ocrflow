@@ -553,8 +553,12 @@ class QueueController extends OCSController
 
 	/**
 	 * The worker may only report codes from the closed vocabulary. Anything
-	 * else is recorded as `unknown` and logged, so the table cannot fill with
-	 * one-off strings that no policy knows how to treat.
+	 * else is recorded under the canonical name for that fact --
+	 * `error_worker_sent_unknown_code` -- so the row's needs_fix verdict
+	 * decides it. The legacy `unknown` spelling is a READ name for old rows:
+	 * writing it here would hand the row the frozen legacy retry answer
+	 * (`LEGACY_RETRYABLE['unknown'] === true`) and a version skew would be
+	 * retried, which a second attempt cannot fix.
 	 */
 	private function reasonCodeParam(): ?string
 	{
@@ -563,8 +567,8 @@ class QueueController extends OCSController
 			return null;
 		}
 		if (!$this->retryPolicy->isKnown($code)) {
-			$this->logger->warning('ocrflow: worker reported unknown reason_code "' . $code . '"; recording unknown');
-			return RetryPolicy::CODE_UNKNOWN;
+			$this->logger->warning('ocrflow: worker reported unknown reason_code "' . $code . '"; recording ' . RetryPolicy::CODE_WORKER_SENT_UNKNOWN);
+			return RetryPolicy::CODE_WORKER_SENT_UNKNOWN;
 		}
 		return $code;
 	}

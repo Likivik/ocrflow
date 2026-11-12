@@ -13,10 +13,12 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
-    paths:
-      - 'docker/**'
-      - 'worker/**'
-      - '.github/workflows/image.yml'
+    # The branch ruleset requires the `build (google, 1)` and
+    # `build (local, 0)` checks on EVERY pull request, so the workflow
+    # must run on every PR: a paths filter here leaves those checks
+    # unreported and the PR permanently blocked.
+    # (workflow_dispatch runs on the head SHA do not satisfy required
+    # status checks -- only pull_request runs do.)
   workflow_dispatch:
 
 permissions:

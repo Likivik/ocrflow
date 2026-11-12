@@ -37,6 +37,14 @@ final class RetryPolicy
 {
 	public const CODE_UNKNOWN = 'unknown';
 
+	/**
+	 * The canonical name for the fact that the worker reported a code this
+	 * app does not know. The write path records THIS name (never the legacy
+	 * `unknown` spelling), so the row's verdict -- needs_fix, not a retry --
+	 * decides its fate: a version skew cannot be fixed by a second attempt.
+	 */
+	public const CODE_WORKER_SENT_UNKNOWN = 'error_worker_sent_unknown_code';
+
 	public const VERDICT_WORK = 'work';
 	public const VERDICT_NOTHING_TO_DO = 'nothing_to_do';
 	public const VERDICT_REDO = 'redo';
