@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Db;
 
+use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
 
 /**
@@ -40,8 +41,8 @@ class WorkerRegistry
 			->values([
 				'name' => $qb->createNamedParameter($name),
 				'version' => $qb->createNamedParameter($version),
-				'started_at' => $qb->createNamedParameter($now, \OCP\DB\Types::DATETIME),
-				'last_seen_at' => $qb->createNamedParameter($now, \OCP\DB\Types::DATETIME),
+				'started_at' => $qb->createNamedParameter($now, IQueryBuilder::PARAM_DATETIME_MUTABLE),
+				'last_seen_at' => $qb->createNamedParameter($now, IQueryBuilder::PARAM_DATETIME_MUTABLE),
 			]);
 		$qb->executeStatement();
 		return (int) $qb->getLastInsertId();
@@ -56,7 +57,7 @@ class WorkerRegistry
 	{
 		$qb = $this->db->getQueryBuilder();
 		$affected = $qb->update('ocrflow_workers')
-			->set('last_seen_at', $qb->createNamedParameter(new \DateTime(), \OCP\DB\Types::DATETIME))
+			->set('last_seen_at', $qb->createNamedParameter(new \DateTime(), IQueryBuilder::PARAM_DATETIME_MUTABLE))
 			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, \OCP\DB\Types::INTEGER)))
 			->executeStatement();
 		return $affected === 1;
@@ -70,7 +71,7 @@ class WorkerRegistry
 		$cutoff = new \DateTime('@' . (time() - $olderThanSeconds));
 		$qb = $this->db->getQueryBuilder();
 		return $qb->delete('ocrflow_workers')
-			->where($qb->expr()->lt('last_seen_at', $qb->createNamedParameter($cutoff, \OCP\DB\Types::DATETIME)))
+			->where($qb->expr()->lt('last_seen_at', $qb->createNamedParameter($cutoff, IQueryBuilder::PARAM_DATETIME_MUTABLE)))
 			->executeStatement();
 	}
 }
