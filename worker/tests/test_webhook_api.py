@@ -833,7 +833,7 @@ def test_needs_ocr_decision_force_true_returns_true_none(monkeypatch, tmp_path):
         )
 
     with patch.object(ws, "classify_pdf", side_effect=would_classify_skip):
-        needs_ocr, skip_reason = ws._needs_ocr_decision(pdf, force=True)
+        needs_ocr, skip_reason, _origin = ws._needs_ocr_decision(pdf, force=True)
 
     assert needs_ocr is True, "force=True must always force OCR"
     assert skip_reason is None, (

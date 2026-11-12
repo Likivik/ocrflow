@@ -79,7 +79,7 @@ def test_a_born_digital_skip_reports_its_code():
 
     payload = session.calls[1]["data"]
     assert payload["reason"] == "born_digital_text_based"
-    assert payload["reason_code"] == "born_digital_text_based"
+    assert payload["reason_code"] == "skip_text_native"  # read old, write new
 
 
 def test_a_mobilenet_skip_reports_its_code():
@@ -95,7 +95,7 @@ def test_a_mobilenet_skip_reports_its_code():
     assert run_once(c, _skip("mobilenet")) is True
 
     payload = session.calls[1]["data"]
-    assert payload["reason_code"] == "mobilenet"
+    assert payload["reason_code"] == "skip_classifier_says_photo"
 
 
 def test_a_stamped_good_by_us_skip_reports_its_code():
@@ -111,7 +111,7 @@ def test_a_stamped_good_by_us_skip_reports_its_code():
     assert run_once(c, _skip("stamped_good_by_us")) is True
 
     payload = session.calls[1]["data"]
-    assert payload["reason_code"] == "stamped_good_by_us"
+    assert payload["reason_code"] == "skip_ocred_by_ocrflow"
 
 
 def test_a_skip_carries_the_code_on_the_stage_event_too():
@@ -130,7 +130,7 @@ def test_a_skip_carries_the_code_on_the_stage_event_too():
     payload = session.calls[1]["data"]
     events = json.loads(payload["stage_events"])
     codes = [e["reason_code"] for e in events]
-    assert "born_digital_text_based" in codes
+    assert "skip_text_native" in codes
 
 
 def test_an_ordinary_skip_still_reports_its_reason():

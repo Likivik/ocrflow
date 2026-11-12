@@ -32,6 +32,11 @@ final class ClassifierVerdictTest extends TestCase
 		'born_digital_text_based',
 		'mobilenet',
 		'stamped_good_by_us',
+		// The new spellings of the same verdicts (0.1.5 vocabulary).
+		'skip_text_native',
+		'skip_classifier_says_photo',
+		'skip_ocred_by_ocrflow',
+		'skip_ocred_by_suspected_foreign',
 	];
 
 	public function testTheThreeClassifierVerdictsAreKnown(): void
@@ -95,9 +100,14 @@ final class ClassifierVerdictTest extends TestCase
 	public function testAVerdictInProseMapsToItsCode(): void
 	{
 		$policy = new RetryPolicy();
-		foreach (self::VERDICTS as $code) {
+		// New names pass through as themselves.
+		foreach (['skip_text_native', 'skip_classifier_says_photo', 'skip_ocred_by_ocrflow', 'skip_ocred_by_suspected_foreign'] as $code) {
 			$this->assertSame($code, $policy->verdictCode($code));
 		}
+		// Old prose-era names land on the same new codes (read old, write new).
+		$this->assertSame('skip_text_native', $policy->verdictCode('born_digital_text_based'));
+		$this->assertSame('skip_classifier_says_photo', $policy->verdictCode('mobilenet'));
+		$this->assertSame('skip_ocred_by_ocrflow', $policy->verdictCode('stamped_good_by_us'));
 	}
 
 	public function testTextThatIsNotAVerdictMapsToNoCode(): void
@@ -152,7 +162,7 @@ final class ClassifierVerdictTest extends TestCase
 		$controller->result(7);
 
 		$this->assertIsArray($captured);
-		$this->assertSame('born_digital_text_based', $captured['reason_code']);
+		$this->assertSame('skip_text_native', $captured['reason_code']);
 		$this->assertFalse($captured['retryable'], 'a verdict is terminal');
 	}
 }

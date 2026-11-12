@@ -164,7 +164,7 @@ def test_fingerprint_mismatch_bypasses_skip_and_warns(ws, monkeypatch, tmp_path,
     )
 
     with caplog.at_level(logging.WARNING, logger="nc_ocr_flow"):
-        needs_ocr, skip_reason = ws._needs_ocr_decision(
+        needs_ocr, skip_reason, _origin = ws._needs_ocr_decision(
             pdf,
             force=False,
             nc_path=nc_path,
@@ -234,7 +234,7 @@ def test_fingerprint_match_skips_as_today(ws, monkeypatch, tmp_path):
     ws.jobstore.file_bump_foreign_rewrites(nc_path)
     assert int(ws.jobstore.file_get(nc_path)["foreign_rewrites"]) == 1
 
-    needs_ocr, skip_reason = ws._needs_ocr_decision(
+    needs_ocr, skip_reason, _origin = ws._needs_ocr_decision(
         pdf,
         force=False,
         nc_path=nc_path,
@@ -289,7 +289,7 @@ def test_null_stored_fingerprint_skips_as_today(ws, monkeypatch, tmp_path, caplo
     monkeypatch.setattr(ws, "_propfind_size_etag", tracked_propfind)
 
     with caplog.at_level(logging.DEBUG, logger="nc_ocr_flow"):
-        needs_ocr, skip_reason = ws._needs_ocr_decision(
+        needs_ocr, skip_reason, _origin = ws._needs_ocr_decision(
             pdf,
             force=False,
             nc_path=nc_path,
@@ -358,7 +358,7 @@ def test_consecutive_foreign_rewrites_bound_to_limit(ws, monkeypatch, tmp_path, 
         ]
 
     # Iterations 1 and 2: mismatch under the limit → force OCR.
-    for i, (needs, reason) in enumerate(decisions[: ws.FOREIGN_REWRITE_LIMIT - 1]):
+    for i, (needs, reason, _origin) in enumerate(decisions[: ws.FOREIGN_REWRITE_LIMIT - 1]):
         assert needs is True, (
             f"mismatch #{i + 1} (under limit) must force OCR;"
             f" got needs={needs!r}, reason={reason!r}"
@@ -367,7 +367,7 @@ def test_consecutive_foreign_rewrites_bound_to_limit(ws, monkeypatch, tmp_path, 
             f"mismatch #{i + 1} (under limit) must NOT carry a skip reason; got {reason!r}"
         )
     # Last iteration: cap → give up.
-    needs, reason = decisions[-1]
+    needs, reason, _origin = decisions[-1]
     assert needs is False, (
         f"mismatch #{ws.FOREIGN_REWRITE_LIMIT} (at limit) must skip;"
         f" got needs={needs!r}, reason={reason!r}"
@@ -528,7 +528,7 @@ def test_fingerprint_guard_disabled_reverts_to_silent_skip(ws, monkeypatch, tmp_
     )
 
     with caplog.at_level(logging.WARNING, logger="nc_ocr_flow"):
-        needs_ocr, skip_reason = ws._needs_ocr_decision(
+        needs_ocr, skip_reason, _origin = ws._needs_ocr_decision(
             pdf,
             force=False,
             nc_path=nc_path,
