@@ -8,8 +8,10 @@ declare(strict_types=1);
 /** @var \OCP\IL10N $l */
 
 ?>
-<div id="ocrflow-panel">
+<div class="section">
+	<div id="ocrflow-panel">
 	<p class="ocrflow-panel__noscript">
 		<?php p($l->t('Enable JavaScript to see the OCR queue.')); ?>
-	</p>
+		</p>
+	</div>
 </div>
