@@ -37,7 +37,6 @@ class Personal implements ISettings
 	public function getForm(): TemplateResponse
 	{
 		Util::addScript(Application::APP_ID, 'ocrflow-panel');
-		Util::addStyle(Application::APP_ID, 'ocrflow-panel');
 
 		// Blank: this is a section inside the Settings page, not a page of its
 		// own. RENDER_AS_USER here would nest a whole layout inside a section.

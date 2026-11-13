@@ -29,21 +29,39 @@ class BundleLocationTest extends TestCase
 		);
 	}
 
-	public function testThePanelStylesheetIsWhereAddStyleLooksForIt(): void
+	public function testNoStylesheetFileIsShipped(): void
 	{
-		$this->assertFileExists(
+		$this->assertFileDoesNotExist(
 			self::APP_ROOT . '/css/ocrflow-panel.css',
-			'addStyle("ocrflow","ocrflow-panel") resolves to /apps/ocrflow/css/ocrflow-panel.css — '
-			. 'a stylesheet built into js/ is never requested',
+			'style-loader inlines the CSS into the bundle; a standalone stylesheet is a leftover '
+			. 'from the Vite build and is never requested while addStyle is not called',
 		);
 	}
 
-	public function testTheStylesheetIsNotLeftBehindInTheScriptDirectory(): void
+	public function testTheStylesAreInTheBundle(): void
 	{
-		$this->assertFileDoesNotExist(
-			self::APP_ROOT . '/js/ocrflow-panel.css',
-			'a css file in js/ is dead weight that hides the fact that css/ is empty',
+		$js = (string) file_get_contents(self::APP_ROOT . '/js/ocrflow-panel.js');
+
+		$this->assertStringContainsString(
+			'ocrflow-panel__counts',
+			$js,
+			'the panel markup classes must appear in the bundle CSS, otherwise the stylesheet was '
+			. 'dropped silently and the panel renders unstyled',
 		);
+	}
+
+	public function testTheSettingsPagesDoNotRegisterAStylesheet(): void
+	{
+		foreach (['lib/Settings/Admin.php', 'lib/Settings/Personal.php'] as $file) {
+			$php = (string) file_get_contents(self::APP_ROOT . '/' . $file);
+
+			$this->assertStringNotContainsString(
+				'addStyle',
+				$php,
+				$file . ' must not call Util::addStyle: the official webpack build emits no .css '
+				. 'file, so the request would 404 while every other check kept passing',
+			);
+		}
 	}
 
 	public function testTheShippedBundleHasNoBareProcessReference(): void
