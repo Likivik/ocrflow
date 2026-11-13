@@ -153,10 +153,34 @@ class QueueController extends OCSController
 			}
 		}
 
+		// Verdict at birth: the bytes on disk were just written by us, so
+		// the ledger records the produced file (same file_id, NEW etag) as
+		// settled — status `skipped`, reason `skip_ocred_by_ocrflow`, engine
+		// and engine_version as facts, no bar comparison here. Without
+		// this, the next scan of the file re-queues work we just paid for
+		// (the 8135 loop). A ledger failure must not fail the write-back
+		// the user already has: log, continue.
+		$fileId = $job->getFileId();
+		if ($fileId !== null) {
+			try {
+				$this->queue->settleProduced(
+					$fileId,
+					(string) $job->getPath(),
+					$written['size'],
+					$written['etag'],
+					$this->nullableString('engine') ?? $job->getEngine(),
+					$this->nullableString('engine_version'),
+				);
+			} catch (\Throwable $e) {
+				$this->logger->warning('ocrflow: job ' . $id . ' wrote back but the ledger settle failed: ' . $e->getMessage());
+			}
+		}
+
 		return new DataResponse([
 			'id' => $id,
 			'size' => $written['size'],
 			'etag' => $written['etag'],
+			'file_id' => $written['file_id'],
 		]);
 	}
 
@@ -234,11 +258,32 @@ class QueueController extends OCSController
 			}
 		}
 
+		// Verdict at birth, image branch: the produced PDF is a file this
+		// app just wrote, so its identity (file_id + etag) goes to the
+		// ledger as settled before anyone can ask about it — the upload
+		// listener and the next scan both find the answer already there,
+		// instead of queueing the file we just produced (the 8135 loop).
+		// Same failure rule as `putFile`: the write-back already succeeded,
+		// so a ledger failure is logged, not thrown at the worker.
+		try {
+			$this->queue->settleProduced(
+				(int) $stored['file_id'],
+				(string) $stored['path'],
+				$stored['size'],
+				$stored['etag'],
+				$this->nullableString('engine') ?? $job->getEngine(),
+				$this->nullableString('engine_version'),
+			);
+		} catch (\Throwable $e) {
+			$this->logger->warning('ocrflow: job ' . $id . ' stored a result file but the ledger settle failed: ' . $e->getMessage());
+		}
+
 		return new DataResponse([
 			'id' => $id,
 			'name' => $stored['name'],
 			'path' => $stored['path'],
 			'file_id' => $stored['file_id'],
+			'etag' => $stored['etag'],
 		]);
 	}
 

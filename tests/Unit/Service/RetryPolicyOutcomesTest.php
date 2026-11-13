@@ -56,6 +56,7 @@ class RetryPolicyOutcomesTest extends TestCase
 			'error_result_write_failed',
 			'error_engine_output_unreadable',
 			'error_file_broken',
+			'error_queued_twice_for_same_bytes',
 		],
 		'drop' => ['error_worker_job_reference_stale'],
 	];
@@ -287,5 +288,22 @@ class RetryPolicyOutcomesTest extends TestCase
 		$this->assertSame('skip_text_native', $this->policy->verdictCode('skip_text_native'));
 		$this->assertNull($this->policy->verdictCode('no_text_detected'));
 		$this->assertNull($this->policy->verdictCode(null));
+	}
+
+	/**
+	 * [unit] The loop breaker's code: verdict, one sentence, one fix, one
+	 * actor. Catches a code added without the prose the attention worklist
+	 * shows the operator — a needs_fix nobody can read is a file nobody
+	 * can unstick.
+	 */
+	public function testTheQueuedTwiceCodeCarriesTheFullNeedsFixEntry(): void
+	{
+		$entry = $this->policy->entry('error_queued_twice_for_same_bytes');
+
+		$this->assertNotNull($entry);
+		$this->assertSame('needs_fix', $entry['verdict']);
+		$this->assertNotSame('', trim($entry['label']), 'one sentence a human can read');
+		$this->assertStringContainsStringIgnoringCase('requeue', $entry['fix'], 'the fix must name the way out');
+		$this->assertNotSame('', trim((string) $entry['actor']), 'an actor is expected to do it');
 	}
 }

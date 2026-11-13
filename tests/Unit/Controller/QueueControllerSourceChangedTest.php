@@ -127,7 +127,7 @@ class QueueControllerSourceChangedTest extends TestCase
         $files->expects($this->once())
             ->method('createBeside')
             ->with('likivik', 'Work/scan.pdf', 'scan.pdf', $this->anything())
-            ->willReturn(['name' => 'scan.pdf', 'path' => self::JOB_PATH, 'file_id' => 42]);
+            ->willReturn(['name' => 'scan.pdf', 'path' => self::JOB_PATH, 'file_id' => 42, 'etag' => 'new-etag', 'size' => 10]);
 
         $finish = [];
         $response = $this->controller(['name' => 'scan.pdf'], 'old-etag', 'old-etag', $files, $finish)->resultFile(7);
@@ -144,7 +144,7 @@ class QueueControllerSourceChangedTest extends TestCase
         $files->method('currentEtag')->willReturn('some-etag');
         $files->expects($this->once())
             ->method('createBeside')
-            ->willReturn(['name' => 'scan.pdf', 'path' => self::JOB_PATH, 'file_id' => 42]);
+            ->willReturn(['name' => 'scan.pdf', 'path' => self::JOB_PATH, 'file_id' => 42, 'etag' => 'new-etag', 'size' => 10]);
 
         $response = $this->controller(['name' => 'scan.pdf'], null, 'some-etag', $files)->resultFile(7);
 
@@ -159,7 +159,7 @@ class QueueControllerSourceChangedTest extends TestCase
         $files->method('currentEtag')->willReturn(null);
         $files->expects($this->once())
             ->method('createBeside')
-            ->willReturn(['name' => 'scan.pdf', 'path' => self::JOB_PATH, 'file_id' => 42]);
+            ->willReturn(['name' => 'scan.pdf', 'path' => self::JOB_PATH, 'file_id' => 42, 'etag' => 'new-etag', 'size' => 10]);
 
         $response = $this->controller(['name' => 'scan.pdf'], 'old-etag', null, $files)->resultFile(7);
 

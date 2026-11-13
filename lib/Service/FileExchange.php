@@ -61,7 +61,7 @@ class FileExchange
 	 * Overwrite an existing file (the OCR-in-place case).
 	 *
 	 * @param resource $body
-	 * @return array{size: int, etag: string}
+	 * @return array{size: int, etag: string, file_id: int}
 	 * @throws NotFoundException
 	 */
 	public function replace(string $owner, string $relative, $body): array
@@ -71,17 +71,23 @@ class FileExchange
 			throw new NotFoundException('not a file: ' . $relative);
 		}
 		$node->putContent($body);
-		return ['size' => $node->getSize(), 'etag' => (string) $node->getEtag()];
+		return [
+			'size' => $node->getSize(),
+			'etag' => (string) $node->getEtag(),
+			'file_id' => (int) $node->getId(),
+		];
 	}
 
 	/**
 	 * Create a new file beside the job's file (the image → PDF case).
 	 *
 	 * The name is validated here and the collision rule is ours; the caller only
-	 * suggests one. Returns where the bytes actually landed.
+	 * suggests one. Returns where the bytes actually landed, with the identity
+	 * (`file_id` + `etag`) the ledger's settled verdict is keyed on: a produced
+	 * file without its etag would match every future version.
 	 *
 	 * @param resource $body
-	 * @return array{name: string, path: string, file_id: int}
+	 * @return array{name: string, path: string, file_id: int, etag: string, size: int}
 	 * @throws NotFoundException
 	 */
 	public function createBeside(string $owner, string $relative, string $name, $body): array
@@ -102,6 +108,8 @@ class FileExchange
 			'name' => $final,
 			'path' => '/' . $owner . '/files/' . ($directory === '' ? '' : $directory . '/') . $final,
 			'file_id' => $file->getId(),
+			'etag' => (string) $file->getEtag(),
+			'size' => $file->getSize(),
 		];
 	}
 

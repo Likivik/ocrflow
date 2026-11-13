@@ -30,15 +30,35 @@ class _StubQueueClient:
         Path(dest).write_bytes(self.served)
         return Path(dest)
 
-    def put_file(self, job_id: int, source: Path, claim: str | None = None) -> dict:
-        self.calls.append(("put", job_id, Path(source).read_bytes()))
-        return {"size": len(Path(source).read_bytes()), "etag": "abc"}
+    def put_file(
+        self,
+        job_id: int,
+        source: Path,
+        claim: str | None = None,
+        engine: str | None = None,
+        engine_version: str | None = None,
+    ) -> dict:
+        self.calls.append(("put", job_id, Path(source).read_bytes(), engine, engine_version))
+        return {"size": len(Path(source).read_bytes()), "etag": "abc", "file_id": 7}
 
     def result_file(
-        self, job_id: int, source: Path, name: str | None = None, claim: str | None = None
+        self,
+        job_id: int,
+        source: Path,
+        name: str | None = None,
+        claim: str | None = None,
+        engine: str | None = None,
+        engine_version: str | None = None,
     ) -> dict:
-        self.calls.append(("result_file", job_id, name, Path(source).read_bytes()))
-        return {"path": "/likivik/files/scan.pdf", "name": "scan.pdf", "file_id": 99}
+        self.calls.append(
+            ("result_file", job_id, name, Path(source).read_bytes(), engine, engine_version)
+        )
+        return {
+            "path": "/likivik/files/scan.pdf",
+            "name": "scan.pdf",
+            "file_id": 99,
+            "etag": "produced",
+        }
 
 
 @pytest.fixture()
@@ -71,22 +91,39 @@ def test_in_place_result_goes_back_through_the_app(api, tmp_path):
     src = tmp_path / "out.pdf"
     src.write_bytes(b"%PDF-1.7\nOCR text layer\n")
 
-    landed = ws._transport_upload("/likivik/files/a.pdf", src, job_id=7, in_place=True)
+    landed = ws._transport_upload(
+        "/likivik/files/a.pdf",
+        src,
+        job_id=7,
+        in_place=True,
+        engine="google",
+        engine_version="3.15.0",
+    )
 
     assert landed == "/likivik/files/a.pdf"
-    assert api.calls == [("put", 7, b"%PDF-1.7\nOCR text layer\n")]
+    # The provenance facts ride along so the app settles the produced file
+    # in the same request (verdict at birth).
+    assert api.calls == [("put", 7, b"%PDF-1.7\nOCR text layer\n", "google", "3.15.0")]
 
 
 def test_beside_result_uses_the_name_the_app_assigned(api, tmp_path):
     src = tmp_path / "out.pdf"
     src.write_bytes(b"%PDF-1.7\nfrom an image\n")
 
-    landed = ws._transport_upload("/likivik/files/a.png", src, job_id=7, in_place=False)
+    landed = ws._transport_upload(
+        "/likivik/files/a.png",
+        src,
+        job_id=7,
+        in_place=False,
+        engine="google",
+        engine_version="3.15.0",
+    )
 
     # The app decides the name (collision handling is its job); the worker takes it.
     assert landed == "/likivik/files/scan.pdf"
     assert api.calls[0][0] == "result_file"
     assert api.calls[0][1] == 7
+    assert api.calls[0][4:] == ("google", "3.15.0"), "the settle facts ride along on this path too"
 
 
 def test_api_transport_refuses_to_guess_a_job(monkeypatch):

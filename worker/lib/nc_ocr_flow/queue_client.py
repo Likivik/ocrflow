@@ -39,6 +39,21 @@ WORKER_ID_HEADER = "X-OcrFlow-Worker-Id"
 API_PATH = "/ocs/v2.php/apps/ocrflow/api/v1"
 
 
+def _fact_params(engine: str | None, engine_version: str | None) -> dict[str, str]:
+    """Query params carrying the provenance facts of a write-back.
+
+    The app settles the produced file with exactly these in the same request
+    (verdict at birth). Absent facts are simply omitted — an older worker sends
+    nothing and the app falls back to the job's engine stamp.
+    """
+    params: dict[str, str] = {}
+    if engine:
+        params["engine"] = engine
+    if engine_version:
+        params["engine_version"] = engine_version
+    return params
+
+
 class WorkerUnauthorized(RuntimeError):
     """The secret was rejected. Retrying cannot fix this; a human must."""
 
@@ -279,17 +294,30 @@ class QueueClient:
             raise QueueProtocolError(f"job {job_id}: the app streamed an empty file")
         return dest
 
-    def put_file(self, job_id: int, source: Path, claim: str | None = None) -> dict[str, Any]:
+    def put_file(
+        self,
+        job_id: int,
+        source: Path,
+        claim: str | None = None,
+        engine: str | None = None,
+        engine_version: str | None = None,
+    ) -> dict[str, Any]:
         """Send the processed file back; the app stores it as the owner.
 
         The counterpart to :meth:`fetch_file`, and the reason the worker can hold
         no filesystem credentials at all — it never writes to Nextcloud direct.
+
+        ``engine``/``engine_version`` are the provenance facts the app settles
+        the produced file with in the same request; absent (an older worker)
+        they fall back to the job's engine stamp and an unknown version.
         """
         if not source.is_file():
             raise QueueProtocolError(f"result file {source} does not exist")
+        params = _fact_params(engine, engine_version)
         with open(source, "rb") as handle:
             response = self.session.put(
                 f"{self.base_url}{API_PATH}/queue/{job_id}/file",
+                params=params,
                 data=handle,
                 headers={**self._headers(claim), "Content-Type": "application/pdf"},
                 timeout=self.timeout,
@@ -313,17 +341,27 @@ class QueueClient:
         return self._data(response)
 
     def result_file(
-        self, job_id: int, source: Path, name: str | None = None, claim: str | None = None
+        self,
+        job_id: int,
+        source: Path,
+        name: str | None = None,
+        claim: str | None = None,
+        engine: str | None = None,
+        engine_version: str | None = None,
     ) -> dict[str, Any]:
         """Create a NEW file beside the job's file and return where it landed.
 
         The worker sends a *name* and bytes; the app chooses the directory from
         the job and applies its own collision rule. That asymmetry is deliberate:
         a caller holding only a shared secret must not be able to name a path.
+
+        ``engine``/``engine_version`` are the provenance facts the app settles
+        the produced file with in the same request.
         """
         if not source.is_file():
             raise QueueProtocolError(f"result file {source} does not exist")
         params = {} if name is None else {"name": name}
+        params.update(_fact_params(engine, engine_version))
         with open(source, "rb") as handle:
             response = self.session.post(
                 f"{self.base_url}{API_PATH}/queue/{job_id}/result-file",
