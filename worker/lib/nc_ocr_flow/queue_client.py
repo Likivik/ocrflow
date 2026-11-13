@@ -348,6 +348,8 @@ class QueueClient:
         claim: str | None = None,
         engine: str | None = None,
         engine_version: str | None = None,
+        source_converted: str | None = None,
+        source_path: str | None = None,
     ) -> dict[str, Any]:
         """Create a NEW file beside the job's file and return where it landed.
 
@@ -356,12 +358,19 @@ class QueueClient:
         a caller holding only a shared secret must not be able to name a path.
 
         ``engine``/``engine_version`` are the provenance facts the app settles
-        the produced file with in the same request.
+        the produced file with in the same request. ``source_converted``/
+        ``source_path`` move the image→PDF trash intent onto this request too:
+        the app trashes the source right after it has written the produced
+        file, under its write-time guard — not in the later ``result`` call.
         """
         if not source.is_file():
             raise QueueProtocolError(f"result file {source} does not exist")
         params = {} if name is None else {"name": name}
         params.update(_fact_params(engine, engine_version))
+        if source_converted:
+            params["source_converted"] = source_converted
+            if source_path:
+                params["source_path"] = source_path
         with open(source, "rb") as handle:
             response = self.session.post(
                 f"{self.base_url}{API_PATH}/queue/{job_id}/result-file",

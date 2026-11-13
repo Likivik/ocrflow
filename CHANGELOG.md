@@ -7,6 +7,36 @@ written.
 
 ### Added
 
+- The write-time ladder (Parts A + C): `putFile` and `resultFile` now run a
+  three-rung guard before writing — (1) the enqueue etag still matches, or
+  (1b) the etag is the one our own earlier write left behind
+  (`jobs.written_etag`, re-armed after every write), or (2) the content hash
+  matches (`jobs.source_sha256`, hashed from the exact bytes `file()` served
+  while streaming the download). Only a genuinely different source falls
+  through to the stash. The old guard compared etags alone in `result()`
+  AFTER the write — on the in-place path our own `putFile` write moved the
+  etag first, so the guard fired on our own write.
+- The stash: a conflicted result is written to the app data directory
+  (never the user's files) and recorded in `ocrflow_pending_results`
+  (UNIQUE `(file_id, etag)`; a repeat supersedes the old artifact). The job
+  closes terminally as `skipped` with the new code
+  `skip_source_changed_result_saved` (verdict `redo`, actor `owner`, fix
+  hint pointing at the panel's Decide tab — Part B), the worker gets the
+  existing terminal-skip 200, and a later `result()` call for the job is a
+  no-op. `source_changed` is now an alias for the new code on read.
+- Artifact retention: `pending_results_retention_days` (default 30, `0`
+  disables), swept by the existing reconcile tick; expiry deletes the bytes
+  and leaves the row as `discarded`, and one log line per tick carries the
+  total artifact bytes.
+- The trash of an image→PDF source moved from `result()` into
+  `resultFile()`, after a successful `createBeside()` and under the ladder.
+  The worker sends the trash intent (`source_converted`, `source_path`)
+  with the result-file request.
+- 0.1.8 (migration `Version001009...`): `jobs.source_sha256`,
+  `jobs.written_etag`, and the `ocrflow_pending_results` table.
+
+### Added
+
 - Unforgeable claims: `queue/next` mints a 64-hex claim token per claim, and
   `file`, `putFile`, `resultFile`, `result` and `failure` all require it in
   `X-OcrFlow-Claim`. A missing or wrong token is a logged 409 with the

@@ -590,5 +590,153 @@ twice=$(sql "SELECT reason_code FROM ${JOBS} WHERE path LIKE '%/breaker.jpg' LIM
   || fail "the breaker must be armed again after the one requeue, got '${twice}'"
 ok "requeue resets the counter and buys exactly one more enqueue"
 
+# --- Parts A + C, [real-db]: the write-time ladder and the stash -----------
+#
+# The PHPUnit harness cannot run real SQL, so the plan's ladder/stash tests
+# that need the real database, the real appdata tree and the real WebDAV
+# etag behaviour land here:
+#   * the 0.1.8 migration: jobs.source_sha256, jobs.written_etag, the
+#     pending table with UNIQUE (file_id, etag);
+#   * `file()` hashes the exact bytes it served into the job row;
+#   * rung 2 of the ladder: identical bytes under a new etag still get
+#     the result written;
+#   * rung 3: genuinely different bytes are not written over — the result
+#     is stashed into appdata (never the user's files), the job closes as
+#     a terminal skip_source_changed_result_saved, and a later result()
+#     call for that job is a no-op;
+#   * the in-place path: a successful putFile re-arms written_etag, and a
+#     retried putFile over our own write is allowed, not stashed;
+#   * artifact retention: an expired pending row's bytes are deleted by the
+#     reconcile tick, the row stays behind as discarded, and one log line
+#     per tick carries the total artifact bytes.
+echo "== the ladder and the stash: the 0.1.8 schema"
+n=$(sql "SELECT count(*) FROM information_schema.tables WHERE table_name='oc_ocrflow_pending_results'")
+[ "$n" = "1" ] || fail "oc_ocrflow_pending_results is missing (migration 001009 did not land)"
+pidx=$(sql "SELECT COALESCE(string_agg(indexdef, E'\n'), '') FROM pg_indexes WHERE tablename='oc_ocrflow_pending_results'")
+echo "$pidx" | grep -qE 'UNIQUE.*file_id.*etag|UNIQUE.*etag.*file_id' \
+  || fail "no unique index on (file_id, etag) for the pending table; got: $pidx"
+for col in source_sha256 written_etag; do
+  c=$(sql "SELECT COALESCE((SELECT 1 FROM information_schema.columns WHERE table_name='${JOBS}' AND column_name='${col}'),0)")
+  [ "$c" = "1" ] || fail "${JOBS} has no ${col} column (migration 001009 did not land)"
+done
+ok "pending table unique on (file_id, etag); jobs carries source_sha256 and written_etag"
+
+sql "DELETE FROM ${JOBS}" >/dev/null   # this section starts from an empty queue
+printf '\xff\xd8\xff\xe0conflict-source-bytes' > /tmp/ocrflow-conflict.jpg
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-conflict.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/conflict.jpg" || fail "WebDAV upload of conflict.jpg failed"
+sleep 2
+claim_one
+
+echo "== the ladder: file() hashes the exact bytes it serves"
+code=$(curl -s -o /tmp/ocrflow-conflict-bytes -w '%{http_code}' -H 'OCS-APIRequest: true' \
+  -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/file")
+[ "$code" = "200" ] || fail "fetching the conflict job's bytes should be 200, got $code"
+served_hash=$(sha256sum /tmp/ocrflow-conflict-bytes | cut -d' ' -f1)
+row_hash=$(sql "SELECT COALESCE(source_sha256,'') FROM ${JOBS} WHERE id=${jobid}")
+[ "${#served_hash}" = "64" ] || fail "the fetched bytes did not hash to 64 chars"
+[ "$row_hash" = "$served_hash" ] \
+  || fail "jobs.source_sha256 '${row_hash}' != sha256 of the served bytes '${served_hash}'"
+ok "source_sha256 is the hash of the bytes the worker received"
+
+echo "== the ladder, rung 2: identical bytes under a new etag still get the result"
+# A re-PUT of the SAME bytes: the etag moves (mtime) but the content does not.
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-conflict.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/conflict.jpg" || fail "WebDAV re-PUT of conflict.jpg failed"
+sleep 2
+code=$(curl -s -o /tmp/ocrflow-rung2 -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
+  -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  --data-binary @/tmp/ocrflow-produced.pdf \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result-file?name=conflict.pdf")
+[ "$code" = "200" ] || fail "rung 2 should write the result (200), got $code body=$(cat /tmp/ocrflow-rung2)"
+grep -q '"file_id"' /tmp/ocrflow-rung2 \
+  || fail "rung 2 did not write: $(cat /tmp/ocrflow-rung2)"
+ok "same bytes under a new etag: result written"
+
+echo "== the ladder, rung 3: different bytes are stashed, not written over"
+printf '\xff\xd8\xff\xe0edited-by-the-user' > /tmp/ocrflow-conflict-edited.jpg
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-conflict-edited.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/conflict.jpg" || fail "WebDAV overwrite of conflict.jpg failed"
+sleep 2
+fid=$(sql "SELECT file_id FROM ${JOBS} WHERE id=${jobid}")
+code=$(curl -s -o /tmp/ocrflow-stash -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
+  -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  --data-binary @/tmp/ocrflow-produced.pdf \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result-file?name=conflict2.pdf&engine=google&engine_version=3.15.0&pages=2")
+[ "$code" = "200" ] || fail "a stashed conflict must still answer 200 (terminal skip), got $code body=$(cat /tmp/ocrflow-stash)"
+grep -q '"stashed":true' /tmp/ocrflow-stash \
+  || fail "the stash response does not say stashed:true: $(cat /tmp/ocrflow-stash)"
+row=$(sql "SELECT status || ' ' || COALESCE(reason_code,'') || ' ' || COALESCE(retryable::text,'') FROM ${JOBS} WHERE id=${jobid}")
+[ "$row" = "skipped skip_source_changed_result_saved false" ] \
+  || fail "the job should close as a terminal skip_source_changed_result_saved, got '${row}'"
+prow=$(sql "SELECT count(*) FROM oc_ocrflow_pending_results WHERE file_id=${fid} AND status='pending'")
+[ "$prow" = "1" ] || fail "expected one pending row for file_id=${fid}, got ${prow}"
+artifact=$($ENGINE exec "$NAME" sh -c 'ls /var/www/html/data/appdata_*/ocrflow/pending-results/ 2>/dev/null | grep -c pending-')
+[ "$artifact" = "1" ] || fail "expected 1 artifact in appdata, got '${artifact}'"
+ok "conflict stashed: terminal skip, pending row, artifact in appdata"
+
+echo "== the stash: a later result() call is a no-op"
+code=$(curl -s -o /tmp/ocrflow-result-noop -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
+  -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  -d 'status=done' "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result")
+[ "$code" = "200" ] || fail "result() for a stashed job should be a 200 no-op, got $code body=$(cat /tmp/ocrflow-result-noop)"
+grep -q 'stashed' /tmp/ocrflow-result-noop \
+  || fail "the no-op response does not say the result was stashed: $(cat /tmp/ocrflow-result-noop)"
+row=$(sql "SELECT status || ' ' || COALESCE(reason_code,'') FROM ${JOBS} WHERE id=${jobid}")
+[ "$row" = "skipped skip_source_changed_result_saved" ] \
+  || fail "the no-op result() changed the job row to '${row}'"
+prow=$(sql "SELECT count(*) FROM oc_ocrflow_pending_results WHERE file_id=${fid} AND status='pending'")
+[ "$prow" = "1" ] || fail "the no-op result() touched the pending rows (${prow})"
+ok "result() after a stash: terminal 200, nothing done"
+
+echo "== the ladder, in place: written_etag re-arms and a retried putFile passes"
+sql "DELETE FROM ${JOBS}" >/dev/null
+printf '\xff\xd8\xff\xe0inplace-source' > /tmp/ocrflow-inplace.jpg
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-inplace.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/inplace.jpg" || fail "WebDAV upload of inplace.jpg failed"
+sleep 2
+claim_one
+code=$(curl -s -o /tmp/ocrflow-inplace-fetch -w '%{http_code}' -H 'OCS-APIRequest: true' \
+  -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/file")
+[ "$code" = "200" ] || fail "fetching the inplace job's bytes should be 200, got $code"
+code=$(curl -s -o /tmp/ocrflow-put1 -w '%{http_code}' -X PUT -H 'OCS-APIRequest: true' \
+  -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  --data-binary @/tmp/ocrflow-produced.pdf \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/file?engine=google&engine_version=3.15.0")
+[ "$code" = "200" ] || fail "the first putFile should be 200, got $code body=$(cat /tmp/ocrflow-put1)"
+armed=$(sql "SELECT COALESCE(written_etag,'') FROM ${JOBS} WHERE id=${jobid}")
+[ -n "$armed" ] || fail "a successful putFile did not re-arm written_etag"
+# The retried upload: the etag on disk is our own write's, so the ladder must
+# let it through instead of stashing it (the measured in-place bug).
+code=$(curl -s -o /tmp/ocrflow-put2 -w '%{http_code}' -X PUT -H 'OCS-APIRequest: true' \
+  -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  --data-binary @/tmp/ocrflow-produced.pdf \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/file")
+[ "$code" = "200" ] || fail "a retried putFile over our own write should be 200, got $code body=$(cat /tmp/ocrflow-put2)"
+grep -q '"stashed":true' /tmp/ocrflow-put2 \
+  && fail "the retried putFile was stashed: the written_etag rung did not recognise our own write"
+row=$(sql "SELECT status FROM ${JOBS} WHERE id=${jobid}")
+[ "$row" = "claimed" ] || fail "putFile should not close the job, got ${row}"
+ok "putFile re-arms written_etag; a retried upload passes the ladder"
+
+echo "== the stash: retention sweeps the expired artifacts"
+# The artifact line is an info-level line; a fresh instance logs warnings
+# only, so let info through before the tick we want to observe.
+occ config:system:set loglevel --type integer --value 1 >/dev/null 2>&1 || true
+sql "UPDATE oc_ocrflow_pending_results SET created_at=0 WHERE file_id=${fid}" >/dev/null
+sql "UPDATE oc_jobs SET last_run=0 WHERE class LIKE '%ReconcileJob'" >/dev/null 2>&1 || true
+reconcilejob=$(sql "SELECT id FROM oc_jobs WHERE class LIKE '%ReconcileJob' LIMIT 1")
+occ background-job:execute --force-execute "$reconcilejob" >/dev/null 2>&1 \
+  || fail "the reconcile job did not run (oc_jobs id ${reconcilejob})"
+dstate=$(sql "SELECT status FROM oc_ocrflow_pending_results WHERE file_id=${fid}")
+[ "$dstate" = "discarded" ] || fail "the expired pending row should be left as discarded, got '${dstate}'"
+artifact=$($ENGINE exec "$NAME" sh -c 'ls /var/www/html/data/appdata_*/ocrflow/pending-results/ 2>/dev/null | grep -c pending- || true')
+[ "$artifact" = "0" ] || fail "the expired artifact bytes were not deleted (${artifact} left)"
+bytes_line=$($ENGINE exec "$NAME" sh -c "grep -c 'pending result artifacts' /var/www/html/data/nextcloud.log 2>/dev/null || true")
+[ "${bytes_line:-0}" -ge 1 ] || fail "the reconcile tick logged no pending-result artifact line"
+ok "expired artifact swept: bytes deleted, row discarded, byte-total line logged"
+
 echo "ALL INTEGRATION ASSERTIONS PASSED"
 

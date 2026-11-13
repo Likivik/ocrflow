@@ -17,6 +17,7 @@ use OCP\AppFramework\Http\DataResponse;
 use OCP\AppFramework\Http\StreamResponse;
 use OCP\AppFramework\OCSController;
 use OCA\OcrFlow\Service\FileExchange;
+use OCA\OcrFlow\Service\PendingResults;
 use OCP\Files\NotFoundException;
 use OCP\IConfig;
 use OCP\IRequest;
@@ -43,6 +44,7 @@ class QueueController extends OCSController
 		private FileExchange $files,
 		private RetryPolicy $retryPolicy,
 		private WorkerRegistry $workers,
+		private ?PendingResults $pendingResults = null,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -97,10 +99,40 @@ class QueueController extends OCSController
 			);
 		}
 
+		// The ladder's second rung needs the hash of the exact bytes the
+		// worker received — not a re-read of the file, which may already be
+		// the newer version. So the download is buffered through a
+		// php://temp stream (spills to disk past 2 MiB) while it is hashed,
+		// and the served bytes and the recorded hash are the same bytes by
+		// construction.
+		$hash = hash_init('sha256');
+		$served = fopen('php://temp', 'rb+');
+		if ($served === false) {
+			if (is_resource($opened['handle'])) {
+				fclose($opened['handle']);
+			}
+			return new DataResponse(['message' => 'cannot buffer the download'], Http::STATUS_INTERNAL_SERVER_ERROR);
+		}
+		while (($chunk = fread($opened['handle'], 1 << 20)) !== false && $chunk !== '') {
+			hash_update($hash, $chunk);
+			fwrite($served, $chunk);
+		}
+		fclose($opened['handle']);
+		rewind($served);
+
+		try {
+			$this->queue->recordSourceHash($id, hash_final($hash));
+		} catch (\Throwable $hashWriteFailed) {
+			// Not fatal for the download: without the hash the ladder
+			// simply cannot prove the bytes match, and fails safe toward
+			// the stash on a conflict.
+			$this->logger->warning('ocrflow: job ' . $id . ' downloaded without its source hash: ' . $hashWriteFailed->getMessage());
+		}
+
 		// StreamResponse takes (pathOrHandle, int $status, array $headers). Passing
 		// the handle second put a resource where an int belongs and every fetch
 		// answered 500 "Argument #2 ($status) must be of type int, resource given".
-		$response = new StreamResponse($opened['handle'], Http::STATUS_OK, ['Content-Type' => $opened['mime']]);
+		$response = new StreamResponse($served, Http::STATUS_OK, ['Content-Type' => $opened['mime']]);
 		$response->addHeader(
 			'Content-Disposition',
 			'attachment; filename="' . rawurlencode($opened['name']) . '"',
@@ -141,6 +173,12 @@ class QueueController extends OCSController
 			return new DataResponse(['message' => 'cannot read the request body'], Http::STATUS_INTERNAL_SERVER_ERROR);
 		}
 		try {
+			// The ladder, before the write: an unchanged etag or identical
+			// bytes may pass; a genuinely changed source must not be written
+			// over — its result is stashed for the owner to decide on.
+			if ($this->writeConflict($job, $owner, $relative)) {
+				return $this->stashConflict($id, $job, $body);
+			}
 			$written = $this->files->replace($owner, $relative, $body);
 		} catch (NotFoundException) {
 			// Degraded result, by design: the file was moved or deleted while
@@ -151,6 +189,16 @@ class QueueController extends OCSController
 			if (is_resource($body)) {
 				fclose($body);
 			}
+		}
+
+		// Re-arm the ladder: the etag on disk is now our own write's etag,
+		// and recognising it is what keeps a retried upload of the same
+		// result idempotent instead of a false conflict. A failure here only
+		// downgrades that convenience; the write itself has already landed.
+		try {
+			$this->queue->armWrittenEtag($id, $written['etag']);
+		} catch (\Throwable $rearmFailed) {
+			$this->logger->warning('ocrflow: job ' . $id . ' wrote back but written_etag was not re-armed: ' . $rearmFailed->getMessage());
 		}
 
 		// Verdict at birth: the bytes on disk were just written by us, so
@@ -214,14 +262,22 @@ class QueueController extends OCSController
 		}
 		[$owner, $relative] = $split;
 
-		// The source the job was queued for is not the source on disk
-		// anymore: the user edited or replaced the file while OCR ran. The
-		// worker's result is for an older version, so writing it beside the
-		// new one — and later trashing the new one as the "converted
-		// source" — would destroy the user's newer file. Terminal skip:
-		// the new version is enqueued as its own job by the next scan.
-		if ($this->sourceChanged($job, $owner, $relative)) {
-			return $this->skipSourceChanged($id, (string) $this->request->getHeader(Application::CLAIM_HEADER));
+		// The ladder, before the write: an unchanged etag or identical bytes
+		// may pass; a genuinely changed source must not receive the result
+		// beside the newer version — its bytes are stashed for the owner to
+		// decide on, and nothing is trashed.
+		if ($this->writeConflict($job, $owner, $relative)) {
+			$body = fopen('php://input', 'rb');
+			if ($body === false) {
+				return new DataResponse(['message' => 'cannot read the request body'], Http::STATUS_INTERNAL_SERVER_ERROR);
+			}
+			try {
+				return $this->stashConflict($id, $job, $body);
+			} finally {
+				if (is_resource($body)) {
+					fclose($body);
+				}
+			}
 		}
 
 		$directory = dirname($relative);
@@ -277,6 +333,13 @@ class QueueController extends OCSController
 		} catch (\Throwable $e) {
 			$this->logger->warning('ocrflow: job ' . $id . ' stored a result file but the ledger settle failed: ' . $e->getMessage());
 		}
+
+		// The trash of a converted source runs HERE, after a successful
+		// `createBeside()` and under the ladder — not from `result()` after
+		// the fact: only now has the app proved the produced file landed
+		// beside the version it was queued for. A conflicting source never
+		// reaches this line (it was stashed above).
+		$this->trashConvertedSource($id);
 
 		return new DataResponse([
 			'id' => $id,
@@ -406,21 +469,27 @@ class QueueController extends OCSController
 			return $denied;
 		}
 
-		// The finish and the trash below both act on the job's source; a
-		// job must only ever act on the exact file version it was queued
-		// for, so a source that changed mid-run is refused here before
-		// either can run (see `sourceChanged`). The claim token gates all
-		// of it: a worker without the token gets the 409 below and writes
-		// nothing anywhere.
+		// A job whose result was stashed is already closed: the stash (see
+		// `stashConflict`) finished it `skipped` and cleared its claim, so
+		// the worker's follow-up result call arrives holding a stale claim
+		// reference. Answer it terminally — the worker must not retry —
+		// while doing nothing: no `done`, no trash, no ledger verdict. The
+		// decision about the stashed artifact belongs to the owner.
 		$job = $this->queue->getById($id);
+		if ($job !== null && $this->resultAlreadyStashed($job)) {
+			return new DataResponse([
+				'id' => $id,
+				'status' => Queue::STATUS_SKIPPED,
+				'applied' => true,
+				'message' => 'the result was stashed: the source changed while the job ran',
+			]);
+		}
+		// The claim token gates everything below: a worker without the
+		// token gets the 409 and writes nothing anywhere.
 		if (($refused = $this->claimGuard($id, $job)) !== null) {
 			return $refused;
 		}
 		$claimToken = (string) $this->request->getHeader(Application::CLAIM_HEADER);
-		$split = self::splitPath((string) $job->getPath());
-		if ($split !== null && $this->sourceChanged($job, $split[0], $split[1])) {
-			return $this->skipSourceChanged($id, $claimToken);
-		}
 
 		// A worker may legitimately decide that a file needs no work: a
 		// born-digital PDF, a photo that is not a document. That is not an error,
@@ -456,19 +525,6 @@ class QueueController extends OCSController
 			'stamp_version' => $this->nullableString('stamp_version'),
 			'stage_events' => $this->stageEventsParam(),
 		], $claimToken);
-		// The source image of an image→PDF conversion is moved to the
-		// user's trash bin here, not deleted by the worker over WebDAV: a
-		// WebDAV DELETE is a permanent removal (measured: 23 conversions, 0
-		// source images left, 0 trash rows). The app is the only party that
-		// holds a Nextcloud identity, so the app does the move — through the
-		// filesystem API, which is what the trashbin hooks catch.
-		//
-		// Only after the job is recorded as done, and only for a worker that
-		// said it converted an image: a worker that predates this field sends
-		// nothing, and nothing is trashed.
-		if ($applied && $status === Queue::STATUS_DONE) {
-			$this->trashConvertedSource($id);
-		}
 		// ``applied: false`` means this worker no longer holds the claim (its
 		// claim was recovered and re-claimed elsewhere). Not an error: the job
 		// is someone else's now, and the result was correctly discarded.
@@ -526,48 +582,135 @@ class QueueController extends OCSController
 	}
 
 	/**
-	 * Has the job's source been changed since the job was enqueued?
+	 * The write-time ladder: may this job's result be written to its source?
 	 *
-	 * The job row carries the etag `Queue::enqueue()` recorded; the file on
-	 * disk carries its current one. A job must only ever act on the exact
-	 * file version it was queued for, and a mismatch means the user edited
-	 * or replaced the file while OCR ran — the worker's result is for a
-	 * version nobody asked about anymore.
+	 * Rung 1 — the etag recorded at enqueue still matches the file's
+	 * current etag: the version on disk is the version the job was queued
+	 * for. Write.
 	 *
-	 * Nothing to compare is not a change: a legacy row with no etag, or a
-	 * source that is gone (null current etag), keeps today's behaviour.
+	 * Rung 1b — the etag is the one OUR OWN earlier write left behind
+	 * (`written_etag`, re-armed after every write): a retried upload of
+	 * the same result, not a conflict. Write.
+	 *
+	 * Rung 2 — the etag moved but the content hash did not: the bytes on
+	 * disk are the bytes the worker received (`file()` hashed them while
+	 * streaming), so whatever moved the etag did not change the source.
+	 * Write. This is the rung the old guard lacked: on the in-place path
+	 * our own `putFile` write changed the etag first, and the guard fired
+	 * on our own write.
+	 *
+	 * Otherwise — the bytes differ (or a legacy row cannot prove they do
+	 * not) — the result must not be written: the caller stashes it
+	 * (Part C) and closes the job `skipped` with
+	 * `skip_source_changed_result_saved`.
+	 *
+	 * Nothing to compare is not a conflict: a legacy row with no etag, or
+	 * a source that is gone (null current etag — the write path reports
+	 * the 404), keeps the write.
 	 */
-	private function sourceChanged(Job $job, string $owner, string $relative): bool
+	private function writeConflict(Job $job, string $owner, string $relative): bool
 	{
 		$jobEtag = $job->getEtag();
 		if ($jobEtag === null || $jobEtag === '') {
 			return false;
 		}
 		$current = $this->files->currentEtag($owner, $relative);
-		return $current !== null && $current !== $jobEtag;
+		if ($current === null || $current === $jobEtag) {
+			return false;
+		}
+		$written = $job->getWrittenEtag();
+		if ($written !== null && $written !== '' && $current === $written) {
+			return false;
+		}
+		$sourceHash = $job->getSourceSha256();
+		if ($sourceHash !== null && $sourceHash !== '') {
+			$currentHash = $this->files->contentSha256($owner, $relative);
+			if ($currentHash !== null && hash_equals($sourceHash, $currentHash)) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/**
-	 * Record the refusal as a terminal skip, so the worker does not retry:
-	 * the same etag mismatch would refuse again, and a retry of the old
-	 * version's result is what this guard exists to prevent.
+	 * Does this job's file version already have a pending stashed result?
 	 *
-	 * Same response shape the other terminal skips use.
+	 * `result()` asks this before its claim guard: the stash closed the
+	 * job terminally, so the follow-up result call arrives holding a stale
+	 * claim reference — and must be answered, not refused.
 	 */
-	private function skipSourceChanged(int $id, string $claimToken): DataResponse
+	private function resultAlreadyStashed(Job $job): bool
 	{
-		$this->logger->warning('ocrflow: job ' . $id . ' skipped: the source file changed while the job ran (source_changed); the result was not written');
+		if ($this->pendingResults === null || $job->getFileId() === null) {
+			return false;
+		}
+		try {
+			return $this->pendingResults->hasPending($job->getFileId(), $job->getEtag());
+		} catch (\Throwable $e) {
+			// The store being unreachable must not wedge the queue: fall
+			// through to the claim guard, which answers a terminal job's
+			// stale claim reference with the usual 409.
+			$this->logger->warning('ocrflow: could not check for a stashed result on job ' . (string) $job->getId() . ': ' . $e->getMessage());
+			return false;
+		}
+	}
+
+	/**
+	 * A genuine write-time conflict: save the result aside (never write it
+	 * over the newer version), close the job as a terminal skip with the
+	 * `skip_source_changed_result_saved` code, and answer the worker with
+	 * the existing terminal-skip shape so it does not retry.
+	 *
+	 * The stash itself is best-effort on purpose: an appdata failure loses
+	 * the result (the old behaviour) but must not lose the newer version
+	 * on disk, and the job still closes.
+	 *
+	 * @param resource $body the worker's upload
+	 */
+	private function stashConflict(int $id, Job $job, $body): DataResponse
+	{
+		$claimToken = (string) $this->request->getHeader(Application::CLAIM_HEADER);
+
+		$stashed = false;
+		if ($this->pendingResults !== null && $job->getFileId() !== null) {
+			try {
+				$this->pendingResults->stash(
+					$job->getFileId(),
+					$job->getEtag(),
+					$body,
+					$this->nullableString('engine') ?? $job->getEngine(),
+					$this->nullableString('engine_version'),
+					$this->nullableInt('pages'),
+				);
+				$stashed = true;
+			} catch (\Throwable $e) {
+				$this->logger->warning('ocrflow: job ' . $id . ' conflicted and the result could not be stashed: ' . $e->getMessage());
+			}
+		} else {
+			$this->logger->warning('ocrflow: job ' . $id . ' conflicted but there is no pending-results store; the result is dropped');
+		}
+
+		$this->logger->warning('ocrflow: job ' . $id . ' skipped: the source file changed while the job ran (skip_source_changed_result_saved)'
+			. ($stashed ? '; the result was stashed for the owner to decide' : '; the result was not saved'));
+
 		$applied = $this->queue->finish($id, [
 			'status' => Queue::STATUS_SKIPPED,
-			'reason' => 'the source file changed while the job ran; the result was for an older version',
-			'reason_code' => 'source_changed',
+			// The column is varchar(64): the detail lives in the code, the
+			// pending row and the log line, not in the reason text.
+			'reason' => 'the source changed; the result was stashed for the owner',
+			'reason_code' => 'skip_source_changed_result_saved',
 			'retryable' => false,
+			'engine' => $this->nullableString('engine'),
+			'engine_version' => $this->nullableString('engine_version'),
+			'pages' => $this->nullableInt('pages'),
 			'stage_events' => $this->stageEventsParam(),
 		], $claimToken);
+
 		return new DataResponse([
 			'id' => $id,
 			'status' => Queue::STATUS_SKIPPED,
 			'applied' => $applied,
+			'stashed' => $stashed,
 		]);
 	}
 

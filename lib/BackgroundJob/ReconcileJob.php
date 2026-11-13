@@ -10,6 +10,7 @@ namespace OCA\OcrFlow\BackgroundJob;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Db\WorkerRegistry;
+use OCA\OcrFlow\Service\PendingResults;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\TimedJob;
 use OCP\IConfig;
@@ -65,6 +66,7 @@ class ReconcileJob extends TimedJob
 		private IConfig $config,
 		private ILockingProvider $locks,
 		private WorkerRegistry $workers,
+		private PendingResults $pendingResults,
 	) {
 		parent::__construct($time);
 		$this->setInterval(300);
@@ -88,6 +90,33 @@ class ReconcileJob extends TimedJob
 		}
 
 		$this->sweepRetention();
+		$this->sweepPendingResults();
+	}
+
+	/**
+	 * Artifact retention rides the same tick as job retention: same
+	 * every-300s cadence, same idempotency, no new scheduler row. Expiry
+	 * deletes the artifact bytes and leaves the row behind as `discarded`
+	 * (the audit trail); one log line per tick carries the total artifact
+	 * bytes, so an operator can see the stash grow between ticks.
+	 *
+	 * A failing sweep must not take the tick down with it: the job
+	 * retention above already ran, and the next tick retries.
+	 */
+	private function sweepPendingResults(): void
+	{
+		try {
+			$discarded = $this->pendingResults->sweepExpired();
+			$bytes = $this->pendingResults->totalArtifactBytes();
+		} catch (\Throwable $e) {
+			$this->logger->warning('ocrflow: the pending-result artifact sweep failed: ' . $e->getMessage());
+			return;
+		}
+		$this->logger->info(sprintf(
+			'ocrflow: pending result artifacts: %d discarded, %d byte(s) on disk',
+			$discarded,
+			$bytes,
+		));
 	}
 
 	private function sweepRetention(): void

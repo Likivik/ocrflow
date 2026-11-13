@@ -29,6 +29,8 @@ use OCP\AppFramework\Db\Entity;
  * @method int getAttempts()
  * @method ?int getSize()
  * @method ?string getEtag()
+ * @method ?string getSourceSha256()
+ * @method ?string getWrittenEtag()
  * @method ?int getPages()
  * @method ?int getChars()
  * @method ?string getError()
@@ -50,6 +52,8 @@ class Job extends Entity
 	protected int $attempts = 0;
 	protected ?int $size = null;
 	protected ?string $etag = null;
+	protected ?string $sourceSha256 = null;
+	protected ?string $writtenEtag = null;
 	protected ?int $pages = null;
 	protected ?int $chars = null;
 	protected ?string $error = null;
@@ -115,6 +119,11 @@ class Job extends Entity
 		$job->setAttempts((int) ($row['attempts'] ?? 0));
 		$job->setSize($row['size'] === null ? null : (int) $row['size']);
 		$job->setEtag($row['etag'] === null ? null : (string) $row['etag']);
+		// The ladder's facts (0.1.8): the hash of the bytes `file()` served,
+		// and the etag our own last write left behind. Older rows have
+		// neither — the ladder fails safe toward the stash.
+		$job->setSourceSha256(isset($row['source_sha256']) && $row['source_sha256'] !== null ? (string) $row['source_sha256'] : null);
+		$job->setWrittenEtag(isset($row['written_etag']) && $row['written_etag'] !== null ? (string) $row['written_etag'] : null);
 		$job->setPages($row['pages'] === null ? null : (int) $row['pages']);
 		$job->setChars($row['chars'] === null ? null : (int) $row['chars']);
 		$job->setError($row['error'] === null ? null : (string) $row['error']);

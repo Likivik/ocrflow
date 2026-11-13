@@ -251,6 +251,14 @@ final class RetryPolicy
 			'actor' => 'deployment',
 		],
 
+		// -- redo ----------------------------------------------------------------
+		'skip_source_changed_result_saved' => [
+			'verdict' => 'redo',
+			'label' => 'The source changed while OCR ran, so the result was saved aside instead of written over it.',
+			'fix' => 'Open the file\'s panel, Decide tab: apply the saved result over the newer version, or discard it.',
+			'actor' => 'owner',
+		],
+
 		// -- drop ----------------------------------------------------------------
 		'error_worker_job_reference_stale' => [
 			'verdict' => 'drop',
@@ -288,6 +296,7 @@ final class RetryPolicy
 		'storage_error' => 'error_worker_storage_failed',
 		'worker_error' => 'error_worker_unclassified',
 		'unknown' => 'error_worker_sent_unknown_code',
+		'source_changed' => 'skip_source_changed_result_saved',
 	];
 
 	/**
