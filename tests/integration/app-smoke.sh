@@ -676,6 +676,19 @@ artifact=$($ENGINE exec "$NAME" sh -c 'ls /var/www/html/data/appdata_*/ocrflow/p
 [ "$artifact" = "1" ] || fail "expected 1 artifact in appdata, got '${artifact}'"
 ok "conflict stashed: terminal skip, pending row, artifact in appdata"
 
+# [real-db] The second look: the re-check that runs immediately before the
+# write must leave the user's newer bytes untouched. The sub-second window
+# between the ladder's decision and the write cannot be injected over HTTP
+# (QueueControllerSecondLookTest covers it with a fake whose hash moves
+# between calls); what the smoke CAN pin is the outcome the whole ladder
+# exists for: after the stash, the file on disk is still the user's edit,
+# byte for byte — the worker's result never touched it.
+curl -s -u "${ADMIN_USER}:${ADMIN_PASS}" -o /tmp/ocrflow-conflict-after \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/conflict.jpg" || fail "WebDAV download of conflict.jpg failed"
+cmp -s /tmp/ocrflow-conflict-edited.jpg /tmp/ocrflow-conflict-after \
+  || fail "the user's edited bytes were overwritten: the stash path must not write"
+ok "second look: a changed source keeps the user's bytes; the result was not written"
+
 echo "== the stash: a later result() call is a no-op"
 code=$(curl -s -o /tmp/ocrflow-result-noop -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
   -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \

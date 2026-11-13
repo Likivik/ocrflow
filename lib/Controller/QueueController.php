@@ -179,6 +179,23 @@ class QueueController extends OCSController
 			if ($this->writeConflict($job, $owner, $relative)) {
 				return $this->stashConflict($id, $job, $body);
 			}
+			// Second look, immediately before the bytes move. The ladder above
+			// decided on a snapshot that can be seconds old — hashing a large
+			// source takes seconds — and the gap between that comparison and
+			// this write is exactly where a mid-run user edit landed in
+			// production and was overwritten by the result. Re-run the same
+			// ladder on the file as it is NOW: a source that moved in the gap
+			// takes the stash path above — no bytes touched, the job closes
+			// as a terminal skip_source_changed_result_saved.
+			//
+			// Honest limit: Nextcloud has no atomic etag-conditional write, so
+			// this cannot be a true compare-and-swap. The window narrows to
+			// the final milliseconds between this check and replace() below;
+			// a write landing inside that residue can still slip through, and
+			// the file versions remain the backstop for it.
+			if ($this->writeConflict($job, $owner, $relative)) {
+				return $this->stashConflict($id, $job, $body);
+			}
 			$written = $this->files->replace($owner, $relative, $body);
 		} catch (NotFoundException) {
 			// Degraded result, by design: the file was moved or deleted while
@@ -297,6 +314,19 @@ class QueueController extends OCSController
 			return new DataResponse(['message' => 'cannot read the request body'], Http::STATUS_INTERNAL_SERVER_ERROR);
 		}
 		try {
+			// Second look, immediately before the bytes land: the same re-check
+			// putFile() runs before replace(). The ladder above may have passed
+			// on a snapshot that is seconds old (hashing a large source takes
+			// seconds), and a source the user replaced inside that gap must
+			// not receive this result — nor be trashed for it: the trash below
+			// runs only after createBeside() succeeds, so a failed re-check
+			// never trashes a source the user just replaced. Nextcloud has no
+			// atomic etag-conditional write, so this narrows the window to the
+			// final milliseconds rather than closing it; the file versions
+			// remain the backstop for that residue.
+			if ($this->writeConflict($job, $owner, $relative)) {
+				return $this->stashConflict($id, $job, $body);
+			}
 			$stored = $this->files->createBeside($owner, $relative, $requested, $body);
 		} catch (NotFoundException) {
 			// Degraded result, by design: the target folder vanished while the
