@@ -42,6 +42,11 @@ class Attention
 	/** The prose column is truncated to this before it leaves the app. */
 	private const ERROR_TRUNCATE = 500;
 
+	/** The outcomes of a user-scoped retry request, one per id. */
+	public const RETRY_DONE = 'retried';
+	public const RETRY_REFUSED = 'refused';
+	public const RETRY_MISSING = 'missing';
+
 	public function __construct(
 		private Queue $queue,
 		private RetryPolicy $retryPolicy,
@@ -57,17 +62,28 @@ class Attention
 	 * and wait / drop are the same query over other spellings, so the tabs
 	 * and `occ ocrflow:errors` cannot disagree about the rows.
 	 *
+	 * `$pathPrefix` narrows the same query to one user's files
+	 * (`/alice/files/`), which is how the personal panel reads its own
+	 * rows. The prefix comes from the authenticated uid — see UserScope.
+	 *
 	 * @return array{rows: list<array{id: int, path: string, code: string, label: string, fix: string, error: ?string, attempts: int, finished_at: ?int}>, total: int, cap: int}
 	 */
-	public function list(int $limit, int $offset = 0, ?string $code = null, string $verdict = RetryPolicy::VERDICT_NEEDS_FIX): array
+	public function list(int $limit, int $offset = 0, ?string $code = null, string $verdict = RetryPolicy::VERDICT_NEEDS_FIX, ?string $pathPrefix = null): array
 	{
 		$spellings = $this->spellings($code, $verdict);
-		$total = $this->fetchTotal($spellings);
+		$total = $this->fetchTotal($spellings, $pathPrefix);
 		if ($offset >= $total || $limit <= 0) {
 			return ['rows' => [], 'total' => $total, 'cap' => $this->cap()];
 		}
 		$rows = [];
-		foreach ($this->fetchRows($limit, $offset, $spellings) as $row) {
+		foreach ($this->fetchRows($limit, $offset, $spellings, $pathPrefix) as $row) {
+			// The SQL LIKE is a coarse pre-filter on an indexed column; THIS
+			// is the authority on whose row it is. A LIKE quirk (an escaping
+			// difference between database engines) can therefore only
+			// over-match, and the extra row is dropped here — never listed.
+			if ($pathPrefix !== null && $pathPrefix !== '' && !UserScope::owns((string) $row['path'], $pathPrefix)) {
+				continue;
+			}
 			$rows[] = $this->toApi($row);
 		}
 		return ['rows' => $rows, 'total' => $total, 'cap' => $this->cap()];
@@ -117,6 +133,30 @@ class Attention
 		}
 		$this->retryFile($fileId, $job->getPath(), 'attention');
 		return true;
+	}
+
+	/**
+	 * Retry ONE worklist row on behalf of its OWNER.
+	 *
+	 * Same retry as retryById(), reached only after the row's path is
+	 * proven to sit under `$pathPrefix` — the caller's own `/<uid>/files/`.
+	 * The check reads the STORED row's path, never a request parameter, so
+	 * naming someone else's id cannot retry it: the answer is RETRY_REFUSED
+	 * and the queue is not touched. RETRY_MISSING is only "no such row",
+	 * which lets a caller look the id up in another origin (a Decide row
+	 * names a file, not a job) without leaking which ids exist.
+	 */
+	public function retryOwned(int $id, string $pathPrefix): string
+	{
+		$job = $this->queue->getById($id);
+		if ($job === null) {
+			return self::RETRY_MISSING;
+		}
+		if (!UserScope::owns($job->getPath(), $pathPrefix)) {
+			$this->logger?->warning('ocrflow: mine: job ' . $id . ' belongs to another user\'s files; retry refused');
+			return self::RETRY_REFUSED;
+		}
+		return $this->retryById($id) ? self::RETRY_DONE : self::RETRY_REFUSED;
 	}
 
 	/**
@@ -280,10 +320,25 @@ class Attention
 	}
 
 	/**
+	 * The scope condition: the stored path starts with the caller's prefix.
+	 *
+	 * `escapeLikeParameter` keeps a `_` or `%` inside a uid from widening
+	 * the match to other users' paths — in LIKE those are wildcards, and a
+	 * scope that a wildcard can widen is not a scope.
+	 */
+	private function pathPredicate(IQueryBuilder $qb, string $pathPrefix): string
+	{
+		$escaped = $this->db === null
+			? $pathPrefix
+			: $this->db->escapeLikeParameter($pathPrefix);
+		return $qb->expr()->like('path', $qb->createNamedParameter($escaped . '%'));
+	}
+
+	/**
 	 * @param list<string> $spellings
 	 * @return list<array<string, mixed>>
 	 */
-	protected function fetchRows(int $limit, int $offset, array $spellings): array
+	protected function fetchRows(int $limit, int $offset, array $spellings, ?string $pathPrefix = null): array
 	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('id', 'path', 'reason_code', 'reason', 'error', 'attempts', 'finished_at')
@@ -293,18 +348,24 @@ class Attention
 			->addOrderBy('id', 'DESC')
 			->setFirstResult($offset)
 			->setMaxResults($limit);
+		if ($pathPrefix !== null && $pathPrefix !== '') {
+			$qb->andWhere($this->pathPredicate($qb, $pathPrefix));
+		}
 		return $qb->executeQuery()->fetchAll();
 	}
 
 	/**
 	 * @param list<string> $spellings
 	 */
-	protected function fetchTotal(array $spellings): int
+	protected function fetchTotal(array $spellings, ?string $pathPrefix = null): int
 	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->selectAlias($qb->createFunction('COUNT(*)'), 'total')
 			->from('ocrflow_jobs')
 			->where($this->predicate($qb, $spellings));
+		if ($pathPrefix !== null && $pathPrefix !== '') {
+			$qb->andWhere($this->pathPredicate($qb, $pathPrefix));
+		}
 		$row = $qb->executeQuery()->fetch();
 		return $row === false ? 0 : (int) ($row['total'] ?? 0);
 	}

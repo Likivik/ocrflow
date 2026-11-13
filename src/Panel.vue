@@ -17,6 +17,36 @@
 		</div>
 
 		<h3 class="ocrflow-panel__heading">
+			{{ t('Your files that need attention') }}
+		</h3>
+		<NcNoteCard v-if="mineError" type="error">
+			{{ t('Could not read your files: {reason}', { reason: mineError }) }}
+		</NcNoteCard>
+		<p v-else-if="!mineLoaded" class="ocrflow-panel__empty">
+			{{ t('Reading your files…') }}
+		</p>
+		<ul v-else-if="mineRows.length" class="ocrflow-panel__mine">
+			<li v-for="row in mineRows" :key="rowKey(row)" class="ocrflow-panel__mine-row">
+				<div class="ocrflow-panel__mine-text">
+					<span class="ocrflow-panel__mine-path" :title="row.path">{{ shortPath(row.path) }}</span>
+					<span class="ocrflow-panel__mine-fix">{{ row.fix }}</span>
+					<span class="ocrflow-panel__mine-meta">
+						{{ row.label }}<template v-if="row.age !== null"> · {{ age(row.age) }}</template><template v-if="row.attempts !== null"> · {{ t('{count} attempts', { count: row.attempts }) }}</template>
+					</span>
+				</div>
+				<NcButton v-if="row.retryable" :disabled="mineBusy" @click="retry(row)">
+					{{ retrying === rowKey(row) ? t('Retrying…') : t('Retry') }}
+				</NcButton>
+			</li>
+		</ul>
+		<p v-else class="ocrflow-panel__empty">
+			{{ t('Nothing of yours needs attention.') }}
+		</p>
+		<p v-if="mineMessage" class="ocrflow-panel__result">
+			{{ mineMessage }}
+		</p>
+
+		<h3 class="ocrflow-panel__heading">
 			{{ t('Queue') }}
 		</h3>
 		<ul v-if="rows.length" class="ocrflow-panel__counts">
@@ -96,6 +126,15 @@ export default {
 			engine: '',
 			engineConfigured: true,
 			autoOcrEnabled: true,
+			// The caller's own rows — separate state from the instance-wide
+			// counts above, because "3 errors on this instance" and "2 of them
+			// are mine" are different answers and must not be confused.
+			mineRows: [],
+			mineLoaded: false,
+			mineError: '',
+			mineBusy: false,
+			mineMessage: '',
+			retrying: '',
 		}
 	},
 	computed: {
@@ -108,12 +147,87 @@ export default {
 	mounted() {
 		this.refresh()
 		this.loadMe()
+		this.loadMine()
 	},
 	methods: {
 		t(text, params) {
 			// The real translation function, not a passthrough: a passthrough
 			// makes the whole interface English in every locale, silently.
 			return translate('ocrflow', text, params)
+		},
+		rowKey(row) {
+			// Origins have separate id spaces: a job id and a ledger row id
+			// can be the same number for different files.
+			return `${row.origin}-${row.id}`
+		},
+		shortPath(path) {
+			// The panel lives inside the user's own settings, so the
+			// `/alice/files/` prefix is noise. Show what is left; keep the
+			// full path in the title attribute for the ambiguous cases.
+			const marker = '/files/'
+			const i = typeof path === 'string' ? path.indexOf(marker) : -1
+			return i === -1 ? path : path.slice(i + marker.length)
+		},
+		age(seconds) {
+			if (seconds < 60) {
+				return this.t('just now')
+			}
+			const minutes = Math.floor(seconds / 60)
+			if (minutes < 60) {
+				return this.t('{count} min ago', { count: minutes })
+			}
+			const hours = Math.floor(minutes / 60)
+			if (hours < 24) {
+				return this.t('{count} h ago', { count: hours })
+			}
+			return this.t('{count} d ago', { count: Math.floor(hours / 24) })
+		},
+		async loadMine() {
+			this.mineBusy = true
+			this.mineError = ''
+			try {
+				const { data } = await axios.get(`${BASE}/mine`, { headers: { 'OCS-APIRequest': 'true' } })
+				const rows = data?.ocs?.data?.rows
+				// A malformed answer must not render as "nothing needs
+				// attention" — that would be a lie in the shape of a clean
+				// bill of health.
+				if (!Array.isArray(rows)) {
+					throw new Error('unexpected answer')
+				}
+				this.mineRows = rows
+				this.mineLoaded = true
+			} catch (e) {
+				// Keep the last known rows out of sight: a stale row next to
+				// an error reads like it is still true.
+				this.mineRows = []
+				this.mineMessage = ''
+				this.mineError = e?.response?.status ?? e?.message ?? 'unknown error'
+			} finally {
+				this.mineBusy = false
+			}
+		},
+		async retry(row) {
+			this.retrying = this.rowKey(row)
+			this.mineError = ''
+			this.mineMessage = ''
+			try {
+				const { data } = await axios.post(
+					`${BASE}/mine/retry`,
+					{ ids: [row.id] },
+					{ headers: { 'OCS-APIRequest': 'true' } },
+				)
+				const result = data?.ocs?.data ?? {}
+				// The server reports refusals; say so rather than showing a
+				// cheerful "done" for a retry that never ran.
+				this.mineMessage = (result.retried ?? 0) > 0
+					? this.t('Queued again — the next OCR run picks it up.')
+					: this.t('Not queued: this row is not yours to retry, or it is no longer waiting.')
+				await this.loadMine()
+			} catch (e) {
+				this.mineError = e?.response?.status ?? e?.message ?? 'unknown error'
+			} finally {
+				this.retrying = ''
+			}
 		},
 		async refresh() {
 			this.busy = true
@@ -274,5 +388,49 @@ export default {
 
 .ocrflow-panel__error {
 	margin-bottom: 1rem;
+}
+
+/* Your own rows: path first (it is what the user recognises), then the fix
+   hint, then the provenance. One row per line; the Retry button stays on the
+   inline end and never shrinks the text to nothing. */
+.ocrflow-panel__mine {
+	list-style: none;
+	padding: 0;
+	margin: calc(var(--default-grid-baseline, 4px) * 2) 0 0;
+}
+
+.ocrflow-panel__mine-row {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: calc(var(--default-grid-baseline, 4px) * 4);
+	padding: calc(var(--default-grid-baseline, 4px) * 3) 0;
+	border-bottom: 1px solid var(--color-border);
+}
+
+/* min-width: 0 is what lets a long path ellipsize instead of pushing the
+   button off the panel — the flex default (min-width: auto) refuses to. */
+.ocrflow-panel__mine-text {
+	display: flex;
+	min-width: 0;
+	flex-direction: column;
+	gap: calc(var(--default-grid-baseline, 4px) * 1);
+}
+
+.ocrflow-panel__mine-path {
+	overflow: hidden;
+	font-weight: bold;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.ocrflow-panel__mine-fix {
+	overflow-wrap: anywhere;
+}
+
+.ocrflow-panel__mine-meta {
+	color: var(--color-text-maxcontrast);
+	font-size: 0.9em;
+	overflow-wrap: anywhere;
 }
 </style>
