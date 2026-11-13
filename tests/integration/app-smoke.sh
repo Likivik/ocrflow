@@ -738,5 +738,198 @@ bytes_line=$($ENGINE exec "$NAME" sh -c "grep -c 'pending result artifacts' /var
 [ "${bytes_line:-0}" -ge 1 ] || fail "the reconcile tick logged no pending-result artifact line"
 ok "expired artifact swept: bytes deleted, row discarded, byte-total line logged"
 
+# --- Part B: the outcomes reader, its two doors, and the Decide actions -----
+#
+# The plan's [real-db] tests for the five tabs, on the real instance where
+# the ledger, the pending table and the user's file tree all meet real rows:
+#   * occ ocrflow:outcomes and GET /api/v1/outcomes name the SAME redo rows
+#     (one reader, two doors - the doors cannot disagree);
+#   * a non-admin is refused on the outcomes endpoints;
+#   * a POST without the OCS-APIRequest header is refused (CSRF);
+#   * an empty selection spends nothing;
+#   * the cap bounds one redo click, and the answer carries its estimate;
+#   * Apply refuses while versioning is unavailable (the previous content
+#     would be unrecoverable), applies once it is, and deletes the artifact;
+#   * Discard deletes the artifact and keeps the row as the audit trail.
+echo "== outcomes: one reader, two doors"
+
+# The bar decides below.pdf's tab at read time; pin it so the fixture is
+# stable no matter what an earlier section moved it to.
+occ config:app:set ocrflow ocr_accepted_engines --value '{"google":"3.15.0"}' >/dev/null
+# The cap for the redo test is set BEFORE the first outcomes request, so a
+# cached app-config read cannot serve a stale default on the redo POST.
+occ config:app:set ocrflow attention_retry_cap --value 1 >/dev/null
+
+if ! occ ocrflow:outcomes --verdict=redo >/tmp/ocrflow-outcomes-occ.log 2>&1; then
+  echo "-- occ ocrflow:outcomes said:"; tail -8 /tmp/ocrflow-outcomes-occ.log || true
+  fail "occ ocrflow:outcomes exited non-zero"
+fi
+occ_paths=$(grep -E '^(ledger|stash|job) ' /tmp/ocrflow-outcomes-occ.log | awk '{print $3}' | sort)
+[ -n "$occ_paths" ] \
+  || fail "occ ocrflow:outcomes listed no redo rows (below.pdf and the conflict must both be there)"
+
+code=$(curl -s -o /tmp/ocrflow-outcomes.json -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/outcomes?verdict=redo")
+[ "$code" = "200" ] || fail "GET /api/v1/outcomes should be 200, got $code body=$(cat /tmp/ocrflow-outcomes.json)"
+# The JSON body escapes "/" as "\/", so unescape before comparing with the
+# occ table's plain paths.
+api_paths=$(grep -oE '"path":"[^"]*"' /tmp/ocrflow-outcomes.json | cut -d'"' -f4 | sed 's|\\/|/|g' | sort)
+[ "$occ_paths" = "$api_paths" ] \
+  || fail "the endpoint and occ name different redo rows: occ=[$occ_paths] api=[$api_paths]"
+grep -q '"summary"' /tmp/ocrflow-outcomes.json || fail "the outcomes response carries no summary"
+grep -q '"pricing"' /tmp/ocrflow-outcomes.json || fail "the outcomes response carries no pricing"
+ok "outcomes: occ and the endpoint name the same redo rows"
+
+echo "== outcomes: admin-only, CSRF-checked, cap-bound"
+$ENGINE exec -e OC_PASS=bob-pass-123 -u www-data "$NAME" php occ user:add --password-from-env bob >/dev/null 2>&1 || true
+code=$(curl -s -o /tmp/ocrflow-bob -w '%{http_code}' -u "bob:bob-pass-123" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/outcomes?verdict=redo")
+[ "$code" = "403" ] || fail "a non-admin must be refused on /outcomes, got $code body=$(cat /tmp/ocrflow-bob)"
+
+code=$(curl -s -o /tmp/ocrflow-csrf -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'Accept: application/json' -d 'ids[]=1' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/outcomes/redo")
+[ "$code" = "412" ] || fail "a POST without the OCS header must be refused as CSRF, got $code body=$(cat /tmp/ocrflow-csrf)"
+
+# An empty selection spends nothing: zero retries and no queue change.
+before=$(sql "SELECT count(*) FROM ${JOBS}")
+code=$(curl -s -o /tmp/ocrflow-empty -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d '{"ids":[]}' "$BASE/ocs/v2.php/apps/ocrflow/api/v1/outcomes/redo")
+[ "$code" = "200" ] || fail "an empty selection should be a 200 no-op, got $code body=$(cat /tmp/ocrflow-empty)"
+grep -q '"retried":0' /tmp/ocrflow-empty || fail "an empty selection must retry nothing: $(cat /tmp/ocrflow-empty)"
+after=$(sql "SELECT count(*) FROM ${JOBS}")
+[ "$before" = "$after" ] || fail "an empty selection changed the jobs table (${before} -> ${after})"
+ok "non-admin refused; CSRF refused; empty selection spends nothing"
+
+# The cap bounds one click: two redo rows selected, cap 1, exactly one spent.
+below_id=$(sql "SELECT file_id FROM ${FILES} WHERE path LIKE '%/below.pdf'")
+[ -n "$below_id" ] || fail "no ledger row for below.pdf to select"
+code=$(curl -s -o /tmp/ocrflow-redo -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d "{\"ids\":[${below_id},${fid}]}" "$BASE/ocs/v2.php/apps/ocrflow/api/v1/outcomes/redo")
+[ "$code" = "200" ] || fail "the capped redo should be 200, got $code body=$(cat /tmp/ocrflow-redo)"
+grep -q '"retried":1' /tmp/ocrflow-redo || fail "the cap must bound one click to 1 retry: $(cat /tmp/ocrflow-redo)"
+grep -q '"estimate"' /tmp/ocrflow-redo || fail "the redo answer carries no estimate: $(cat /tmp/ocrflow-redo)"
+ok "the cap bounds one redo click and the answer carries its estimate"
+
+# The web caches the app-enabled state across requests; an occ flip of
+# files_versions takes up to ~60s to reach the web. Polling that state
+# directly needs a non-mutating probe: Apply on a stash whose FILE is gone
+# is refused either way, and WHICH refusal comes back says what the web
+# thinks about versioning.
+sql "INSERT INTO oc_ocrflow_pending_results (file_id, etag, artifact_path, engine, engine_version, pages, created_at, status) VALUES (999999999, 'probe', 'probe.pdf', 'google', '3.15.0', 0, 0, 'pending')" >/dev/null
+probe_id=$(sql "SELECT id FROM oc_ocrflow_pending_results WHERE etag='probe'")
+[ -n "$probe_id" ] || fail "the versioning probe row could not be inserted"
+
+wait_web_versions() { # $1: "unavailable" or "available"
+  deadline=$(( $(date +%s) + 150 ))
+  while :; do
+    curl -s -o /tmp/ocrflow-versions-probe -u "${ADMIN_USER}:${ADMIN_PASS}" \
+      -H 'OCS-APIRequest: true' -H 'Accept: application/json' -H 'Content-Type: application/json' \
+      -d "{\"id\":${probe_id}}" "$BASE/ocs/v2.php/apps/ocrflow/api/v1/outcomes/apply" >/dev/null
+    if [ "$1" = "unavailable" ]; then
+      grep -q 'versioning is unavailable' /tmp/ocrflow-versions-probe && return 0
+    else
+      grep -q 'the file this stash belongs to is gone' /tmp/ocrflow-versions-probe && return 0
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] \
+      || fail "the web never saw files_versions $1: $(cat /tmp/ocrflow-versions-probe)"
+    sleep 5
+  done
+}
+
+echo "== outcomes: Apply and Discard for a stashed result"
+# A fresh stash: upload, claim, change the bytes under it, hand in a result
+# for the OLD bytes - the ladder stashes it instead of overwriting.
+# Purge earlier sections' leftover queued rows first, so claim_one claims
+# THIS upload's job and not a stale one.
+sql "DELETE FROM ${JOBS} WHERE status='queued'" >/dev/null
+printf '\xff\xd8\xff\xe0decide-source' > /tmp/ocrflow-decide.jpg
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-decide.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/decide.jpg" || fail "WebDAV upload of decide.jpg failed"
+sleep 2
+claim_one
+# Fetch the claimed bytes first: that is what arms source_sha256, so the
+# later overwrite is a detectable conflict (the ladder's stash rung).
+curl -s -o /tmp/ocrflow-decide-bytes -H 'OCS-APIRequest: true' \
+  -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/file" >/dev/null
+printf '\xff\xd8\xff\xe0decide-edited' > /tmp/ocrflow-decide-edited.jpg
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-decide-edited.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/decide.jpg" || fail "WebDAV overwrite of decide.jpg failed"
+code=$(curl -s -o /tmp/ocrflow-decide-stash -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
+  -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  --data-binary @/tmp/ocrflow-produced.pdf \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result-file?name=decide.pdf&engine=google&engine_version=3.15.0&pages=2")
+[ "$code" = "200" ] || fail "the decide stash should answer 200, got $code body=$(cat /tmp/ocrflow-decide-stash)"
+grep -q '"stashed":true' /tmp/ocrflow-decide-stash \
+  || fail "the decide result was not stashed: $(cat /tmp/ocrflow-decide-stash)"
+stash_id=$(sql "SELECT id FROM oc_ocrflow_pending_results WHERE status='pending' ORDER BY id DESC LIMIT 1")
+[ -n "$stash_id" ] || fail "no pending row for the decide stash"
+
+# Versioning off: Apply must refuse - overwriting would be unrecoverable.
+occ app:disable files_versions >/dev/null 2>&1 || true
+wait_web_versions unavailable
+code=$(curl -s -o /tmp/ocrflow-apply-refused -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d "{\"id\":${stash_id}}" "$BASE/ocs/v2.php/apps/ocrflow/api/v1/outcomes/apply")
+[ "$code" = "409" ] || fail "Apply without versioning should be a 409 refusal, got $code body=$(cat /tmp/ocrflow-apply-refused)"
+grep -q '"warning"' /tmp/ocrflow-apply-refused \
+  || fail "the Apply refusal must carry the warning a human reads: $(cat /tmp/ocrflow-apply-refused)"
+state=$(sql "SELECT status FROM oc_ocrflow_pending_results WHERE id=${stash_id}")
+[ "$state" = "pending" ] || fail "a refused Apply must leave the stash pending, got '${state}'"
+ok "Apply refuses with a warning while versioning is unavailable"
+
+# Versioning on: Apply writes the artifact over the file and closes the row.
+occ app:enable files_versions >/dev/null 2>&1 || fail "could not enable files_versions"
+wait_web_versions available
+code=$(curl -s -o /tmp/ocrflow-apply -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d "{\"id\":${stash_id}}" "$BASE/ocs/v2.php/apps/ocrflow/api/v1/outcomes/apply")
+[ "$code" = "200" ] || fail "Apply with versioning should be 200, got $code body=$(cat /tmp/ocrflow-apply)"
+grep -q '"applied"' /tmp/ocrflow-apply || fail "the apply answer should say applied: $(cat /tmp/ocrflow-apply)"
+state=$(sql "SELECT status FROM oc_ocrflow_pending_results WHERE id=${stash_id}")
+[ "$state" = "applied" ] || fail "the applied row should be closed as applied, got '${state}'"
+
+# Discard on a second fresh stash: bytes deleted, row kept.
+sql "DELETE FROM ${JOBS} WHERE status='queued'" >/dev/null
+printf '\xff\xd8\xff\xe0discard-source' > /tmp/ocrflow-discard.jpg
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-discard.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/discard.jpg" || fail "WebDAV upload of discard.jpg failed"
+sleep 2
+claim_one
+# Arm source_sha256 the same way, so the overwrite conflicts.
+curl -s -o /tmp/ocrflow-discard-bytes -H 'OCS-APIRequest: true' \
+  -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/file" >/dev/null
+printf '\xff\xd8\xff\xe0discard-edited' > /tmp/ocrflow-discard-edited.jpg
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-discard-edited.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/discard.jpg" || fail "WebDAV overwrite of discard.jpg failed"
+code=$(curl -s -o /tmp/ocrflow-discard-stash -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
+  -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  --data-binary @/tmp/ocrflow-produced.pdf \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result-file?name=discard.pdf&engine=google&engine_version=3.15.0&pages=1")
+[ "$code" = "200" ] || fail "the discard stash should answer 200, got $code body=$(cat /tmp/ocrflow-discard-stash)"
+discard_id=$(sql "SELECT id FROM oc_ocrflow_pending_results WHERE status='pending' ORDER BY id DESC LIMIT 1")
+artifact_name=$(sql "SELECT artifact_path FROM oc_ocrflow_pending_results WHERE id=${discard_id}")
+code=$(curl -s -o /tmp/ocrflow-discard-done -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d "{\"id\":${discard_id}}" "$BASE/ocs/v2.php/apps/ocrflow/api/v1/outcomes/discard")
+[ "$code" = "200" ] || fail "Discard should be 200, got $code body=$(cat /tmp/ocrflow-discard-done)"
+state=$(sql "SELECT status FROM oc_ocrflow_pending_results WHERE id=${discard_id}")
+[ "$state" = "discarded" ] || fail "the discarded row should be kept as discarded, got '${state}'"
+left=$($ENGINE exec "$NAME" sh -c "ls /var/www/html/data/appdata_*/ocrflow/pending-results/ 2>/dev/null | grep -c '${artifact_name}' || true")
+[ "$left" = "0" ] || fail "the discarded artifact bytes were not deleted (${artifact_name} left)"
+ok "Apply writes with versioning; Discard deletes the bytes and keeps the row"
+
+# The probe row served its purpose; it is not an outcome.
+sql "DELETE FROM oc_ocrflow_pending_results WHERE id=${probe_id}" >/dev/null
+
+# Restore the default cap for whoever runs the instance after the smoke.
+occ config:app:set ocrflow attention_retry_cap --value 500 >/dev/null
+
 echo "ALL INTEGRATION ASSERTIONS PASSED"
 

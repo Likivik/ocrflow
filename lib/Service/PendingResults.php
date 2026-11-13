@@ -54,15 +54,19 @@ class PendingResults
 
 	public const STATUS_DISCARDED = 'discarded';
 
+	public const STATUS_APPLIED = 'applied';
+
 	private const TABLE = 'ocrflow_pending_results';
 
 	private const FOLDER = 'pending-results';
 
 	public function __construct(
-		private IDBConnection $db,
+		private ?IDBConnection $db,
 		private IAppDataFactory $appDataFactory,
 		private IConfig $config,
 		private LoggerInterface $logger,
+		private ?\OCP\Files\IRootFolder $rootFolder = null,
+		private ?\OCP\App\IAppManager $appManager = null,
 	) {
 	}
 
@@ -209,6 +213,129 @@ class PendingResults
 	public static function artifactName(int $fileId, ?string $etag): string
 	{
 		return sprintf('pending-%d-%s.pdf', $fileId, hash('sha256', $etag ?? ''));
+	}
+
+	/**
+	 * Apply a stashed result to its file — the Decide tab's Apply button.
+	 *
+	 * Apply OVERWRITES the current content of the file with the artifact,
+	 * so the previous content must be recoverable first: if versioning is
+	 * unavailable the answer is a refusal with the warning a human reads,
+	 * never a silent overwrite. That is the plan's hard rule; there is no
+	 * path from here that fabricates a version.
+	 *
+	 * @return array{status: 'applied'|'refused', warning: ?string}
+	 */
+	public function apply(int $id): array
+	{
+		$row = $this->fetchRow($id);
+		if ($row === null || ($row['status'] ?? null) !== self::STATUS_PENDING) {
+			return ['status' => 'refused', 'warning' => 'no pending stash with this id'];
+		}
+
+		if (!$this->versioningAvailable()) {
+			$this->logger->warning('ocrflow: apply refused for stash ' . $id . ': versioning is unavailable, the previous content of the file would not be recoverable');
+			return [
+				'status' => 'refused',
+				'warning' => 'versioning is unavailable: applying would overwrite the file with no way back to its previous content',
+			];
+		}
+
+		$file = $this->nodeForFile((int) ($row['file_id'] ?? 0));
+		if ($file === null) {
+			return ['status' => 'refused', 'warning' => 'the file this stash belongs to is gone'];
+		}
+
+		try {
+			$artifact = $this->folder()->getFile((string) $row['artifact_path']);
+			$file->putContent($artifact->read());
+		} catch (\Throwable $e) {
+			$this->logger->warning('ocrflow: apply failed for stash ' . $id . ': ' . $e->getMessage());
+			return ['status' => 'refused', 'warning' => 'the stashed bytes could not be written: ' . $e->getMessage()];
+		}
+
+		$this->markRow($id, self::STATUS_APPLIED);
+		// The bytes now live in the file: the appdata copy is not a keeper.
+		$this->deleteArtifact((string) $row['artifact_path']);
+		$this->logger->info('ocrflow: stash ' . $id . ' applied to file_id ' . (int) ($row['file_id'] ?? 0) . '; the previous content is a version');
+		return ['status' => 'applied', 'warning' => null];
+	}
+
+	/**
+	 * Discard a stashed result — the Decide tab's Discard button. The same
+	 * end state the retention sweep produces: bytes deleted, row kept as
+	 * the audit trail. Idempotent in effect: a row that is not pending is
+	 * left alone, so a double click or a stale page cannot re-decide it.
+	 *
+	 * @return array{status: 'discarded'|'refused', warning: ?string}
+	 */
+	public function discard(int $id): array
+	{
+		$row = $this->fetchRow($id);
+		if ($row === null || ($row['status'] ?? null) !== self::STATUS_PENDING) {
+			return ['status' => 'refused', 'warning' => 'no pending stash with this id'];
+		}
+
+		$this->deleteArtifact((string) $row['artifact_path']);
+		$this->discardRow($id);
+		return ['status' => 'discarded', 'warning' => null];
+	}
+
+	/**
+	 * One row by id, with everything Apply and Discard need.
+	 *
+	 * @return array<string, mixed>|null
+	 */
+	protected function fetchRow(int $id): ?array
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('id', 'file_id', 'etag', 'artifact_path', 'engine', 'engine_version', 'pages', 'created_at', 'status')
+			->from(self::TABLE)
+			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, \PDO::PARAM_INT)))
+			->setMaxResults(1);
+		$result = $qb->executeQuery();
+		try {
+			$row = $result->fetchAssociative();
+			return $row === false ? null : $row;
+		} finally {
+			$result->closeCursor();
+		}
+	}
+
+	/**
+	 * Close a row with its decision. The status column is the audit trail.
+	 */
+	protected function markRow(int $id, string $status): void
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->update(self::TABLE)
+			->set('status', $qb->createNamedParameter($status))
+			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, \PDO::PARAM_INT)));
+		$qb->executeStatement();
+	}
+
+	/**
+	 * The file node a stash belongs to, or null when it is gone. The root
+	 * folder is optional so worker-plane consumers (and tests) can omit it.
+	 */
+	protected function nodeForFile(int $fileId): ?\OCP\Files\File
+	{
+		if ($this->rootFolder === null) {
+			return null;
+		}
+		$nodes = $this->rootFolder->getById($fileId);
+		$node = $nodes[0] ?? null;
+		return $node instanceof \OCP\Files\File ? $node : null;
+	}
+
+	/**
+	 * Is the previous content of a file recoverable after Apply? The
+	 * versions app must be enabled — without it, overwriting is data loss
+	 * dressed up as a convenience, and Apply refuses instead.
+	 */
+	protected function versioningAvailable(): bool
+	{
+		return $this->appManager !== null && $this->appManager->isEnabledForUser('files_versions');
 	}
 
 	private function folder(): ISimpleFolder
