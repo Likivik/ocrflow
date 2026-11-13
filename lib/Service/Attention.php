@@ -52,13 +52,16 @@ class Attention
 	}
 
 	/**
-	 * The worklist, newest first.
+	 * The worklist, newest first — for ANY jobs-verdict. Generalised for the
+	 * outcomes reader: needs_fix is the default (the attention worklist),
+	 * and wait / drop are the same query over other spellings, so the tabs
+	 * and `occ ocrflow:errors` cannot disagree about the rows.
 	 *
 	 * @return array{rows: list<array{id: int, path: string, code: string, label: string, fix: string, error: ?string, attempts: int, finished_at: ?int}>, total: int, cap: int}
 	 */
-	public function list(int $limit, int $offset = 0, ?string $code = null): array
+	public function list(int $limit, int $offset = 0, ?string $code = null, string $verdict = RetryPolicy::VERDICT_NEEDS_FIX): array
 	{
-		$spellings = $this->spellings($code);
+		$spellings = $this->spellings($code, $verdict);
 		$total = $this->fetchTotal($spellings);
 		if ($offset >= $total || $limit <= 0) {
 			return ['rows' => [], 'total' => $total, 'cap' => $this->cap()];
@@ -182,16 +185,36 @@ class Attention
 	}
 
 	/**
-	 * The spellings to select on: every needs_fix name and alias, or the
-	 * spellings of ONE code when the caller filters. An unknown filter code
-	 * selects nothing — it cannot match any row by definition.
+	 * The retry door for the outcomes reader: a Decide row names a FILE, not
+	 * a job (the ledger and the stash are per-file), so the door takes a
+	 * file id. Same retry implementation as requeue and attention — there
+	 * is no second retry path a redo could drift into.
+	 */
+	public function retryByFileId(int $fileId, string $path, string $door = 'outcomes'): int
+	{
+		return $this->retryFile($fileId, $path, $door);
+	}
+
+	/**
+	 * The count of job rows for one verdict, for the tab badges. The total
+	 * `list()` would report, without building the rows.
+	 */
+	public function countForVerdict(string $verdict): int
+	{
+		return $this->fetchTotal($this->spellings(null, $verdict));
+	}
+
+	/**
+	 * The spellings to select on: every name and alias of ONE verdict, or
+	 * the spellings of ONE code when the caller filters. An unknown filter
+	 * code selects nothing — it cannot match any row by definition.
 	 *
 	 * @return list<string>
 	 */
-	private function spellings(?string $code): array
+	private function spellings(?string $code, string $verdict = RetryPolicy::VERDICT_NEEDS_FIX): array
 	{
 		if ($code === null || $code === '') {
-			return $this->retryPolicy->spellingsForVerdict(RetryPolicy::VERDICT_NEEDS_FIX);
+			return $this->retryPolicy->spellingsForVerdict($verdict);
 		}
 		return $this->retryPolicy->spellingsOf($code);
 	}

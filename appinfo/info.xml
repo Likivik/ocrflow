@@ -51,6 +51,7 @@ Behaviour worth knowing:
 		<command>OCA\OcrFlow\Command\Engine</command>
 		<command>OCA\OcrFlow\Command\Requeue</command>
 		<command>OCA\OcrFlow\Command\Errors</command>
+		<command>OCA\OcrFlow\Command\Outcomes</command>
 	</commands>
 	<settings>
 		<!-- Schema order inside <settings>: admin, admin-section, personal,

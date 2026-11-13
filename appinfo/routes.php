@@ -48,5 +48,17 @@ return [
         // One implementation, two front doors: this and occ ocrflow:requeue
         // share the Attention service's retry. POST, so CSRF is checked.
         ['name' => 'attention#retry', 'url' => '/api/v1/attention/retry', 'verb' => 'POST'],
+
+        // --- outcomes: the five admin tabs (see Outcomes service) ---------
+        // One reader for three origins (jobs, ledger, pending stashes) and
+        // five tabs; admin only, like attention above.
+        ['name' => 'outcomes#index', 'url' => '/api/v1/outcomes', 'verb' => 'GET'],
+        // Re-OCR a selection of Decide rows: {ids: [...]} or {code: ...}.
+        // POST, CSRF-checked and capped — a paid batch, never a free for all.
+        ['name' => 'outcomes#redo', 'url' => '/api/v1/outcomes/redo', 'verb' => 'POST'],
+        // Apply / Discard a stashed pending result. Apply overwrites a
+        // file's content, so it refuses unless versioning can undo it.
+        ['name' => 'outcomes#apply', 'url' => '/api/v1/outcomes/apply', 'verb' => 'POST'],
+        ['name' => 'outcomes#discard', 'url' => '/api/v1/outcomes/discard', 'verb' => 'POST'],
     ],
 ];
