@@ -367,8 +367,23 @@ class Outcomes
 		// skip_ocred_by_ocrflow rows carry FACTS; the bar decides the tab at
 		// read time, so the same row moves when the bar moves.
 		if ($canonical === 'skip_ocred_by_ocrflow') {
+			// A stamp with NO engine was written before provenance was
+			// recorded (before the engine column existed). Missing facts
+			// are never a reason to spend: it cannot be compared to the
+			// bar, so it is NOT a redo candidate — Settled, provenance
+			// unknown, with the note saying so. Only a KNOWN engine below
+			// the bar goes to Decide.
+			$engine = is_string($row['engine'] ?? null) && $row['engine'] !== '' ? $row['engine'] : null;
+			if ($engine === null) {
+				return $this->tabRow(
+					$row,
+					'settled',
+					done: false,
+					note: 'engine unknown: stamped before provenance was recorded',
+				);
+			}
 			$verdict = $this->enginePolicy->stampVerdict(
-				is_string($row['engine'] ?? null) && $row['engine'] !== '' ? $row['engine'] : null,
+				$engine,
 				is_string($row['engine_version'] ?? null) && $row['engine_version'] !== '' ? $row['engine_version'] : null,
 			) === RetryPolicy::VERDICT_NOTHING_TO_DO
 				? 'settled'
@@ -394,7 +409,7 @@ class Outcomes
 	 * @param array<string, mixed> $row
 	 * @return array<string, mixed>
 	 */
-	private function tabRow(array $row, string $verdict, bool $done = false): array
+	private function tabRow(array $row, string $verdict, bool $done = false, ?string $note = null): array
 	{
 		$canonical = $this->retryPolicy->canonical((string) ($row['reason'] ?? ''));
 		$entry = $this->retryPolicy->entry($canonical);
@@ -415,6 +430,7 @@ class Outcomes
 			'etag' => ($row['etag'] ?? null) !== null ? (string) $row['etag'] : null,
 			'pending' => false,
 			'done' => $done,
+			'note' => $note,
 			'verdict' => $verdict,
 		];
 	}

@@ -815,6 +815,42 @@ grep -q '"retried":1' /tmp/ocrflow-redo || fail "the cap must bound one click to
 grep -q '"estimate"' /tmp/ocrflow-redo || fail "the redo answer carries no estimate: $(cat /tmp/ocrflow-redo)"
 ok "the cap bounds one redo click and the answer carries its estimate"
 
+# -- [real-db] a pre-provenance stamp (reason ours, engine NULL) is Settled
+# with an explicit note, never a redo candidate; only a known below-bar
+# engine goes to Decide, and a redo selection never includes the NULL row.
+echo "== outcomes: a pre-provenance stamp is Settled, never Decide"
+sql "INSERT INTO ${FILES} (file_id, path, status, reason, engine, engine_version, etag, updated_at) VALUES (990000001, 'admin/files/stamped-old.pdf', 'skipped', 'stamped_good_by_us', NULL, NULL, 'old-stamp', 1)" >/dev/null
+code=$(curl -s -o /tmp/ocrflow-oldsettled -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/outcomes?verdict=settled")
+[ "$code" = "200" ] || fail "GET settled should be 200, got $code body=$(cat /tmp/ocrflow-oldsettled)"
+grep -q 'stamped-old.pdf' /tmp/ocrflow-oldsettled \
+  || fail "the NULL-engine stamped row must be Settled: $(cat /tmp/ocrflow-oldsettled)"
+grep -q 'engine unknown: stamped before provenance was recorded' /tmp/ocrflow-oldsettled \
+  || fail "the settled pre-provenance row must carry the explicit note: $(cat /tmp/ocrflow-oldsettled)"
+code=$(curl -s -o /tmp/ocrflow-oldredo -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/outcomes?verdict=redo")
+[ "$code" = "200" ] || fail "GET redo should be 200, got $code body=$(cat /tmp/ocrflow-oldredo)"
+if grep -q 'stamped-old.pdf' /tmp/ocrflow-oldredo; then
+  fail "the NULL-engine stamped row must NEVER be a redo candidate: $(cat /tmp/ocrflow-oldredo)"
+fi
+grep -q 'below.pdf' /tmp/ocrflow-oldredo \
+  || fail "the known below-bar row must stay a redo candidate: $(cat /tmp/ocrflow-oldredo)"
+# A redo selection that names the NULL-engine row spends nothing on it: the
+# estimate counts only the below-bar row, and the retry cap allows it.
+old_id=$(sql "SELECT file_id FROM ${FILES} WHERE path LIKE '%/stamped-old.pdf'")
+below_id2=$(sql "SELECT file_id FROM ${FILES} WHERE path LIKE '%/below.pdf'")
+code=$(curl -s -o /tmp/ocrflow-oldsel -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d "{\"ids\":[${old_id},${below_id2}]}" "$BASE/ocs/v2.php/apps/ocrflow/api/v1/outcomes/redo")
+[ "$code" = "200" ] || fail "the redo selection should be 200, got $code body=$(cat /tmp/ocrflow-oldsel)"
+grep -q '"retried":1' /tmp/ocrflow-oldsel \
+  || fail "only the below-bar row may be retried: $(cat /tmp/ocrflow-oldsel)"
+grep -q '"estimate"' /tmp/ocrflow-oldsel || fail "the redo answer carries no estimate: $(cat /tmp/ocrflow-oldsel)"
+sql "DELETE FROM ${FILES} WHERE file_id = ${old_id}" >/dev/null
+ok "pre-provenance stamp: Settled with the note, never in Decide, never retried"
+
 # The web caches the app-enabled state across requests; an occ flip of
 # files_versions takes up to ~60s to reach the web. Polling that state
 # directly needs a non-mutating probe: Apply on a stash whose FILE is gone
