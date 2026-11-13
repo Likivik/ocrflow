@@ -499,6 +499,15 @@ export default {
 	max-width: 40rem;
 }
 
+/* Nextcloud's app-navigation toggle is `position: fixed` at top:50px, 44x44
+   at the inline start (core/css/server.css), so without top padding the first
+   line of the panel sits underneath it. Reserve its height when narrow. */
+@media (max-width: 1024px) {
+	.ocrflow-admin {
+		padding-top: calc(var(--default-grid-baseline, 4px) * 12);
+	}
+}
+
 .ocrflow-admin__hint {
 	color: var(--color-text-maxcontrast);
 }
