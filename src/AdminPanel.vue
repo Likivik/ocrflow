@@ -307,7 +307,7 @@ export default {
 		t(text, params) {
 			// The real translation function, not a passthrough: a passthrough
 			// makes the whole interface English in every locale, silently.
-			return translate(text, params)
+			return translate('ocrflow', text, params)
 		},
 		switchTab(verdict) {
 			this.verdict = verdict
