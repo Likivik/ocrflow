@@ -328,6 +328,73 @@ class OutcomesTest extends TestCase
 	}
 
 	/**
+	 * [unit] Our own stamp with NO engine (written before provenance was
+	 * recorded) is Settled — provenance unknown — with an explicit note,
+	 * and never a redo candidate. Both spellings, and an empty-string
+	 * engine too. Catches: a NULL engine falling through the bar
+	 * comparison into Decide, where one click would re-OCR a thousand
+	 * files we already OCR'd.
+	 */
+	public function testAPreProvenanceStampIsSettledUnknownNeverDecide(): void
+	{
+		$store = new StoreOutcomes([]);
+		$store->ledger = [
+			// the legacy spelling, engine NULL as the old rows were written
+			$this->ledgerRow(21, 'stamped_good_by_us', ['engine' => null, 'engine_version' => null]),
+			// the current spelling, engine an empty string (same absence)
+			$this->ledgerRow(22, 'skip_ocred_by_ocrflow', ['engine' => '', 'engine_version' => null]),
+		];
+
+		$redoPaths = array_column($store->list('redo', 100)['rows'], 'path');
+		$this->assertNotContains('alice/files/file21.pdf', $redoPaths, 'a NULL-engine stamp must never be a redo candidate');
+		$this->assertNotContains('alice/files/file22.pdf', $redoPaths, 'an empty-engine stamp must never be a redo candidate');
+
+		$settledPaths = array_column($store->list('settled', 100)['rows'], 'path');
+		foreach (['alice/files/file21.pdf', 'alice/files/file22.pdf'] as $path) {
+			$this->assertContains($path, $settledPaths, $path . ' must be Settled (provenance unknown)');
+		}
+
+		$settledRows = $store->list('settled', 100)['rows'];
+		foreach ($settledRows as $row) {
+			$this->assertSame(
+				'engine unknown: stamped before provenance was recorded',
+				$row['note'],
+				'a settled pre-provenance row must carry the explicit note',
+			);
+		}
+
+		// An estimate never picks them up: unknown, never fabricated.
+		$estimate = $store->estimate([21, 22], null);
+		$this->assertSame(0, $estimate['files'], 'a settled row must not enter a redo estimate');
+		$this->assertFalse($estimate['pages_known']);
+		$this->assertNull($estimate['cost']);
+	}
+
+	/**
+	 * [unit] Regression guards for the rule being kept: a KNOWN engine
+	 * below the bar IS a Decide row; a known engine at or above the bar is
+	 * Settled with no note. Only provenance we can compare goes to Decide.
+	 */
+	public function testKnownEnginesStillSplitByTheBar(): void
+	{
+		$store = new StoreOutcomes([]);
+		$store->ledger = [
+			$this->ledgerRow(31, 'skip_ocred_by_ocrflow', ['engine_version' => '3.9.0']),
+			$this->ledgerRow(32, 'skip_ocred_by_ocrflow', ['engine_version' => '3.15.0']),
+		];
+
+		$redoPaths = array_column($store->list('redo', 100)['rows'], 'path');
+		$this->assertContains('alice/files/file31.pdf', $redoPaths, 'a known below-bar engine must stay in Decide');
+
+		$settledRows = $store->list('settled', 100)['rows'];
+		$this->assertContains('alice/files/file32.pdf', array_column($settledRows, 'path'), 'a known at-bar engine must stay Settled');
+		foreach ($settledRows as $row) {
+			$this->assertNotSame('alice/files/file31.pdf', $row['path']);
+			$this->assertNull($row['note'], 'a bar-settled row carries no provenance note');
+		}
+	}
+
+	/**
 	 * [unit] list() pages: limit and offset slice the classified rows, and
 	 * total is the classified count. Catches: totals counted before the
 	 * bar classification (a badge that disagrees with the tab).

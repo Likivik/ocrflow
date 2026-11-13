@@ -136,6 +136,7 @@
 					</div>
 					<p class="ocrflow-attention__fix">
 						{{ row.fix }}
+						<span v-if="row.note" class="ocrflow-attention__engine">{{ row.note }}</span>
 						<span v-if="row.engine" class="ocrflow-attention__engine">
 							{{ t('(OCR’d by {engine} {version})', { engine: row.engine, version: row.engine_version ?? t('version unknown') }) }}
 						</span>
