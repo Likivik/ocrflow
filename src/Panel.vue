@@ -20,7 +20,7 @@
 			{{ t('Queue') }}
 		</h3>
 		<ul v-if="rows.length" class="ocrflow-panel__counts">
-			<li v-for="row in rows" :key="row.status">
+			<li v-for="row in rows" :key="row.status" :class="{ 'is-error': row.status === 'error' }">
 				<span class="ocrflow-panel__status">{{ row.status }}</span>
 				<span class="ocrflow-panel__count">{{ row.count }}</span>
 			</li>
@@ -200,21 +200,31 @@ export default {
 }
 
 .ocrflow-panel__heading {
-	margin-top: 1.5rem;
+	margin-top: calc(var(--default-grid-baseline, 4px) * 6);
 }
 
 .ocrflow-panel__counts {
 	list-style: none;
 	padding: 0;
-	margin: 0.5rem 0 0;
+	margin: calc(var(--default-grid-baseline, 4px) * 2) 0 0;
 }
 
 .ocrflow-panel__counts li {
 	display: flex;
 	justify-content: space-between;
-	max-width: 16rem;
-	padding: 0.25rem 0;
+	gap: calc(var(--default-grid-baseline, 4px) * 4);
+	/* Full width, not a 16rem island: the counts should line up with the
+	   controls below them instead of stopping two thirds across the panel. */
+	width: 100%;
+	padding: var(--default-grid-baseline, 4px) 0;
 	border-bottom: 1px solid var(--color-border);
+}
+
+.ocrflow-panel__status {
+	/* Presentation only: the machine state stays exactly as the queue reports
+	   it ("done", "error", "skipped", and whatever comes next); the reader gets
+	   a capital first letter. */
+	text-transform: capitalize;
 }
 
 .ocrflow-panel__count {
@@ -222,11 +232,28 @@ export default {
 	font-weight: bold;
 }
 
+/* The one state that needs colour: failures. Nextcloud's status tokens carry
+   the light/dark theme switch, so no hex lives here. */
+.ocrflow-panel__counts li.is-error .ocrflow-panel__count {
+	color: var(--color-error);
+}
+
 .ocrflow-panel__form {
 	display: flex;
-	gap: 0.5rem;
+	gap: calc(var(--default-grid-baseline, 4px) * 2);
 	align-items: flex-end;
-	margin-top: 0.5rem;
+	flex-wrap: wrap;
+	margin-top: calc(var(--default-grid-baseline, 4px) * 2);
+}
+
+/* On a phone the input and the button cannot share a row: the button shrinks
+   until its label truncates to "S…". Stack them instead — one full-width field,
+   one full-width action. */
+@media (max-width: 600px) {
+	.ocrflow-panel__form {
+		flex-direction: column;
+		align-items: stretch;
+	}
 }
 
 .ocrflow-panel__actions {

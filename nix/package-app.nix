@@ -18,7 +18,6 @@ let
     "lib"
     "templates"
     "js"
-    "css"
     "img"
     "l10n"
     "composer.json"
@@ -53,7 +52,7 @@ stdenv.mkDerivation {
     # The asset whitelist above is easy to forget and impossible to notice: a
     # missing directory is not a build error, it is a 404 in the browser, and
     # the panel renders unstyled with no clue why. Fail the build instead.
-    for asset in js/ocrflow-panel.js css/ocrflow-panel.css; do
+    for asset in js/ocrflow-panel.js; do
       if [ ! -f "$out/apps/ocrflow/$asset" ]; then
         echo "packaged app is missing $asset — is its directory in 'keep'?" >&2
         exit 1

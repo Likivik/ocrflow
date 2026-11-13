@@ -34,7 +34,6 @@ class Admin implements ISettings
 	public function getForm(): TemplateResponse
 	{
 		Util::addScript(Application::APP_ID, 'ocrflow-panel');
-		Util::addStyle(Application::APP_ID, 'ocrflow-panel');
 
 		return new TemplateResponse(
 			Application::APP_ID,
