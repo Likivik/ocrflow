@@ -161,6 +161,40 @@ class FileExchange
 	}
 
 	/**
+	 * The node's current content hash, or null when the node is gone.
+	 *
+	 * The ladder's second rung compares this with the hash recorded at
+	 * download time: identical bytes under a new etag is a metadata-only
+	 * rewrite, not a conflict — the result may still be written.
+	 */
+	public function contentSha256(string $owner, string $relative): ?string
+	{
+		try {
+			$node = $this->resolve($owner, $relative);
+		} catch (NotFoundException) {
+			// Degraded by design, like currentEtag(): null is this
+			// method's answer for "nothing to hash".
+			return null;
+		}
+		if (!$node instanceof File) {
+			return null;
+		}
+		$handle = $node->fopen('rb');
+		if ($handle === false) {
+			return null;
+		}
+		try {
+			$hash = hash_init('sha256');
+			while (($chunk = fread($handle, 1 << 20)) !== false && $chunk !== '') {
+				hash_update($hash, $chunk);
+			}
+			return hash_final($hash);
+		} finally {
+			fclose($handle);
+		}
+	}
+
+	/**
 	 * `scan.pdf` then `scan (1).pdf`, `scan (2).pdf` — the naming Nextcloud's own
 	 * clients use, so a second OCR never clobbers the first.
 	 *

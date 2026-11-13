@@ -809,6 +809,35 @@ class Queue extends QBMapper
 	}
 
 	/**
+	 * Record the hash of the bytes `file()` served the worker (the ladder's
+	 * second rung compares it with the file's content at write time).
+	 *
+	 * Not claim-guarded: it is written while the claim is live, before the
+	 * worker has the bytes, and it never changes the job's status.
+	 */
+	public function recordSourceHash(int $id, string $sha256): void
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->update(self::JOBS)
+			->set('source_sha256', $qb->createNamedParameter($sha256))
+			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)));
+		$qb->executeStatement();
+	}
+
+	/**
+	 * Re-arm the etag of our own successful write, so the ladder recognises
+	 * a retried upload of the same result instead of stashing it.
+	 */
+	public function armWrittenEtag(int $id, string $etag): void
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->update(self::JOBS)
+			->set('written_etag', $qb->createNamedParameter($etag))
+			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)));
+		$qb->executeStatement();
+	}
+
+	/**
 	 * Write the per-stage events the worker reported.
 	 *
 	 * The events arrive as the decoded `stage_events` payload. Everything

@@ -49,9 +49,20 @@ class _StubQueueClient:
         claim: str | None = None,
         engine: str | None = None,
         engine_version: str | None = None,
+        source_converted: str | None = None,
+        source_path: str | None = None,
     ) -> dict:
         self.calls.append(
-            ("result_file", job_id, name, Path(source).read_bytes(), engine, engine_version)
+            (
+                "result_file",
+                job_id,
+                name,
+                Path(source).read_bytes(),
+                engine,
+                engine_version,
+                source_converted,
+                source_path,
+            )
         )
         return {
             "path": "/likivik/files/scan.pdf",
@@ -123,7 +134,36 @@ def test_beside_result_uses_the_name_the_app_assigned(api, tmp_path):
     assert landed == "/likivik/files/scan.pdf"
     assert api.calls[0][0] == "result_file"
     assert api.calls[0][1] == 7
-    assert api.calls[0][4:] == ("google", "3.15.0"), "the settle facts ride along on this path too"
+    assert api.calls[0][4:6] == ("google", "3.15.0"), "the settle facts ride along on this path too"
+    assert api.calls[0][6:] == (None, None), "no conversion was claimed"
+
+
+def test_a_conversion_sends_the_trash_intent_with_the_bytes(api, tmp_path):
+    """[unit] The image→PDF trash intent rides the result-file request.
+
+    The app trashes the source right after the produced file lands, under
+    its write-time ladder — no longer in the separate ``result`` call. The
+    worker must therefore say so in the upload, naming the source it
+    converted (its own path, never a path of its choosing).
+    """
+    src = tmp_path / "out.pdf"
+    src.write_bytes(b"%PDF-1.7\nfrom an image\n")
+
+    landed = ws._transport_upload(
+        "/likivik/files/a.png",
+        src,
+        job_id=7,
+        in_place=False,
+        engine="google",
+        engine_version="3.15.0",
+        source_converted=True,
+    )
+
+    assert landed == "/likivik/files/scan.pdf"
+    assert api.calls[0][4:6] == ("google", "3.15.0")
+    assert api.calls[0][6:] == ("1", "/likivik/files/a.png"), (
+        "the trash intent and the converted source ride with the bytes"
+    )
 
 
 def test_api_transport_refuses_to_guess_a_job(monkeypatch):

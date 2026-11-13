@@ -454,11 +454,15 @@ def _transport_upload(
     claim: str | None = None,
     engine: str | None = None,
     engine_version: str | None = None,
+    source_converted: bool = False,
 ) -> str:
     """Store the result. Returns the path it landed on (the API decides names).
 
     ``engine``/``engine_version`` ride along on the API transport so the app
     settles the produced file in the same request (verdict at birth).
+    ``source_converted`` (image→PDF) asks the app to trash the source in the
+    same request, right after the produced file lands — the app's trash move
+    no longer waits for the separate ``result`` call.
     """
     if TRANSPORT == "api":
         if job_id is None:
@@ -468,7 +472,13 @@ def _transport_upload(
             client.put_file(job_id, src, claim=claim, engine=engine, engine_version=engine_version)
             return nc_path
         stored = client.result_file(
-            job_id, src, claim=claim, engine=engine, engine_version=engine_version
+            job_id,
+            src,
+            claim=claim,
+            engine=engine,
+            engine_version=engine_version,
+            source_converted="1" if source_converted else None,
+            source_path=nc_path if source_converted else None,
         )
         return str(stored.get("path") or nc_path)
     # In place, DAV keeps the temp-PUT + atomic MOVE dance: a plain PUT that
@@ -1840,6 +1850,10 @@ def _process_file(
                     claim=claim_token,
                     engine=result.engine_used,
                     engine_version=_engine_api_version(result.engine_used)[1],
+                    # The app trashes the source image in this same request,
+                    # right after the PDF lands and under its write-time
+                    # guard — unless the operator asked to keep originals.
+                    source_converted=not _KEEP_SOURCE_IMAGE,
                 )
             kept_source = False
             if _KEEP_SOURCE_IMAGE:

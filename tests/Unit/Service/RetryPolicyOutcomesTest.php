@@ -31,7 +31,10 @@ class RetryPolicyOutcomesTest extends TestCase
 			'skip_ocred_by_ocrflow_found_nothing',
 			'error_provider_unsupported_file',
 		],
-		'redo' => ['skip_ocred_by_suspected_foreign'],
+		'redo' => [
+			'skip_ocred_by_suspected_foreign',
+			'skip_source_changed_result_saved',
+		],
 		'wait' => [
 			'error_app_answered_5xx',
 			'error_app_did_not_answer',

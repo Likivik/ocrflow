@@ -11,6 +11,7 @@ use OCA\OcrFlow\BackgroundJob\ReconcileJob;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Db\WorkerRegistry;
+use OCA\OcrFlow\Service\PendingResults;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\IConfig;
 use OCP\Lock\ILockingProvider;
@@ -44,6 +45,8 @@ class RetentionSweepTest extends TestCase
 
 	private WorkerRegistry&MockObject $workers;
 
+	private PendingResults&MockObject $pending;
+
 	/** @var list<string> */
 	private array $logLines = [];
 
@@ -58,6 +61,8 @@ class RetentionSweepTest extends TestCase
 		$this->locks = $this->createMock(ILockingProvider::class);
 		$this->workers = $this->createMock(WorkerRegistry::class);
 		$this->workers->method('pruneStale')->willReturn(0);
+		$this->pending = $this->createMock(PendingResults::class);
+		$this->pending->method('sweepExpired')->willReturn(0);
 
 		$this->time->method('getTime')->willReturn(self::NOW);
 
@@ -114,6 +119,7 @@ class RetentionSweepTest extends TestCase
 			$this->config,
 			$this->locks,
 			$this->workers,
+			$this->pending,
 		);
 		$method = new \ReflectionMethod(ReconcileJob::class, 'run');
 		$method->invoke($job, null);
@@ -225,9 +231,50 @@ class RetentionSweepTest extends TestCase
 		$this->runJob();
 
 		$this->assertSame(
-			['lock:' . ReconcileJob::RETENTION_LOCK, 'unlock:' . ReconcileJob::RETENTION_LOCK],
+			[
+				'lock:' . ReconcileJob::RETENTION_LOCK,
+				'unlock:' . ReconcileJob::RETENTION_LOCK,
+				'ocrflow: pending result artifacts: 0 discarded, 0 byte(s) on disk',
+			],
 			$this->logLines,
-			'a no-op sweep is silent',
+			'a no-op job sweep is silent; the pending-artifacts line logs every tick by design',
 		);
+	}
+
+	/**
+	 * [unit] Artifact retention rides the same tick: one log line per tick
+	 * carrying the total artifact bytes, so an operator can see the stash
+	 * grow between ticks. Fails on unmodified main: there is no pending
+	 * store and no such line.
+	 */
+	public function testOnePendingArtifactLinePerTickWithTotalBytes(): void
+	{
+		$this->queue->method('purgeTerminal')->willReturn(['jobs' => 0, 'stage_events' => 0]);
+		$this->pending->expects($this->once())->method('sweepExpired');
+		$this->pending->method('totalArtifactBytes')->willReturn(20480);
+		$this->runJob();
+
+		$lines = array_values(array_filter(
+			$this->logLines,
+			static fn (string $line): bool => str_contains($line, 'pending result artifacts'),
+		));
+		$this->assertCount(1, $lines, 'one line per tick, not one per artifact');
+		$this->assertStringContainsString('20480 byte', $lines[0], 'the total artifact bytes are in the line');
+	}
+
+	/**
+	 * [unit] A failing artifact sweep must not take the tick down with it:
+	 * the job retention above it already ran, and the next tick retries.
+	 */
+	public function testAThrowingArtifactSweepDoesNotFailTheTick(): void
+	{
+		$this->queue->method('purgeTerminal')->willReturn(['jobs' => 0, 'stage_events' => 0]);
+		$this->pending->method('sweepExpired')->willThrowException(new \RuntimeException('appdata missing'));
+
+		// If the sweep error propagated, run() would throw here and the
+		// test would fail at this line — not at the unlock assertion.
+		$this->runJob();
+
+		$this->assertContains('unlock:' . ReconcileJob::RETENTION_LOCK, $this->logLines);
 	}
 }
