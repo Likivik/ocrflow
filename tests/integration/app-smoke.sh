@@ -992,6 +992,84 @@ left=$($ENGINE exec "$NAME" sh -c "ls /var/www/html/data/appdata_*/ocrflow/pendi
 [ "$left" = "0" ] || fail "the discarded artifact bytes were not deleted (${artifact_name} left)"
 ok "Apply writes with versioning; Discard deletes the bytes and keeps the row"
 
+# --- Part C: the user-scoped view (GET /api/v1/mine, POST /api/v1/mine/retry) --
+#
+# The [real-db] test for the personal panel, on the real instance where the
+# session, the jobs table and the file paths all meet: the scope is the
+# session's uid, so one user's rows must be invisible to another, and a retry
+# naming someone else's id must be refused AND leave their row alone.
+echo "== mine: a user sees their own rows and cannot touch anyone else's"
+$ENGINE exec -e OC_PASS=carol-pass-123 -u www-data "$NAME" php occ user:add --password-from-env carol >/dev/null 2>&1 || true
+
+# Two needs_fix rows, one per user, in the shape the listener writes (a leading
+# slash, then <uid>/files/...). Inserted directly on purpose: this section is
+# about the READER's scoping, not about the worker that would produce the rows.
+sql "INSERT INTO ${JOBS} (file_id, path, status, reason, reason_code, attempts, etag, created_at, finished_at) VALUES (980000001, '/bob/files/mine-bob.pdf', 'error', 'error_file_broken', 'error_file_broken', 2, 'mine-bob', 1700000000, 1700000000)" >/dev/null
+sql "INSERT INTO ${JOBS} (file_id, path, status, reason, reason_code, attempts, etag, created_at, finished_at) VALUES (980000002, '/carol/files/mine-carol.pdf', 'error', 'error_file_broken', 'error_file_broken', 2, 'mine-carol', 1700000001, 1700000001)" >/dev/null
+bob_job=$(sql "SELECT id FROM ${JOBS} WHERE path = '/bob/files/mine-bob.pdf'")
+[ -n "$bob_job" ] || fail "the bob fixture row was not inserted"
+
+code=$(curl -s -o /tmp/ocrflow-mine-bob -w '%{http_code}' -u "bob:bob-pass-123" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/mine")
+[ "$code" = "200" ] || fail "GET /mine should be 200 for a normal user, got $code body=$(cat /tmp/ocrflow-mine-bob)"
+grep -q 'mine-bob.pdf' /tmp/ocrflow-mine-bob || fail "bob cannot see his own row: $(cat /tmp/ocrflow-mine-bob)"
+grep -q '"total":1' /tmp/ocrflow-mine-bob || fail "bob's own row count should be exactly 1: $(cat /tmp/ocrflow-mine-bob)"
+if grep -q 'mine-carol.pdf' /tmp/ocrflow-mine-bob; then
+  fail "bob's list leaked carol's path: $(cat /tmp/ocrflow-mine-bob)"
+fi
+grep -q '"fix"' /tmp/ocrflow-mine-bob || fail "a row must carry its fix hint: $(cat /tmp/ocrflow-mine-bob)"
+
+code=$(curl -s -o /tmp/ocrflow-mine-carol -w '%{http_code}' -u "carol:carol-pass-123" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/mine")
+[ "$code" = "200" ] || fail "GET /mine should be 200 for carol, got $code body=$(cat /tmp/ocrflow-mine-carol)"
+if grep -q 'mine-bob.pdf' /tmp/ocrflow-mine-carol; then
+  fail "carol's list leaked bob's path: $(cat /tmp/ocrflow-mine-carol)"
+fi
+grep -q "mine-carol.pdf" /tmp/ocrflow-mine-carol || fail "carol cannot see her own row: $(cat /tmp/ocrflow-mine-carol)"
+ok "mine: bob sees 1 own row, carol sees her own and never bob's"
+
+# B retries A's id: refused, counted as refused, and A's row is untouched —
+# still an error row, still one row. A retry that ran would have deleted it.
+code=$(curl -s -o /tmp/ocrflow-mine-refused -w '%{http_code}' -u "carol:carol-pass-123" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d "{\"ids\":[${bob_job}]}" "$BASE/ocs/v2.php/apps/ocrflow/api/v1/mine/retry")
+[ "$code" = "200" ] || fail "the mine retry should answer 200 even when refusing, got $code body=$(cat /tmp/ocrflow-mine-refused)"
+grep -q '"retried":0' /tmp/ocrflow-mine-refused || fail "carol must not retry bob's row: $(cat /tmp/ocrflow-mine-refused)"
+grep -q '"refused":1' /tmp/ocrflow-mine-refused || fail "the refusal must be REPORTED, not skipped: $(cat /tmp/ocrflow-mine-refused)"
+state=$(sql "SELECT status FROM ${JOBS} WHERE id = ${bob_job}")
+[ "$state" = "error" ] || fail "bob's row was touched by carol's refused retry (status '${state}')"
+rows=$(sql "SELECT count(*) FROM ${JOBS} WHERE path = '/bob/files/mine-bob.pdf'")
+[ "$rows" = "1" ] || fail "bob's row disappeared after carol's refused retry (${rows} rows left)"
+ok "mine: another user's id is refused, and their row is untouched"
+
+# The owner's own retry DOES run: the terminal row is cleared, so the next
+# scan queues the file again. Without this, "refused" would be
+# indistinguishable from "the endpoint never retries anything".
+code=$(curl -s -o /tmp/ocrflow-mine-own -w '%{http_code}' -u "bob:bob-pass-123" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d "{\"ids\":[${bob_job}]}" "$BASE/ocs/v2.php/apps/ocrflow/api/v1/mine/retry")
+[ "$code" = "200" ] || fail "the owner's own retry should be 200, got $code body=$(cat /tmp/ocrflow-mine-own)"
+grep -q '"retried":1' /tmp/ocrflow-mine-own || fail "bob's own row must be retried: $(cat /tmp/ocrflow-mine-own)"
+left=$(sql "SELECT count(*) FROM ${JOBS} WHERE id = ${bob_job}")
+[ "$left" = "0" ] || fail "the retried terminal row was not cleared (${left} rows left)"
+
+# The admin plane is unchanged by the user plane: the same two rows are still
+# visible to an admin, and a normal user is still refused there.
+code=$(curl -s -o /tmp/ocrflow-attention-admin -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/attention")
+[ "$code" = "200" ] || fail "GET /attention should still be 200 for an admin, got $code"
+grep -q 'mine-carol.pdf' /tmp/ocrflow-attention-admin || fail "the admin worklist lost a user's row: $(cat /tmp/ocrflow-attention-admin)"
+code=$(curl -s -o /tmp/ocrflow-attention-carol -w '%{http_code}' -u "carol:carol-pass-123" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/attention")
+[ "$code" = "403" ] || fail "a non-admin must still be refused on /attention, got $code body=$(cat /tmp/ocrflow-attention-carol)"
+ok "mine: the owner's retry runs; the admin plane is unchanged"
+
+sql "DELETE FROM ${JOBS} WHERE path IN ('/bob/files/mine-bob.pdf', '/carol/files/mine-carol.pdf')" >/dev/null
+
 # The probe row served its purpose; it is not an outcome.
 sql "DELETE FROM oc_ocrflow_pending_results WHERE id=${probe_id}" >/dev/null
 

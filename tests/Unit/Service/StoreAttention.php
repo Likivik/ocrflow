@@ -27,11 +27,14 @@ class StoreAttention extends Attention
 	/** @var list<array<string, mixed>> raw job rows, any order */
 	public array $rows = [];
 
-	/** @var list<array{limit: int, offset: int, spellings: list<string>}> */
+	/** @var list<array{limit: int, offset: int, spellings: list<string>, prefix: ?string}> */
 	public array $rowCalls = [];
 
 	/** @var list<array{limit: int, spellings: list<string>}> */
 	public array $idCalls = [];
+
+	/** @var list<?string> the prefix each total() was asked to scope to */
+	public array $totalCalls = [];
 
 	/** @var list<string> */
 	public array $logLines = [];
@@ -210,12 +213,13 @@ class StoreAttention extends Attention
 	}
 
 	/**
-	 * The rows matching the spelling set, newest first, then paged.
+	 * The rows matching the spelling set and the path scope, newest first,
+	 * then paged.
 	 *
 	 * @param list<string> $spellings
 	 * @return list<array<string, mixed>>
 	 */
-	private function matching(array $spellings): array
+	private function matching(array $spellings, ?string $pathPrefix = null): array
 	{
 		$match = static function (array $row) use ($spellings): bool {
 			$code = $row['reason_code'] ?? null;
@@ -225,6 +229,13 @@ class StoreAttention extends Attention
 			return is_string($code) && in_array($code, $spellings, true);
 		};
 		$rows = array_values(array_filter($this->rows, $match));
+		if ($pathPrefix !== null && $pathPrefix !== '') {
+			// The same scope predicate the production query applies.
+			$rows = array_values(array_filter(
+				$rows,
+				static fn (array $row): bool => \OCA\OcrFlow\Service\UserScope::owns((string) ($row['path'] ?? ''), $pathPrefix),
+			));
+		}
 		usort($rows, static function (array $a, array $b): int {
 			$fa = (int) ($a['finished_at'] ?? 0);
 			$fb = (int) ($b['finished_at'] ?? 0);
@@ -233,15 +244,16 @@ class StoreAttention extends Attention
 		return $rows;
 	}
 
-	protected function fetchRows(int $limit, int $offset, array $spellings): array
+	protected function fetchRows(int $limit, int $offset, array $spellings, ?string $pathPrefix = null): array
 	{
-		$this->rowCalls[] = ['limit' => $limit, 'offset' => $offset, 'spellings' => $spellings];
-		return array_slice($this->matching($spellings), $offset, $limit);
+		$this->rowCalls[] = ['limit' => $limit, 'offset' => $offset, 'spellings' => $spellings, 'prefix' => $pathPrefix];
+		return array_slice($this->matching($spellings, $pathPrefix), $offset, $limit);
 	}
 
-	protected function fetchTotal(array $spellings): int
+	protected function fetchTotal(array $spellings, ?string $pathPrefix = null): int
 	{
-		return count($this->matching($spellings));
+		$this->totalCalls[] = $pathPrefix;
+		return count($this->matching($spellings, $pathPrefix));
 	}
 
 	protected function fetchIds(int $limit, array $spellings): array

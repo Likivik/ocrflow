@@ -78,10 +78,16 @@ class Outcomes
 	 * classification. An unknown verdict lists nothing — it must not fall
 	 * back to some other tab's rows.
 	 *
+	 * `$pathPrefix` narrows every origin to one user's files
+	 * (`/alice/files/`), which is how the personal panel reads its own
+	 * Decide rows. Same prefix, same authority as Attention::list(): the
+	 * caller passes what the authenticated uid resolves to, never a
+	 * request parameter.
+	 *
 	 * @param list<string> $ids file ids (the redo selection)
 	 * @return array{rows: list<array<string, mixed>>, total: int, cap: int}
 	 */
-	public function list(string $verdict, int $limit, int $offset = 0, ?string $code = null): array
+	public function list(string $verdict, int $limit, int $offset = 0, ?string $code = null, ?string $pathPrefix = null): array
 	{
 		if (!in_array($verdict, self::TABS, true)) {
 			return ['rows' => [], 'total' => 0, 'cap' => $this->attention->cap()];
@@ -91,14 +97,14 @@ class Outcomes
 		$jobsVerdict = ['needs_fix' => RetryPolicy::VERDICT_NEEDS_FIX, 'wait' => RetryPolicy::VERDICT_WAIT, 'dropped' => RetryPolicy::VERDICT_DROP][$verdict] ?? null;
 		if ($jobsVerdict !== null) {
 			// The jobs tabs ride Attention::list() — one query for all doors.
-			$result = $this->attention->list($limit, $offset, $code, $jobsVerdict);
+			$result = $this->attention->list($limit, $offset, $code, $jobsVerdict, $pathPrefix);
 			foreach ($result['rows'] as &$row) {
 				$row['origin'] = 'job';
 			}
 			return $result;
 		}
 
-		$rows = $this->classified($verdict, $code);
+		$rows = $this->classified($verdict, $code, $pathPrefix);
 		$total = count($rows);
 		if ($offset >= $total || $limit <= 0) {
 			return ['rows' => [], 'total' => $total, 'cap' => $this->attention->cap()];
@@ -171,6 +177,36 @@ class Outcomes
 			'cap' => $cap,
 			'estimate' => $this->estimateFor($spend),
 		];
+	}
+
+	/**
+	 * Retry ONE Decide row on behalf of its owner.
+	 *
+	 * A Decide row names a FILE (the ledger and the stash are per-file), so
+	 * this resolves the row id back to its file and re-checks the stored
+	 * path against `$pathPrefix` before spending anything. A stashed result
+	 * cannot be retried at all — it has to be applied or discarded — so it
+	 * is refused rather than silently re-billed. RETRY_MISSING means "no
+	 * such Decide row", which the caller may use to say "no such row"
+	 * without revealing which ids exist.
+	 */
+	public function retryRedoRow(int $rowId, string $pathPrefix): string
+	{
+		foreach ($this->classified(RetryPolicy::VERDICT_REDO) as $row) {
+			if ((int) ($row['id'] ?? 0) !== $rowId) {
+				continue;
+			}
+			if (!UserScope::owns((string) ($row['path'] ?? ''), $pathPrefix)) {
+				$this->logger?->warning('ocrflow: mine: decide row ' . $rowId . ' belongs to another user\'s files; retry refused');
+				return Attention::RETRY_REFUSED;
+			}
+			if (($row['origin'] ?? '') === 'stash') {
+				return Attention::RETRY_REFUSED;
+			}
+			$this->attention->retryByFileId((int) $row['file_id'], (string) $row['path'], 'mine');
+			return Attention::RETRY_DONE;
+		}
+		return Attention::RETRY_MISSING;
 	}
 
 	/**
@@ -287,7 +323,7 @@ class Outcomes
 	 *
 	 * @return list<array<string, mixed>>
 	 */
-	private function classified(string $verdict, ?string $code = null): array
+	private function classified(string $verdict, ?string $code = null, ?string $pathPrefix = null): array
 	{
 		$ledgerRows = $this->fetchLedgerRows();
 
@@ -339,6 +375,17 @@ class Outcomes
 			}
 			return $fb <=> $fa;
 		});
+
+		// The scope filter is applied to the MAPPED rows, because that is
+		// where every origin's path has landed on one field: the ledger
+		// owns one, and a stash borrows its file's. One predicate, one
+		// answer, whichever table the row came from.
+		if ($pathPrefix !== null && $pathPrefix !== '') {
+			$rows = array_values(array_filter(
+				$rows,
+				static fn (array $row): bool => UserScope::owns((string) ($row['path'] ?? ''), $pathPrefix),
+			));
+		}
 		return $rows;
 	}
 

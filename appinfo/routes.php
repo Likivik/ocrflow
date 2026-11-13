@@ -49,6 +49,16 @@ return [
         // share the Attention service's retry. POST, so CSRF is checked.
         ['name' => 'attention#retry', 'url' => '/api/v1/attention/retry', 'verb' => 'POST'],
 
+        // --- mine: one user's own rows, scoped by the session's uid --------
+        // The admin listings above refuse non-admins on purpose; these two
+        // serve the personal panel. The scope is derived from the
+        // authenticated uid on the server, never from a parameter, and each
+        // retry re-checks the stored path before it runs.
+        ['name' => 'mine#index', 'url' => '/api/v1/mine', 'verb' => 'GET'],
+        // {ids: [...]}; POST, so CSRF is checked, and capped by the same
+        // attention_retry_cap a "retry all" click obeys.
+        ['name' => 'mine#retry', 'url' => '/api/v1/mine/retry', 'verb' => 'POST'],
+
         // --- outcomes: the five admin tabs (see Outcomes service) ---------
         // One reader for three origins (jobs, ledger, pending stashes) and
         // five tabs; admin only, like attention above.
