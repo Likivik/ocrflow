@@ -1,13 +1,13 @@
 {
-  "name": "ocrflow-panel",
+  "name": "ocrflow",
   "version": "0.1.0",
   "private": true,
   "description": "The OCR Flow settings panel: Vue 3, bundled to js/ so the app ships without node",
   "type": "module",
   "scripts": {
-    "build": "vite build",
-    "dev": "vite build --watch",
-    "check": "vite build --mode check"
+    "build": "webpack --node-env production",
+    "dev": "webpack --node-env development --watch",
+    "check": "webpack --node-env production"
   },
   "dependencies": {
     "@nextcloud/axios": "^2.5.0",
@@ -18,7 +18,12 @@
     "vue": "^3.5.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^6.0.0",
-    "vite": "^7.0.0"
+    "@nextcloud/webpack-vue-config": "^6.3.2",
+    "css-loader": "^7.1.5",
+    "sass": "^1.108.2",
+    "sass-loader": "^16.0.8",
+    "terser-webpack-plugin": "^5.6.1",
+    "webpack": "^5.112.2",
+    "webpack-cli": "^6.0.1"
   }
 }
