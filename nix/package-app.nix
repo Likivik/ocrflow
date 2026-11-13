@@ -18,6 +18,7 @@ let
     "lib"
     "templates"
     "js"
+    "css"
     "img"
     "l10n"
     "composer.json"
@@ -49,6 +50,15 @@ stdenv.mkDerivation {
     # A guard, not a comment: the two files that must never reach a web root are
     # the worker (a whole OCR stack) and the test suites.
     rm -rf $out/apps/ocrflow/worker $out/apps/ocrflow/tests
+    # The asset whitelist above is easy to forget and impossible to notice: a
+    # missing directory is not a build error, it is a 404 in the browser, and
+    # the panel renders unstyled with no clue why. Fail the build instead.
+    for asset in js/ocrflow-panel.js css/ocrflow-panel.css; do
+      if [ ! -f "$out/apps/ocrflow/$asset" ]; then
+        echo "packaged app is missing $asset — is its directory in 'keep'?" >&2
+        exit 1
+      fi
+    done
     runHook postInstall
   '';
 
