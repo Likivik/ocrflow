@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Db;
 
+use OCA\OcrFlow\Service\EnginePolicy;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
 use OCP\AppFramework\Db\QBMapper;
@@ -63,17 +64,25 @@ class Queue extends QBMapper
 
 	private StageEvents $stageEvents;
 
+	private ?EnginePolicy $enginePolicy;
+
 	public function __construct(
 		IDBConnection $db,
 		StageEvents $stageEvents,
 		private ?LoggerInterface $logger = null,
 		?RetryPolicy $retryPolicy = null,
+		?EnginePolicy $enginePolicy = null,
 	) {
 		$this->stageEvents = $stageEvents;
 		// The retry table already exists and has one owner; enqueue only asks
 		// it a second question (is this verdict permanent?), so it is the
 		// same policy object rather than a second vocabulary.
 		$this->retryPolicy = $retryPolicy ?? new RetryPolicy();
+		// The engine bar, for the settled check below. Optional only so the
+		// unit harnesses that construct Queue directly keep working; the
+		// container always injects one, and without it the settled rows
+		// cannot be judged (there is no bar to compare against).
+		$this->enginePolicy = $enginePolicy;
 		parent::__construct($db, self::JOBS, Job::class);
 	}
 
@@ -95,6 +104,7 @@ class Queue extends QBMapper
 		?int $size,
 		?string $etag,
 		?string $engine = null,
+		bool $fromScan = false,
 	): ?int {
 		// A zero-byte source is a data problem, not work: the worker can only fetch
 		// an empty stream and fail after transport — the QueueProtocolError class
@@ -132,6 +142,41 @@ class Queue extends QBMapper
 				);
 				return null;
 			}
+			// Settled, not permanent: these bytes were already written by us.
+			// The ledger row carries the FACTS (engine, engine_version as
+			// observed at write time); the verdict is derived HERE, against
+			// the bar that is current now — never frozen into the row. See
+			// EnginePolicy::stampVerdict(); the comparison is not re-implemented.
+			$settled = $this->settledForVersion($fileId, $etag);
+			if ($settled !== null && $this->enginePolicy !== null) {
+				$verdict = $this->enginePolicy->stampVerdict($settled['engine'], $settled['engine_version']);
+				if ($verdict === 'nothing_to_do') {
+					$this->logger?->info(
+						'ocrflow: file skipped: already OCR\'d by ' . $settled['engine'] . ' ' . $settled['engine_version']
+						. ' (at or above the bar) for ' . $path,
+					);
+				} else {
+					// Below the bar: a redo candidate the owner picks from,
+					// never an automatic re-OCR. No row is written: the bar
+					// that judged this row may move again tomorrow.
+					$this->logger?->info(
+						'ocrflow: file skipped: OCR\'d below the bar by ' . $settled['engine'] . ' ' . $settled['engine_version']
+						. ' for ' . $path . '; redo candidate, never automatic; occ ocrflow:requeue "' . $path . '" to OCR it anyway',
+					);
+				}
+				return null;
+			}
+			// The per-file loop breaker, scan-initiated enqueues only. Job
+			// rows are UNIQUE (file_id, etag) and retention purges them, so
+			// they cannot count; the count lives in the never-purged ledger.
+			// Past the FIRST scan enqueue for identical bytes the file is
+			// forced to needs_fix with error_queued_twice_for_same_bytes —
+			// a loop is a defect to read about, not a bill to pay. The
+			// operator override resets the counter and stays exempt.
+			if ($fromScan && $this->alreadyEnqueuedForVersion($fileId, $etag)) {
+				$this->recordQueuedTwice($path, $fileId, $size, $etag);
+				return null;
+			}
 		} elseif ($this->findByPath($path) !== null) {
 			// No file id (a path from outside the cache): the path is all we
 			// have to go on, so keep the old, weaker rule.
@@ -161,6 +206,15 @@ class Queue extends QBMapper
 				return null;
 			}
 			throw $e;
+		}
+
+		// The loop breaker's count: only scan-initiated enqueues touch it,
+		// so an upload-event enqueue (a genuinely new user action) is never
+		// held against the file. The ledger's status/verdict columns are
+		// deliberately NOT touched — the verdict is written when the job
+		// finishes, not when it is queued.
+		if ($fromScan && $fileId !== null) {
+			$this->countScanEnqueue($fileId, $path, $size, $etag);
 		}
 
 		// `IDBConnection::getLastInsertId()` was removed in Nextcloud 34; the
@@ -373,6 +427,174 @@ class Queue extends QBMapper
 		}
 		$reason = $row['reason'] ?? null;
 		return is_string($reason) && $this->retryPolicy->isPermanent($reason) ? $reason : null;
+	}
+
+	/**
+	 * The settled facts recorded in the ledger for THIS etag, or null.
+	 *
+	 * "Settled" is the third verdict class: these bytes were already written
+	 * by us (`reason = skip_ocred_by_ocrflow`, spelled either era), so the
+	 * question is not "can they ever succeed" (permanent) but "does the
+	 * engine that wrote them clear today's bar". The row carries only facts;
+	 * {@see EnginePolicy::stampVerdict()} derives the verdict at enqueue.
+	 *
+	 * @return array{engine: ?string, engine_version: ?string}|null
+	 * @throws Exception
+	 */
+	public function settledForVersion(int $fileId, ?string $etag): ?array
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('engine', 'engine_version')->from(self::FILES)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->in('reason', $qb->createNamedParameter(
+				$this->retryPolicy->spellingsOf('skip_ocred_by_ocrflow'),
+				IQueryBuilder::PARAM_STR_ARRAY,
+			)))
+			->andWhere($this->etagPredicate($qb, $etag))
+			->setMaxResults(1);
+		$row = $qb->executeQuery()->fetch();
+		if ($row === false) {
+			return null;
+		}
+		return [
+			'engine' => isset($row['engine']) && is_string($row['engine']) && $row['engine'] !== '' ? $row['engine'] : null,
+			'engine_version' => isset($row['engine_version']) && is_string($row['engine_version']) && $row['engine_version'] !== '' ? $row['engine_version'] : null,
+		];
+	}
+
+	/**
+	 * Has a scan already enqueued THIS file version once (the ledger count
+	 * says so, and the etag still names the same bytes)?
+	 *
+	 * The count survives the retention purge because it lives in the ledger;
+	 * `Attention::retryFile()` is the one reset, so an operator's requeue
+	 * always works once.
+	 */
+	private function alreadyEnqueuedForVersion(int $fileId, ?string $etag): bool
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('etag', 'times_enqueued')->from(self::FILES)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->setMaxResults(1);
+		$row = $qb->executeQuery()->fetch();
+		if ($row === false) {
+			return false;
+		}
+		$counted = isset($row['times_enqueued']) ? (int) $row['times_enqueued'] : 0;
+		return $counted >= 1 && (string) ($row['etag'] ?? '') === (string) $etag;
+	}
+
+	/**
+	 * Count one scan-initiated enqueue in the never-purged ledger.
+	 *
+	 * A new etag resets the budget (different bytes are different work);
+	 * the same etag increments it. Status and reason are left alone: the
+	 * verdict is the finish path's to write.
+	 */
+	private function countScanEnqueue(int $fileId, string $path, ?int $size, ?string $etag): void
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('etag', 'times_enqueued')->from(self::FILES)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->setMaxResults(1);
+		$row = $qb->executeQuery()->fetch();
+
+		$w = $this->db->getQueryBuilder();
+		if ($row !== false) {
+			$next = (string) ($row['etag'] ?? '') === (string) $etag
+				? (isset($row['times_enqueued']) ? (int) $row['times_enqueued'] : 0) + 1
+				: 1;
+			$w->update(self::FILES)
+				->set('etag', $w->createNamedParameter($etag))
+				->set('times_enqueued', $w->createNamedParameter($next, IQueryBuilder::PARAM_INT))
+				->set('updated_at', $w->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
+				->where($w->expr()->eq('file_id', $w->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)));
+		} else {
+			$w->insert(self::FILES)
+				->values([
+					'file_id' => $w->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
+					'path' => $w->createNamedParameter($path),
+					'size' => $w->createNamedParameter($size, IQueryBuilder::PARAM_INT),
+					'etag' => $w->createNamedParameter($etag),
+					'times_enqueued' => $w->createNamedParameter(1, IQueryBuilder::PARAM_INT),
+					'updated_at' => $w->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
+				]);
+		}
+		$w->executeStatement();
+	}
+
+	/**
+	 * Reset the loop-breaker count for one file — the operator override's
+	 * other half, so a requeue buys exactly one fresh scan enqueue.
+	 */
+	public function resetTimesEnqueued(int $fileId): int
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->update(self::FILES)
+			->set('times_enqueued', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT))
+			->set('updated_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)));
+		return $qb->executeStatement();
+	}
+
+	/**
+	 * Record the verdict where the bytes are written: the produced file is
+	 * already done by us, with the engine facts as observed at write time.
+	 *
+	 * Called by the write-back endpoints (`putFile`, `resultFile`) right
+	 * after a successful write, so the ledger answers "is this ours, and
+	 * with what" without opening the PDF — the exact round trip job 8135
+	 * wasted. Facts only: no bar comparison happens here; `enqueue()`
+	 * derives the verdict against the bar that is current THEN.
+	 */
+	public function settleProduced(
+		int $fileId,
+		string $path,
+		?int $size,
+		?string $etag,
+		?string $engine,
+		?string $engineVersion,
+	): void {
+		$this->writeLedger($fileId, $path, $size, $etag, self::STATUS_SKIPPED, 'skip_ocred_by_ocrflow', $engine, $engineVersion, null, settle: true);
+	}
+
+	/**
+	 * The loop breaker firing: the scan tried to queue these exact bytes a
+	 * second time. Same shape as `recordEmptySource()` — the verdict goes to
+	 * the ledger (survives the purge) and a terminal error row goes to the
+	 * jobs table (the needs_fix worklist reads it; `occ ocrflow:requeue`
+	 * deletes it and resets the counter).
+	 *
+	 * @throws Exception
+	 */
+	private function recordQueuedTwice(string $path, int $fileId, ?int $size, ?string $etag): void
+	{
+		$this->writeLedger($fileId, $path, $size, $etag, self::STATUS_ERROR, 'error_queued_twice_for_same_bytes', null, null, null);
+
+		$qb = $this->db->getQueryBuilder();
+		$qb->insert(self::JOBS)
+			->values([
+				'path' => $qb->createNamedParameter($path),
+				'file_id' => $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
+				'status' => $qb->createNamedParameter(self::STATUS_ERROR),
+				'reason' => $qb->createNamedParameter('error_queued_twice_for_same_bytes'),
+				'reason_code' => $qb->createNamedParameter('error_queued_twice_for_same_bytes'),
+				'retryable' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+				'created_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
+				'finished_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
+				'size' => $qb->createNamedParameter($size, IQueryBuilder::PARAM_INT),
+				'etag' => $qb->createNamedParameter($etag),
+			]);
+		$qb->executeStatement();
+		$this->recordDecision((int) $qb->getLastInsertId(), 'error_queued_twice_for_same_bytes');
+
+		// The line names the file, the etag and the code, so an operator
+		// sees the loop rather than silent inactivity.
+		$this->logger?->warning(
+			'ocrflow: file refused: queued twice for the same bytes (etag ' . $etag . ')'
+			. ' for ' . $path . ' (error_queued_twice_for_same_bytes)'
+			. '; occ ocrflow:requeue "' . $path . '" to queue it once more',
+		);
 	}
 
 	/**
@@ -731,12 +953,32 @@ class Queue extends QBMapper
 		?string $engine,
 		?string $engineVersion,
 		?string $stampVersion,
+		bool $settle = false,
 	): void {
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('id')->from(self::FILES)
+		$qb->select('id', 'etag', 'reason', 'engine', 'engine_version', 'stamp_version')->from(self::FILES)
 			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
 			->setMaxResults(1);
-		$exists = $qb->executeQuery()->fetch() !== false;
+		$existing = $qb->executeQuery()->fetch();
+		$exists = $existing !== false;
+
+		// A finish for the SOURCE version must not drag the ledger back to
+		// the source etag when our own write-back settle has already
+		// recorded the PRODUCED one: the OCR-in-place path settles the new
+		// etag (putFile), then the worker's `result` closes the job for the
+		// old etag. The settle's facts are the newer truth about the bytes
+		// on disk, so they survive; only the status follows the job.
+		if ($exists && !$settle
+			&& is_string($existing['reason'] ?? null)
+			&& in_array($existing['reason'], $this->retryPolicy->spellingsOf('skip_ocred_by_ocrflow'), true)
+			&& is_string($existing['etag'] ?? null)
+			&& $existing['etag'] !== $etag
+		) {
+			$etag = $existing['etag'];
+			$engine = is_string($existing['engine'] ?? null) ? $existing['engine'] : $engine;
+			$engineVersion = is_string($existing['engine_version'] ?? null) ? $existing['engine_version'] : $engineVersion;
+			$stampVersion = is_string($existing['stamp_version'] ?? null) ? $existing['stamp_version'] : $stampVersion;
+		}
 
 		// Parameters belong to the builder that created them. Binding them on the
 		// SELECT builder and executing the INSERT/UPDATE on another raises

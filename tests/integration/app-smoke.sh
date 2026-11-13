@@ -421,4 +421,174 @@ if ! occ ocrflow:errors >/tmp/ocrflow-errors.log 2>&1; then
 fi
 ok "occ ocrflow:errors exits 0 ($(grep -c '' /tmp/ocrflow-errors.log) lines)"
 
+# --- verdict at birth: the write-back settles the produced file, and the
+# scan decides from the ledger's facts plus the current bar ------------------
+#
+# The PHPUnit harness cannot run real SQL, so the plan's [real-db] tests land
+# here, on the real instance, where the migration, the ledger and the scan
+# all meet actual rows:
+#   * a produced file's ledger row (status=skipped, reason=skip_ocred_by_ocrflow,
+#     engine facts as written) exists right after the write-back;
+#   * a scan after the job rows are purged creates NO job for the settled
+#     bytes at/above the bar (the 8135 loop), and none below the bar either
+#     (a redo is a candidate, never automatic);
+#   * a different etag (new bytes) IS queued;
+#   * moving the bar changes only the refusal, never the row;
+#   * the loop breaker: a second scan enqueue for identical bytes is refused
+#     with error_queued_twice_for_same_bytes (needs_fix), the operator's
+#     requeue resets the counter and works exactly once, and a scan of an
+#     unchanged archive inserts zero rows.
+echo "== verdict at birth: the ledger settles what the write-back produced"
+
+# The scan skips files younger than its quiescence window; the fixtures are
+# seconds old, so the window is zero for this section.
+occ config:app:set ocrflow scan_min_age_seconds --value 0 >/dev/null
+
+# One scan pass, run to completion (the endpoint only queues the ScanJob).
+scan_once() {
+  sql "UPDATE oc_jobs SET last_run=0 WHERE class LIKE '%ScanJob'" >/dev/null 2>&1 || true
+  code=$(curl -s -o /dev/null -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" -X POST \
+    -H 'OCS-APIRequest: true' -H 'Accept: application/json' -d 'path=/' \
+    "$BASE/ocs/v2.php/apps/ocrflow/api/v1/scan")
+  [ "$code" = "200" ] || fail "POST /scan should be 200, got $code"
+  scanjob=$(sql "SELECT id FROM oc_jobs WHERE class LIKE '%ScanJob' ORDER BY id DESC LIMIT 1")
+  occ background-job:execute --force-execute "$scanjob" >/dev/null 2>&1 \
+    || fail "the ScanJob did not run (oc_jobs id ${scanjob})"
+}
+
+# Claim the one job an upload just created; sets jobid and token.
+claim_one() {
+  code=$(claim)
+  [ "$code" = "200" ] || fail "claim should be 200 (a job was just uploaded), got $code"
+  jobid=$(grep -oE '"id":[0-9]+' /tmp/ocrflow-claim-body | head -1 | cut -d: -f2)
+  token=$(grep -oE '"claim_token":"[^"]+"' /tmp/ocrflow-claim-body | cut -d'"' -f4)
+  [ -n "$jobid" ] || fail "could not read the claimed job's id"
+  [ -n "$token" ] || fail "could not read the claimed job's token"
+}
+
+jobs_for() { sql "SELECT count(*) FROM ${JOBS} WHERE path LIKE '%/$1'"; }
+
+# -- [real-db] test 6: the write-back settles the produced file -------------
+sql "DELETE FROM ${JOBS}" >/dev/null   # this section starts from an empty queue
+printf '\xff\xd8\xff\xe0settled' > /tmp/ocrflow-settled.jpg
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-settled.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/settled.jpg" || fail "WebDAV upload of settled.jpg failed"
+sleep 2
+claim_one
+printf '%%PDF-1.7 produced by ocrflow\n' > /tmp/ocrflow-produced.pdf
+code=$(curl -s -o /tmp/ocrflow-resultfile -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
+  -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  --data-binary @/tmp/ocrflow-produced.pdf \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result-file?name=settled.pdf&engine=google&engine_version=3.15.0")
+[ "$code" = "200" ] || fail "result-file should be 200, got $code body=$(cat /tmp/ocrflow-resultfile)"
+grep -q '"file_id"' /tmp/ocrflow-resultfile || fail "result-file response has no file_id"
+grep -q '"etag"' /tmp/ocrflow-resultfile || fail "result-file response has no etag"
+settle_reason=$(sql "SELECT reason FROM ${FILES} WHERE path LIKE '%/settled.pdf'")
+[ "$settle_reason" = "skip_ocred_by_ocrflow" ] \
+  || fail "the produced file's ledger row should be settled with skip_ocred_by_ocrflow, got '${settle_reason}'"
+settle_engine=$(sql "SELECT engine || ' ' || engine_version FROM ${FILES} WHERE path LIKE '%/settled.pdf'")
+[ "$settle_engine" = "google 3.15.0" ] \
+  || fail "the settle must record the engine facts as written, got '${settle_engine}'"
+ok "write-back settled the produced file (google 3.15.0, skip_ocred_by_ocrflow)"
+
+# -- [real-db] tests 1+8+11: a settled row at the bar survives a purge and a
+# scan; a second scan of the unchanged archive inserts nothing -------------
+sql "DELETE FROM ${JOBS}" >/dev/null   # retention's work
+scan_once
+[ "$(jobs_for settled.pdf)" = "0" ] \
+  || fail "the scan re-queued the produced file it had just settled (the 8135 loop)"
+ok "settled at the bar: scan queued nothing for the produced file"
+before=$(sql "SELECT count(*) FROM ${JOBS}")
+scan_once
+[ "$(sql "SELECT count(*) FROM ${JOBS}")" = "$before" ] \
+  || fail "a second scan of an unchanged archive inserted rows"
+ok "second scan of the unchanged archive inserted 0 rows"
+
+# -- [real-db] test 2: new bytes (a different etag) are queued --------------
+printf '%%PDF-1.7 edited by the user\n' > /tmp/ocrflow-settled.pdf
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-settled.pdf \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/settled.pdf" || fail "WebDAV overwrite of settled.pdf failed"
+sleep 2
+sql "DELETE FROM ${JOBS}" >/dev/null   # the listener's job is not the scan's verdict
+scan_once
+[ "$(jobs_for settled.pdf)" -ge 1 ] \
+  || fail "a settled file with NEW bytes (different etag) must be queued"
+ok "settled with new bytes: scan queued the new version"
+
+# -- [real-db] tests 3+4: below the bar is not queued, and moving the bar
+# changes only the refusal, never the row -----------------------------------
+sql "DELETE FROM ${JOBS}" >/dev/null
+printf '\xff\xd8\xff\xe0below' > /tmp/ocrflow-below.jpg
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-below.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/below.jpg" || fail "WebDAV upload of below.jpg failed"
+sleep 2
+claim_one
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
+  -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  --data-binary @/tmp/ocrflow-produced.pdf \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result-file?name=below.pdf&engine=google&engine_version=3.9.0")
+[ "$code" = "200" ] || fail "result-file for below.pdf should be 200, got $code"
+below_row=$(sql "SELECT etag || ' ' || reason FROM ${FILES} WHERE path LIKE '%/below.pdf'")
+sql "DELETE FROM ${JOBS}" >/dev/null
+scan_once
+[ "$(jobs_for below.pdf)" = "0" ] \
+  || fail "a settled row BELOW the bar was re-queued automatically: a redo is a candidate, never automatic"
+below_after=$(sql "SELECT etag || ' ' || reason FROM ${FILES} WHERE path LIKE '%/below.pdf'")
+[ "$below_row" = "$below_after" ] \
+  || fail "the below-bar refusal rewrote the ledger row ('${below_row}' -> '${below_after}')"
+ok "below the bar: not queued, ledger row untouched"
+
+# Lowering the bar below the stamp changes only the verdict the panel would
+# report — no row rewrite, no enqueue.
+occ config:app:set ocrflow ocr_accepted_engines --value '{"google":"9.9.9"}' >/dev/null
+sql "DELETE FROM ${JOBS}" >/dev/null
+scan_once
+[ "$(jobs_for below.pdf)" = "0" ] || fail "lowering the bar must not re-OCR automatically"
+below_after=$(sql "SELECT etag || ' ' || reason FROM ${FILES} WHERE path LIKE '%/below.pdf'")
+[ "$below_row" = "$below_after" ] \
+  || fail "moving the bar rewrote the ledger row ('${below_row}' -> '${below_after}')"
+occ config:app:set ocrflow ocr_accepted_engines --value '{"google":"3.15.0"}' >/dev/null
+ok "bar moved below the stamp: still no enqueue, still no row rewrite"
+
+# -- [real-db] tests 7+9: the loop breaker and the operator override ---------
+printf '\xff\xd8\xff\xe0breaker' > /tmp/ocrflow-breaker.jpg
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-breaker.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/breaker.jpg" || fail "WebDAV upload of breaker.jpg failed"
+sleep 2
+sql "DELETE FROM ${JOBS}" >/dev/null
+scan_once
+[ "$(jobs_for breaker.jpg)" = "1" ] || fail "the first scan enqueue of breaker.jpg must go through"
+counted=$(sql "SELECT times_enqueued FROM ${FILES} WHERE path LIKE '%/breaker.jpg'")
+[ "$counted" = "1" ] || fail "the scan enqueue must count in the ledger, got times_enqueued=${counted}"
+sql "DELETE FROM ${JOBS}" >/dev/null   # the first verdict is gone: the loop's opening
+scan_once
+twice=$(sql "SELECT reason_code FROM ${JOBS} WHERE path LIKE '%/breaker.jpg' LIMIT 1")
+[ "$twice" = "error_queued_twice_for_same_bytes" ] \
+  || fail "the second scan enqueue must be refused with error_queued_twice_for_same_bytes, got '${twice}'"
+twice_status=$(sql "SELECT status FROM ${JOBS} WHERE path LIKE '%/breaker.jpg' LIMIT 1")
+[ "$twice_status" = "error" ] || fail "the refusal row must be an error row, got ${twice_status}"
+ledger_status=$(sql "SELECT status FROM ${FILES} WHERE path LIKE '%/breaker.jpg'")
+[ "$ledger_status" = "error" ] || fail "the ledger must carry the loop verdict past the purge, got ${ledger_status}"
+ok "second scan enqueue refused: error_queued_twice_for_same_bytes, needs_fix"
+
+# The operator's door: the requeue resets the counter and works exactly once.
+# The path exactly as the ledger recorded it (findFileByPath compares raw).
+breaker_path=$(sql "SELECT path FROM ${FILES} WHERE path LIKE '%/breaker.jpg' LIMIT 1")
+[ -n "$breaker_path" ] || fail "no ledger row for breaker.jpg to requeue"
+requeue_out=$(occ ocrflow:requeue "$breaker_path")
+echo "$requeue_out" | grep -q "cleared the failure verdict" \
+  || fail "occ ocrflow:requeue did not clear: $requeue_out"
+counted=$(sql "SELECT times_enqueued FROM ${FILES} WHERE path LIKE '%/breaker.jpg'")
+[ "$counted" = "0" ] || fail "the requeue must reset times_enqueued, got ${counted}"
+sql "DELETE FROM ${JOBS}" >/dev/null
+scan_once
+[ "$(jobs_for breaker.jpg)" = "1" ] || fail "after the requeue the scan must queue the file exactly once"
+sql "DELETE FROM ${JOBS}" >/dev/null
+scan_once
+twice=$(sql "SELECT reason_code FROM ${JOBS} WHERE path LIKE '%/breaker.jpg' LIMIT 1")
+[ "$twice" = "error_queued_twice_for_same_bytes" ] \
+  || fail "the breaker must be armed again after the one requeue, got '${twice}'"
+ok "requeue resets the counter and buys exactly one more enqueue"
+
 echo "ALL INTEGRATION ASSERTIONS PASSED"
+

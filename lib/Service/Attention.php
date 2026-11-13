@@ -173,6 +173,10 @@ class Attention
 	{
 		$deleted = $this->queue->deleteTerminalForFile($fileId);
 		$this->queue->clearPermanentVerdict($fileId);
+		// The requeue is exempt from the loop breaker: resetting the count
+		// is what makes an operator's "queue it once more" work exactly
+		// once, without the scan refusing it as a repeat.
+		$this->queue->resetTimesEnqueued($fileId);
 		$this->logger?->info('ocrflow: ' . $door . ': cleared the failure verdict for ' . $path . ' (file_id ' . $fileId . '); deleted ' . $deleted . ' terminal job row(s); the next scan will queue it again');
 		return $deleted;
 	}

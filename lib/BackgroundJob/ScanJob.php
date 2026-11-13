@@ -120,7 +120,7 @@ class ScanJob extends QueuedJob
 					$young++;
 					continue;
 				}
-				if ($this->queue->enqueue($current->getPath(), $current->getId(), $current->getSize(), $current->getEtag(), $engine) !== null) {
+				if ($this->queue->enqueue($current->getPath(), $current->getId(), $current->getSize(), $current->getEtag(), $engine, fromScan: true) !== null) {
 					$queued++;
 				}
 			}

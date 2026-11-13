@@ -452,16 +452,24 @@ def _transport_upload(
     job_id: int | None,
     in_place: bool = True,
     claim: str | None = None,
+    engine: str | None = None,
+    engine_version: str | None = None,
 ) -> str:
-    """Store the result. Returns the path it landed on (the API decides names)."""
+    """Store the result. Returns the path it landed on (the API decides names).
+
+    ``engine``/``engine_version`` ride along on the API transport so the app
+    settles the produced file in the same request (verdict at birth).
+    """
     if TRANSPORT == "api":
         if job_id is None:
             raise RuntimeError("NC_OCR_TRANSPORT=api needs a job id to store bytes")
         client = _api_client()
         if in_place:
-            client.put_file(job_id, src, claim=claim)
+            client.put_file(job_id, src, claim=claim, engine=engine, engine_version=engine_version)
             return nc_path
-        stored = client.result_file(job_id, src, claim=claim)
+        stored = client.result_file(
+            job_id, src, claim=claim, engine=engine, engine_version=engine_version
+        )
         return str(stored.get("path") or nc_path)
     # In place, DAV keeps the temp-PUT + atomic MOVE dance: a plain PUT that
     # dies midway leaves a truncated PDF where the original used to be.
@@ -1825,7 +1833,13 @@ def _process_file(
             # filesystem API, which is what the trashbin hooks catch.
             with StageTimer("deliver"):
                 pdf_nc_path = _transport_upload(
-                    pdf_nc_path, Path(result.output_pdf), job_id, in_place=False, claim=claim_token
+                    pdf_nc_path,
+                    Path(result.output_pdf),
+                    job_id,
+                    in_place=False,
+                    claim=claim_token,
+                    engine=result.engine_used,
+                    engine_version=_engine_api_version(result.engine_used)[1],
                 )
             kept_source = False
             if _KEEP_SOURCE_IMAGE:
@@ -1957,7 +1971,13 @@ def _process_file(
             # and then MOVE it atomically onto the target.
             with StageTimer("deliver"):
                 _transport_upload(
-                    nc_path, Path(result.output_pdf), job_id, in_place=True, claim=claim_token
+                    nc_path,
+                    Path(result.output_pdf),
+                    job_id,
+                    in_place=True,
+                    claim=claim_token,
+                    engine=result.engine_used,
+                    engine_version=_engine_api_version(result.engine_used)[1],
                 )
 
             return {

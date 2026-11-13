@@ -244,6 +244,12 @@ final class RetryPolicy
 			'fix' => 'The owner must repair or re-export the document.',
 			'actor' => 'owner',
 		],
+		'error_queued_twice_for_same_bytes' => [
+			'verdict' => 'needs_fix',
+			'label' => 'The scan tried to queue this exact file version a second time.',
+			'fix' => 'Read the log line that names the etag: the first job left no verdict. `occ ocrflow:requeue "<path>"` queues it once more.',
+			'actor' => 'deployment',
+		],
 
 		// -- drop ----------------------------------------------------------------
 		'error_worker_job_reference_stale' => [
