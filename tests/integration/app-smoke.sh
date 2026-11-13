@@ -199,6 +199,24 @@ grep -q 'id="ocrflow-admin-panel"' /tmp/ocrflow-admin.html || fail "the admin mo
 grep -q 'ocrflow-panel\.js' /tmp/ocrflow-admin.html || fail "the bundle was not added to the admin page"
 ok "admin page serves the mount point and the bundle"
 
+# The bundle serving is not the same as the bundle running. Vite's lib mode
+# does not replace `process.env.NODE_ENV` (app mode does), and Vue's ESM
+# bundler build references it unguarded, so an unreplaced reference ships a
+# bare `process.env.NODE_ENV` into an IIFE for browsers — where `process`
+# does not exist. The bundle then throws `ReferenceError: process is not
+# defined` on its first statement and neither mount point ever mounts: the
+# page shows the noscript fallback forever while every curl-level check
+# above stays green. Grep the shipped bytes, because that is what the browser
+# executes. (Deps may still contain `typeof process=="object"&&process.env`
+# probes — those are guarded and safe; the NODE_ENV construct is not.)
+echo "== the shipped bundle is browser-safe"
+if grep -q 'process\.env\.NODE_ENV' "$APP_DIR/js/ocrflow-panel.js"; then
+  fail "js/ocrflow-panel.js references a bare process.env.NODE_ENV — the IIFE throws 'process is not defined' in the browser and the panel never mounts"
+fi
+grep -q 'ocrflow-panel' "$APP_DIR/js/ocrflow-panel.js" \
+  || fail "the bundle does not reference its own mount selector"
+ok "the bundle has no unguarded process.env.NODE_ENV and references the mount selector"
+
 # The admin endpoints are admin-only. A non-admin must be refused; the same
 # session must be allowed to read its own settings.
 echo "== settings endpoints are admin-only"
