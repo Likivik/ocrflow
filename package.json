@@ -18,7 +18,7 @@
     "vue": "^3.5.0"
   },
   "devDependencies": {
-    "@nextcloud/webpack-vue-config": "^6.3.2",
+    "@nextcloud/webpack-vue-config": "^7.1.0",
     "css-loader": "^7.1.5",
     "sass": "^1.108.2",
     "sass-loader": "^16.0.8",
