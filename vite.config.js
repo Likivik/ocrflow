@@ -25,18 +25,23 @@ export default defineConfig({
 		},
 	},
 	build: {
-		outDir: 'js',
+		// Output root is the app dir, not `js/`: Nextcloud resolves
+		// `Util::addStyle('ocrflow','ocrflow-panel')` to
+		// `/apps/ocrflow/css/ocrflow-panel.css`, so the stylesheet must live in
+		// `css/`. Building into `js/` shipped an unreachable stylesheet and the
+		// panel rendered unstyled, with a 404 on the css.
+		outDir: '.',
 		emptyOutDir: false,
 		cssCodeSplit: false,
 		lib: {
 			entry: fileURLToPath(new URL('./src/panel.js', import.meta.url)),
 			name: 'OcrFlowPanel',
 			formats: ['iife'],
-			fileName: () => 'ocrflow-panel.js',
+			fileName: () => 'js/ocrflow-panel.js',
 		},
 		rollupOptions: {
 			output: {
-				assetFileNames: (asset) => (asset.name?.endsWith('.css') ? 'ocrflow-panel.css' : 'ocrflow-panel.[ext]'),
+				assetFileNames: (asset) => (asset.name?.endsWith('.css') ? 'css/ocrflow-panel.css' : 'ocrflow-panel.[ext]'),
 			},
 		},
 	},
