@@ -16,12 +16,21 @@ use PHPUnit\Framework\TestCase;
  * A worker must never emit a reason code the app has never heard of: the
  * app records anything it does not know as `unknown` and the row's verdict
  * then decides its fate, so one invented spelling silently changes policy.
- * This guard reads every snake_case token the worker passes as a
- * `reason` / `reason_code` (call-site keyword arguments, `"reason": …`
- * payload dicts, the failure classifier's return values, the
- * VERDICT_CODES table and the REASON_* constants) and refuses any token
- * that is in neither RetryPolicy::VOCAB nor RetryPolicy::ALIASES nor the
- * explicit worker-only transport list below.
+ *
+ * It must also never emit an OLD spelling as a code. That is the defect
+ * this guard was widened for: `broken_pdf` was a legitimate `ALIASES` entry,
+ * so a worker sending it with no `reason_code` passed the old check while
+ * `jobs.reason_code` stayed NULL, and only a read-time alias knew what the
+ * row meant. A code in a job row is a machine fact; it cannot be a word
+ * that exists only in another class's translation table.
+ *
+ * So the rule is: every token the worker can put on the wire is either
+ *   * a canonical `RetryPolicy::VOCAB` code, or
+ *   * a key of the worker's own `REASON_CODES` table (an explicit
+ *     word → canonical mapping in stage_events.py), or
+ *   * declared prose-only / local-index by name, with a one-line reason.
+ * And every `REASON_CODES` value must be canonical, with every old spelling
+ * agreeing with `RetryPolicy::ALIASES` so old and new rows read alike.
  *
  * Dependency-free: plain regex over the Python source text, anchored on
  * the call sites, never on every string in the file.
@@ -30,13 +39,10 @@ final class WorkerVocabularyTest extends TestCase
 {
 	/**
 	 * Values the worker legitimately passes as `reason` that are NOT policy
-	 * codes. Every entry needs its one-line reason and its file:line.
+	 * codes and carry no canonical meaning. Every entry needs its one-line
+	 * reason and its file:line.
 	 */
 	private const WORKER_ONLY_TRANSPORT = [
-		// runner.py: the fallback free-text reason for a skip the engine did
-		// not explain; the app stores free text in `reason`, policy rides on
-		// `reason_code`, which is never this value.
-		'skipped' => 'runner.py — free-text fallback for `reason`, never a reason_code',
 		// webhook_server.py keeps a LOCAL index of its own (the legacy
 		// standalone mode); these are its own labels for rows in that index
 		// and are never sent to this app as a code.
@@ -47,31 +53,108 @@ final class WorkerVocabularyTest extends TestCase
 		'uninteresting_event' => 'webhook_server.py — webhook response label for an event the worker ignores, never sent as a code',
 		'no_path' => 'webhook_server.py — webhook response label for an event without a path, never sent as a code',
 		'trashbin' => 'webhook_server.py — webhook response label for a trashbin path, never sent as a code',
-		'foreign_rewrite' => 'webhook_server.py — REASON_FOREIGN_REWRITE, the fingerprint guard\'s label in the worker\'s own index, never sent as a code',
+		// SKIP_REASON_* prose labels. They name a decision the app has no
+		// policy for; the free text is the whole answer.
+		'source_image_kept' => 'webhook_server.py — SKIP_REASON_SOURCE_KEPT, reported on a SUCCESSFUL image conversion, never as a skip code',
+		'born_digital_or_stamped_good' => 'webhook_server.py — SKIP_REASON_LEGACY, pre-0.1.5 spellings, not emitted by this worker',
+		'text_density_guard_low' => 'webhook_server.py — SKIP_REASON_TEXT_DENSITY_GUARD, legacy constant, not emitted by this worker',
 	];
 
-	public function testEveryWorkerReasonCodeIsKnownToTheApp(): void
+	public function testEveryWorkerReasonTokenIsCanonicalOrExplicitlyMapped(): void
 	{
+		$table = $this->reasonCodes();
 		$known = array_merge(
 			$this->constant('VOCAB'),
-			$this->constant('ALIASES'),
-			[RetryPolicy::CODE_UNKNOWN, RetryPolicy::CODE_WORKER_SENT_UNKNOWN],
+			array_keys($table),
+			$this->proseOnlyReasons(),
 			array_keys(self::WORKER_ONLY_TRANSPORT),
 		);
 
 		$offenders = [];
 		foreach ($this->emittedCodes() as $code => $where) {
+			// A token that is only in ALIASES is the bug: it is a read-time
+			// translation being emitted as if it were a code.
 			if (!in_array($code, $known, true)) {
-				$offenders[] = sprintf('%s — "%s" is not in RetryPolicy::VOCAB or ALIASES — add the code (with a verdict) to RetryPolicy, map it in ALIASES, or stop the worker emitting it',
+				$offenders[] = sprintf('%s — "%s" is neither a canonical RetryPolicy::VOCAB code nor a key of the worker\'s REASON_CODES table nor a declared prose-only label — give it an explicit entry (word => canonical code) in stage_events.py, make it a VOCAB code, or stop the worker emitting it',
 					$where, $code);
 			}
 		}
 
 		$this->assertSame([], $offenders,
-			"The worker emits reason codes the app has never heard of:\n  "
+			"The worker emits reason tokens the app cannot store as a code:\n  "
 			. implode("\n  ", $offenders) . "\n"
-			. "The app records an unknown code as `unknown` and its verdict — not the\n"
-			. "worker's intent — then decides the row's fate. Keep the two sides in lockstep.");
+			. "A job row must carry a canonical code, not an alias that only a\n"
+			. "read path knows how to translate. Keep the two sides in lockstep.");
+	}
+
+	/**
+	 * The table itself: every mapping lands on a code the app owns, and every
+	 * old spelling it accepts agrees with the app's alias map.
+	 */
+	public function testEveryWorkerMappingLandsOnACanonicalCode(): void
+	{
+		$vocab = $this->constant('VOCAB');
+		$aliases = $this->constantValue('ALIASES');
+		$table = $this->reasonCodes();
+		$this->assertNotEmpty($table, 'stage_events.py must define REASON_CODES');
+
+		$offenders = [];
+		foreach ($table as $word => $code) {
+			if (!in_array($code, $vocab, true)) {
+				$offenders[] = sprintf('REASON_CODES["%s"] = "%s" — not a canonical RetryPolicy::VOCAB code', $word, $code);
+				continue;
+			}
+			if (in_array($word, $vocab, true)) {
+				continue; // already canonical, nothing to translate
+			}
+			if (!array_key_exists($word, $aliases)) {
+				$offenders[] = sprintf('REASON_CODES["%s"] — old spelling with no RetryPolicy::ALIASES entry; a pre-fix row in this spelling would not read as "%s"', $word, $code);
+			} elseif ($aliases[$word] !== $code) {
+				$offenders[] = sprintf('REASON_CODES["%s"] = "%s" but RetryPolicy::ALIASES maps it to "%s"', $word, $code, $aliases[$word]);
+			}
+		}
+
+		$this->assertSame([], $offenders,
+			"The worker's reason table and the app's vocabulary disagree:\n  " . implode("\n  ", $offenders));
+	}
+
+	/**
+	 * REASON_CODES and PROSE_ONLY_REASONS, read from the worker source.
+	 *
+	 * @return array<string, string>
+	 */
+	private function reasonCodes(): array
+	{
+		$source = (string) file_get_contents($this->workerFile('stage_events.py'));
+		if (!preg_match('/REASON_CODES:\s*dict\[str,\s*str\]\s*=\s*\{(.*?)\n\}/s', $source, $block)) {
+			$this->fail('stage_events.py must define REASON_CODES: dict[str, str] = { ... }');
+			return [];
+		}
+		preg_match_all('/"([a-z][a-z0-9_]*)":\s*"([a-z][a-z0-9_]*)"/', $block[1], $pairs);
+		$table = [];
+		foreach ($pairs[1] as $i => $word) {
+			$table[$word] = $pairs[2][$i];
+		}
+		return $table;
+	}
+
+	/**
+	 * @return list<string>
+	 */
+	private function proseOnlyReasons(): array
+	{
+		$source = (string) file_get_contents($this->workerFile('stage_events.py'));
+		if (!preg_match('/PROSE_ONLY_REASONS[^=]*=\s*frozenset\(\s*\{(.*?)\}\s*\)/s', $source, $block)) {
+			$this->fail('stage_events.py must declare PROSE_ONLY_REASONS');
+			return [];
+		}
+		preg_match_all('/"([a-z][a-z0-9_]*)"/', $block[1], $m);
+		return $m[1];
+	}
+
+	private function workerFile(string $name): string
+	{
+		return dirname(__DIR__, 3) . '/worker/lib/nc_ocr_flow/' . $name;
 	}
 
 	/**
@@ -126,9 +209,13 @@ final class WorkerVocabularyTest extends TestCase
 				}
 			}
 
-			// REASON_* module constants
-			if (preg_match_all('/^(REASON_[A-Z0-9_]*)\s*=\s*["\']([a-z][a-z0-9]*(?:_[a-z0-9]+)*)["\']$/m', $source, $m, PREG_OFFSET_CAPTURE)) {
+			// REASON_* / SKIP_REASON_* module constants — the pipeline's
+			// verdicts and the legacy labels it still carries.
+			if (preg_match_all('/^([A-Z][A-Z0-9_]*)\s*=\s*["\']([a-z][a-z0-9]*(?:_[a-z0-9]+)*)["\']$/m', $source, $m, PREG_OFFSET_CAPTURE)) {
 				foreach ($m[2] as $i => $match) {
+					if (!str_contains($m[1][$i][0], 'REASON')) {
+						continue;
+					}
 					$found[$match[0]] ??= sprintf('%s:%d (constant %s)', $rel, $lineOf($match[1]), $m[1][$i][0]);
 				}
 			}
@@ -144,12 +231,12 @@ final class WorkerVocabularyTest extends TestCase
 				}
 			}
 
-			// The verdict table: both the old and the new spelling are codes
-			// a worker (of some vintage) may emit.
-			if (preg_match('/VERDICT_CODES[^{]*\{(.*?)\n\}/ms', $source, $table, PREG_OFFSET_CAPTURE)) {
+			// The reason table: keys are the worker's words, values are the
+			// codes it sends. Both must be explainable.
+			if (preg_match('/REASON_CODES[^{]*\{(.*?)\n\}/ms', $source, $table, PREG_OFFSET_CAPTURE)) {
 				if (preg_match_all('/["\']([a-z][a-z0-9]*(?:_[a-z0-9]+)*)["\']/', $table[1][0], $codes, PREG_OFFSET_CAPTURE)) {
 					foreach ($codes[1] as $match) {
-						$found[$match[0]] ??= sprintf('%s:%d (VERDICT_CODES)', $rel, $lineOf($table[1][1] + $match[1]));
+						$found[$match[0]] ??= sprintf('%s:%d (REASON_CODES)', $rel, $lineOf($table[1][1] + $match[1]));
 					}
 				}
 			}
@@ -169,5 +256,18 @@ final class WorkerVocabularyTest extends TestCase
 		$value = $reflection->getConstant($name);
 		$this->assertIsArray($value, "RetryPolicy::$name must be an array");
 		return array_keys($value);
+	}
+
+	/**
+	 * The raw value of a private RetryPolicy constant.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function constantValue(string $name): array
+	{
+		$reflection = new \ReflectionClass(RetryPolicy::class);
+		$value = $reflection->getConstant($name);
+		$this->assertIsArray($value, "RetryPolicy::$name must be an array");
+		return $value;
 	}
 }

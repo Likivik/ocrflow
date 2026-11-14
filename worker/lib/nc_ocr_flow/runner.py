@@ -28,7 +28,7 @@ from .config import env_float, env_int, env_str
 from .queue_client import ClaimStale, Job, QueueClient
 from .quota_gate import QuotaGate
 from .readiness import report_configured_engine
-from .stage_events import StageCollector, collector_scope, verdict_code
+from .stage_events import StageCollector, collector_scope, reason_code_for, verdict_code
 
 
 # What the worker can tell the app about a failure. Deliberately small: every
@@ -208,7 +208,20 @@ def run_once(
         )
         return True
     except Exception as exc:
-        code = classify_failure(exc)
+        word = classify_failure(exc)
+        # The wire carries the app's canonical name, never the classifier's
+        # local word: `classify_failure` speaks `app_5xx`, the app's table
+        # says `error_app_answered_5xx`. A word the table does not explain is
+        # a worker bug, and reporting `error_worker_unclassified` is the one
+        # honest answer that cannot be mistaken for a policy decision.
+        code = reason_code_for(word) or "error_worker_unclassified"
+        if code == "error_worker_unclassified" and word != "worker_error":
+            log.error(
+                "job %s: failure word %r has no canonical code; reporting "
+                "error_worker_unclassified",
+                job.id,
+                word,
+            )
         log.warning("job %s failed (%s): %s", job.id, code, exc)
         # The stage that blew up is the last one recorded; it gets the job's
         # failure code so the row says which stage failed, not just that

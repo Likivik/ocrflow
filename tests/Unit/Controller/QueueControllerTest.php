@@ -338,6 +338,67 @@ class QueueControllerTest extends TestCase
         $this->assertTrue($data['applied'], 'a claim holder\'s result must be applied');
     }
 
+    public function testASkippedResultKeepsTheCanonicalReasonCode(): void
+    {
+        // The worker says `reason=broken_pdf` in prose and `reason_code=
+        // error_file_broken` in machine terms. The row must hold BOTH: the
+        // prose is for the human, the code is what policy and the worklist
+        // read. Until 0.1.17 the code was dropped here and the row read NULL.
+        $queue = $this->createMock(Queue::class);
+        $queue->method('getById')->willReturn($this->claimedJob('tok-7'));
+        $captured = null;
+        $queue->expects($this->once())
+            ->method('finish')
+            ->with(7, $this->callback(function (array $payload) use (&$captured): bool {
+                $captured = $payload;
+                return true;
+            }), 'tok-7')
+            ->willReturn(true);
+
+        $request = $this->createMock(IRequest::class);
+        $request->method('getHeader')->willReturnCallback(
+            static fn (string $name): string => match ($name) {
+                Application::WORKER_SECRET_HEADER => 'the-secret',
+                Application::CLAIM_HEADER => 'tok-7',
+                default => '',
+            },
+        );
+        $request->method('getParam')->willReturnCallback(
+            static fn (string $key, mixed $default = null): mixed => match ($key) {
+                'status' => 'skipped',
+                'reason' => 'broken_pdf',
+                'reason_code' => 'error_file_broken',
+                default => $default,
+            },
+        );
+
+        $config = $this->createMock(IConfig::class);
+        $config->method('getAppValue')
+            ->with(Application::APP_ID, 'worker_secret', '')
+            ->willReturn('the-secret');
+
+        $controller = new QueueController(
+            Application::APP_ID,
+            $request,
+            $queue,
+            $config,
+            $this->createMock(LoggerInterface::class),
+            $this->createMock(FileExchange::class),
+            new RetryPolicy(),
+            $this->createMock(WorkerRegistry::class),
+        );
+
+        $data = $controller->result(7)->getData();
+        $this->assertTrue($data['applied']);
+        $this->assertSame('skipped', $captured['status']);
+        $this->assertSame('broken_pdf', $captured['reason'], 'the human word is kept as-is');
+        $this->assertSame(
+            'error_file_broken',
+            $captured['reason_code'],
+            'the machine code the worker sent must reach jobs.reason_code',
+        );
+    }
+
     public function testAWorkerThatLostTheClaimIsToldTheResultWasDiscarded(): void
     {
         $queue = $this->createMock(Queue::class);

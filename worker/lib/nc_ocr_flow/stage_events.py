@@ -41,39 +41,79 @@ STAGES: tuple[str, ...] = (
 #: The only stage that can spend money.
 COST_STAGE = "recognize"
 
-#: The classifier's verdicts: decisions, not failures.
+#: Every word this worker may put on the wire, and the canonical code the
+#: app stores for it.
 #:
-#: The app owns the vocabulary of reason codes; the worker reports which
-#: verdict it reached. These mean "this file needs no work" -- the PDF
-#: already carries a text layer, the image is a photo, our own earlier OCR
-#: output is there. They are terminal: retrying cannot change the answer,
-#: and re-OCR-ing a born-digital PDF costs money to learn the same thing.
+#: The app owns the vocabulary of reason codes; the worker reports the code.
+#: A code this table does not name is not sent at all (see
+#: :data:`PROSE_ONLY_REASONS`), so the app never has to reconstruct a code
+#: from an alias -- which it did for ``broken_pdf`` until 0.1.17: the row
+#: said ``broken_pdf`` and ``jobs.reason_code`` was NULL.
 #:
-#: Old names (left of the arrow) are what a pre-0.1.5 worker emitted; the
-#: app aliases them on read, and this worker writes only the new codes.
-VERDICT_CODES: dict[str, str] = {
-    # The outcomes vocabulary (2026-11-12 plan): read old, write new.
+#: Keys are what the pipeline/classifier produce; values are ``RetryPolicy``
+#: canonical names. Old spellings on the left are what a pre-0.1.5 worker
+#: emitted: the app still aliases them on read, and an explicit entry here
+#: means this worker maps them instead of relying on that read alias.
+#: ``tests/Unit/Service/WorkerVocabularyTest.php`` refuses a value with no
+#: canonical entry, and a key that no entry explains.
+REASON_CODES: dict[str, str] = {
+    # Classifier verdicts (2026-11-12 plan): decisions, not failures.
     "skip_text_native": "skip_text_native",
     "skip_ocred_by_ocrflow": "skip_ocred_by_ocrflow",
     "skip_ocred_by_suspected_foreign": "skip_ocred_by_suspected_foreign",
+    "skip_classifier_says_photo": "skip_classifier_says_photo",
     "needs_ocr": "needs_ocr",
+    # A damaged file: the classifier decided, the app's code says so.
+    "broken_pdf": "error_file_broken",
+    "error_file_broken": "error_file_broken",
+    # The engine answered for every page and there was nothing to read.
+    "no_text_detected": "skip_ocred_by_ocrflow_found_nothing",
+    # Not a document we can read at all.
+    "unsupported_ext": "skip_file_type_unsupported",
+    # Failure words (runner.classify_failure), canonicalised at the wire.
+    "empty_stream": "error_worker_got_empty_file",
+    "credentials_missing": "error_provider_credentials_missing",
+    "app_4xx": "error_worker_request_malformed",
+    "app_5xx": "error_app_answered_5xx",
+    "engine_timeout": "error_provider_timed_out",
+    "worker_error": "error_worker_unclassified",
+    "unknown": "error_worker_sent_unknown_code",
+    "error_worker_job_reference_stale": "error_worker_job_reference_stale",
     # Legacy aliases — still accepted, never emitted by a current worker.
     "born_digital_text_based": "skip_text_native",
     "mobilenet": "skip_classifier_says_photo",
     "stamped_good_by_us": "skip_ocred_by_ocrflow",
 }
 
+#: Skip reasons that carry no app code at all: the app has no policy for
+#: them and the free text is the whole answer. Kept explicit so the drift
+#: guard can tell "deliberately prose" from "forgot the table".
+PROSE_ONLY_REASONS: frozenset[str] = frozenset(
+    {
+        "skipped",  # runner._report's fallback for an unexplained skip
+        "pdf_already_exists",  # image branch: the target PDF name is taken
+        # fingerprint guard: the live file no longer matches what we left and the
+        # foreign-rewrite cap is reached. A label for the operator, no app policy.
+        "foreign_rewrite",
+    }
+)
 
-def verdict_code(reason: str | None) -> str | None:
-    """The reason code for a classifier verdict, or None for anything else.
 
-    A skip that is not a verdict (``unsupported_ext``, ``foreign_rewrite``,
-    ...) keeps its free-text reason and no code: the app has no policy for
-    it, and inventing one here would only widen a vocabulary the app owns.
+def reason_code_for(reason: str | None) -> str | None:
+    """The canonical app code for a reason the worker reports, or None.
+
+    None means "this skip is prose only" (:data:`PROSE_ONLY_REASONS`), never
+    "the table has no entry" -- an unmapped word is a bug, and the drift
+    guard in ``tests/Unit/Service/WorkerVocabularyTest.php`` fails on it.
     """
     if reason is None:
         return None
-    return VERDICT_CODES.get(reason)
+    return REASON_CODES.get(reason)
+
+
+#: The pre-0.1.17 name. Kept because the webhook's stage marking and the
+#: worker tests speak it; it now resolves the whole table, not verdicts only.
+verdict_code = reason_code_for
 
 
 _active: ContextVar[StageCollector | None] = ContextVar("ocrflow_stage_collector", default=None)
