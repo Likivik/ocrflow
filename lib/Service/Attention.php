@@ -273,7 +273,7 @@ class Attention
 
 	/**
 	 * @param array<string, mixed> $row
-	 * @return array{id: int, path: string, code: string, label: string, fix: string, error: ?string, attempts: int, finished_at: ?int}
+	 * @return array{id: int, file_id: int, path: string, code: string, label: string, fix: string, error: ?string, attempts: int, finished_at: ?int}
 	 */
 	private function toApi(array $row): array
 	{
@@ -285,6 +285,9 @@ class Attention
 		$error = isset($row['error']) && is_string($row['error']) && $row['error'] !== '' ? $row['error'] : null;
 		return [
 			'id' => (int) $row['id'],
+			// The file this job is about. The panel's Open link and Delete
+			// take a file id; the row's own `id` is the job.
+			'file_id' => (int) ($row['file_id'] ?? 0),
 			'path' => (string) $row['path'],
 			'code' => $this->retryPolicy->canonical($code),
 			'label' => $entry['label'] ?? 'unknown',
@@ -341,7 +344,7 @@ class Attention
 	protected function fetchRows(int $limit, int $offset, array $spellings, ?string $pathPrefix = null): array
 	{
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('id', 'path', 'reason_code', 'reason', 'error', 'attempts', 'finished_at')
+		$qb->select('id', 'file_id', 'path', 'reason_code', 'reason', 'error', 'attempts', 'finished_at')
 			->from('ocrflow_jobs')
 			->where($this->predicate($qb, $spellings))
 			->orderBy('finished_at', 'DESC')

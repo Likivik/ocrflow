@@ -84,6 +84,35 @@ class MineController extends OCSController
 	}
 
 	/**
+	 * Move ONE of the caller's own files to their trash bin.
+	 *
+	 * 403 when the file is not inside the caller's folder, 404 when it is
+	 * gone. The distinction is deliberate: a user may learn that a number is
+	 * not theirs (403) without learning whether a file exists there.
+	 *
+	 * @throws OCSForbiddenException
+	 */
+	#[NoAdminRequired]
+	public function delete(int $fileId): DataResponse
+	{
+		$uid = $this->callerUid();
+
+		if (!$this->request->passesCSRFCheck()) {
+			return new DataResponse(['message' => 'CSRF check failed'], Http::STATUS_PRECONDITION_FAILED);
+		}
+
+		$outcome = $this->mine->delete($uid, $fileId);
+		return match ($outcome) {
+			Mine::DELETE_DONE => new DataResponse(['file_id' => $fileId, 'deleted' => 1]),
+			Mine::DELETE_MISSING => new DataResponse(['file_id' => $fileId, 'message' => 'no such file'], Http::STATUS_NOT_FOUND),
+			Mine::DELETE_REFUSED => new DataResponse(['file_id' => $fileId, 'message' => 'not your file'], Http::STATUS_FORBIDDEN),
+			// The delete was ours to attempt and the filesystem refused. That
+			// is a real failure, not an ownership answer or a missing file.
+			default => new DataResponse(['file_id' => $fileId, 'message' => 'the file could not be deleted'], Http::STATUS_INTERNAL_SERVER_ERROR),
+		};
+	}
+
+	/**
 	 * @throws OCSForbiddenException
 	 */
 	private function callerUid(): string

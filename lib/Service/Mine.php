@@ -7,6 +7,10 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Service;
 
+use OCP\Files\Config\IUserMountCache;
+use OCP\Files\IRootFolder;
+use OCP\Files\NotFoundException;
+use OCP\Files\NotPermittedException;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -32,10 +36,24 @@ class Mine
 	/** Never build more rows than this for one user in one request. */
 	private const MAX_ROWS = 200;
 
+	/** The caller's file was moved to their trash bin. */
+	public const DELETE_DONE = 'deleted';
+
+	/** The id names no node in the caller's own folder. */
+	public const DELETE_MISSING = 'missing';
+
+	/** The node exists but is not inside the caller's `/<uid>/files/`. */
+	public const DELETE_REFUSED = 'refused';
+
+	/** The delete was attempted and failed for a reason that is not ownership or absence. */
+	public const DELETE_FAILED = 'failed';
+
 	public function __construct(
 		private Attention $attention,
 		private Outcomes $outcomes,
 		private ?LoggerInterface $logger = null,
+		private ?IRootFolder $rootFolder = null,
+		private ?IUserMountCache $mountCache = null,
 	) {
 	}
 
@@ -150,6 +168,119 @@ class Mine
 	}
 
 	/**
+	 * Move one of the caller's own files to their trash bin.
+	 *
+	 * The node is resolved from the CALLER's user folder, and then its stored
+	 * path is checked against the caller's `/<uid>/files/` scope before
+	 * anything happens to it — file ids are global, so an id alone is not
+	 * evidence of ownership. A foreign file is refused with the delete never
+	 * attempted (403), a vanished one is 404, and neither is ever a 500.
+	 *
+	 * `$node->delete()` is the filesystem-layer call, which is what the
+	 * files_trashbin hooks intercept. A WebDAV DELETE would bypass them and
+	 * destroy the file.
+	 */
+	public function delete(string $uid, int $fileId): string
+	{
+		$prefix = UserScope::prefixFor($uid);
+		if ($prefix === '' || $this->rootFolder === null) {
+			return self::DELETE_REFUSED;
+		}
+
+		try {
+			$folder = $this->rootFolder->getUserFolder($uid);
+			$nodes = $folder->getById($fileId);
+		} catch (NotPermittedException) {
+			// The account exists but its folder is not readable here. That
+			// says nothing about ownership of THIS id, so it is a refusal:
+			// nothing was deleted and the answer must not read as success.
+			return self::DELETE_REFUSED;
+		} catch (NotFoundException) {
+			// No user folder at all: there is nothing of theirs to delete,
+			// and "gone" is the honest answer for every id they name.
+			return self::DELETE_MISSING;
+		} catch (\Throwable $e) {
+			// A missing account lands here on some versions (NoUserException).
+			// It is not an ownership answer, so it is not counted as one.
+			$this->logger?->warning('ocrflow: mine: cannot open the user folder for a delete: ' . $e->getMessage());
+			return self::DELETE_MISSING;
+		}
+
+		$node = $nodes[0] ?? null;
+		if ($node === null) {
+			// A user folder resolves only the ids inside that user's own
+			// space (Root::getById does the same: it searches the mounts of
+			// the CURRENT user), so an empty answer means "not here" — which
+			// is either "gone" or "not yours", and the panel must say which.
+			//
+			// The mount cache is the one public API that knows which user's
+			// mount holds an id, so it turns the empty answer into the right
+			// one. This IS an existence oracle for file ids, deliberately:
+			// "403, not yours" is the honest answer, ids are global and
+			// guessable anyway, and the oracle never reveals anything the
+			// caller could act on.
+			return $this->heldByAnotherUser($uid, $fileId) ? self::DELETE_REFUSED : self::DELETE_MISSING;
+		}
+
+		// The one ownership rule, the same one the listing applies. A
+		// resolved node that is not under the caller's scope is refused
+		// BEFORE the delete: `never()`, not "deleted nothing".
+		if (!UserScope::owns($node->getPath(), $prefix)) {
+			$this->logger?->warning('ocrflow: mine: refused a delete of a node outside the caller\'s scope');
+			return self::DELETE_REFUSED;
+		}
+
+		try {
+			$node->delete();
+		} catch (NotPermittedException) {
+			// A lock or a read-only mount: the file is still there, so this
+			// is a refusal and the caller must not be told it is gone.
+			return self::DELETE_REFUSED;
+		} catch (NotFoundException) {
+			// Vanished between the lookup and the unlink, so the trash never
+			// saw it; the honest answer is the same 404 a second click gets.
+			return self::DELETE_MISSING;
+		} catch (\Throwable $e) {
+			$this->logger?->error('ocrflow: mine: delete failed for file ' . $fileId . ': ' . $e->getMessage());
+			return self::DELETE_FAILED;
+		}
+
+		return self::DELETE_DONE;
+	}
+
+	/**
+	 * Does any user OTHER than $uid have a mount holding this file id?
+	 *
+	 * "Nobody has it" and "somebody else has it" are the two answers a user
+	 * folder cannot give, and they are exactly the two a Delete must
+	 * distinguish (404 vs 403).
+	 */
+	private function heldByAnotherUser(string $uid, int $fileId): bool
+	{
+		if ($this->mountCache === null) {
+			return false;
+		}
+		try {
+			$mounts = $this->mountCache->getMountsForFileId($fileId);
+		} catch (\Throwable $e) {
+			// A cache that cannot answer is not an ownership finding: the
+			// safe reading is "not yours", which is 404 and deletes nothing.
+			$this->logger?->warning('ocrflow: mine: cannot ask the mount cache about a file id: ' . $e->getMessage());
+			return false;
+		}
+		foreach ($mounts as $mount) {
+			$owner = $mount->getUser();
+			if ($owner === null || $owner->getUID() === $uid) {
+				// The caller's own mount, or an entry with no user: this is
+				// "gone for this request", not someone else's file.
+				continue;
+			}
+			return true;
+		}
+		return false;
+	}
+
+	/**
 	 * One row, cut down to what the personal panel shows: the path, the fix
 	 * hint, which queue it is on, how many attempts it has had and how old
 	 * it is. `age` is seconds since the row was decided; null when the row
@@ -166,6 +297,10 @@ class Mine
 			// The id the retry endpoint accepts: a job id for a needs_fix
 			// row, a Decide row id for a redo row.
 			'id' => (int) ($row['id'] ?? 0),
+			// The FILE id, which is not the same number: `id` is a job id
+			// for a needs_fix row and a Decide row id for a redo row. Open
+			// links and delete take this one.
+			'file_id' => (int) ($row['file_id'] ?? 0),
 			'origin' => $origin,
 			'kind' => (($row['verdict'] ?? null) === RetryPolicy::VERDICT_REDO) ? 'redo' : 'needs_fix',
 			'path' => (string) ($row['path'] ?? ''),

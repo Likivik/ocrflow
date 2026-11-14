@@ -1068,6 +1068,79 @@ code=$(curl -s -o /tmp/ocrflow-attention-carol -w '%{http_code}' -u "carol:carol
 [ "$code" = "403" ] || fail "a non-admin must still be refused on /attention, got $code body=$(cat /tmp/ocrflow-attention-carol)"
 ok "mine: the owner's retry runs; the admin plane is unchanged"
 
+# --- Part C2: Delete, to trash, ownership-checked (DELETE /api/v1/mine/...) ---
+#
+# The [real-db] test for the panel's Delete, on real uploads — so "to trash" is
+# the real trash bin and not a row that says so. Three things can go wrong and
+# each one is asserted separately:
+#   * a foreign file id must be refused AND the file must still be there (the
+#     delete is never attempted, which a "deleted 0" answer would not prove);
+#   * the caller's own file must leave their folder and appear in
+#     files_trashbin — a WebDAV-style delete would remove it for good;
+#   * a batch of two own plus one foreign id must answer deleted=2 refused=1.
+echo "== mine/delete: own files go to trash, a foreign id is refused and untouched"
+
+printf 'delete fixture one\n' > /tmp/ocrflow-mine-del-1.txt
+printf 'delete fixture two\n' > /tmp/ocrflow-mine-del-2.txt
+printf 'delete fixture three\n' > /tmp/ocrflow-mine-del-3.txt
+for n in 1 2 3; do
+  curl -s -o /dev/null -u "bob:bob-pass-123" -X PUT --data-binary "@/tmp/ocrflow-mine-del-${n}.txt" \
+    "$BASE/remote.php/dav/files/bob/mine-del-${n}.txt" || fail "WebDAV upload of mine-del-${n}.txt failed"
+done
+curl -s -o /dev/null -u "carol:carol-pass-123" -X PUT --data-binary @/tmp/ocrflow-mine-del-3.txt \
+  "$BASE/remote.php/dav/files/carol/mine-foreign.txt" || fail "WebDAV upload of carol's fixture failed"
+
+# The file ids come from the filecache, because the panel gets them from the
+# same place: an id that is not the filecache id would open the wrong file.
+bob_storage=$(sql "SELECT numeric_id FROM oc_storages WHERE id = 'home::bob'")
+carol_storage=$(sql "SELECT numeric_id FROM oc_storages WHERE id = 'home::carol'")
+[ -n "$bob_storage" ] || fail "no storage row for bob"
+bob_fid1=$(sql "SELECT fileid FROM oc_filecache WHERE storage = ${bob_storage} AND path = 'files/mine-del-1.txt'")
+bob_fid2=$(sql "SELECT fileid FROM oc_filecache WHERE storage = ${bob_storage} AND path = 'files/mine-del-2.txt'")
+bob_fid3=$(sql "SELECT fileid FROM oc_filecache WHERE storage = ${bob_storage} AND path = 'files/mine-del-3.txt'")
+carol_fid=$(sql "SELECT fileid FROM oc_filecache WHERE storage = ${carol_storage} AND path = 'files/mine-foreign.txt'")
+[ -n "$bob_fid1" ] && [ -n "$bob_fid2" ] && [ -n "$bob_fid3" ] || fail "bob's fixtures are not in the filecache"
+[ -n "$carol_fid" ] || fail "carol's fixture is not in the filecache"
+
+# present in the folder, 207; gone, 404.
+dav_status() {
+  curl -s -o /dev/null -w '%{http_code}' -u "$1" -X PROPFIND -H 'Depth: 0' \
+    "$BASE/remote.php/dav/files/$2/$3"
+}
+trash_has() {
+  $ENGINE exec "$NAME" sh -c "ls /var/www/html/data/$1/files_trashbin/files/ 2>/dev/null | grep -c '$2' || true"
+}
+
+[ "$(dav_status 'bob:bob-pass-123' bob mine-del-1.txt)" = "207" ] || fail "bob's fixture is missing before the delete"
+
+code=$(curl -s -o /tmp/ocrflow-del-one -w '%{http_code}' -u "bob:bob-pass-123" -X DELETE \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/mine/${bob_fid1}")
+[ "$code" = "200" ] || fail "DELETE of bob's own file should be 200, got $code body=$(cat /tmp/ocrflow-del-one)"
+grep -q '"deleted":1' /tmp/ocrflow-del-one || fail "the delete must report one deleted file: $(cat /tmp/ocrflow-del-one)"
+[ "$(dav_status 'bob:bob-pass-123' bob mine-del-1.txt)" = "404" ] || fail "the file is still in bob's folder after the delete"
+[ "$(trash_has bob mine-del-1.txt)" -ge 1 ] || fail "the deleted file is not in bob's trash bin — it was destroyed, not trashed"
+ok "mine/delete: own file leaves the folder and lands in the trash bin"
+
+# A foreign id: 403, and carol's file is still there. This is the assertion that
+# makes the endpoint safe; "deleted:0" alone would not prove the delete was
+# never attempted.
+code=$(curl -s -o /tmp/ocrflow-del-foreign -w '%{http_code}' -u "bob:bob-pass-123" -X DELETE \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/mine/${carol_fid}")
+[ "$code" = "403" ] || fail "deleting another user's file must be 403, got $code body=$(cat /tmp/ocrflow-del-foreign)"
+[ "$(dav_status 'carol:carol-pass-123' carol mine-foreign.txt)" = "207" ] || fail "carol's file was deleted by bob's refused request"
+[ "$(trash_has carol mine-foreign.txt)" = "0" ] || fail "carol's file was trashed by bob's refused request"
+ok "mine/delete: another user's file is 403, and their file is untouched"
+
+# A number nothing owns: 404, not a 500 and not a silent 200.
+code=$(curl -s -o /tmp/ocrflow-del-missing -w '%{http_code}' -u "bob:bob-pass-123" -X DELETE \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/mine/999999999")
+[ "$code" = "404" ] || fail "a missing file id must be 404, got $code body=$(cat /tmp/ocrflow-del-missing)"
+ok "mine/delete: a file that is gone is 404"
+
+
 sql "DELETE FROM ${JOBS} WHERE path IN ('/bob/files/mine-bob.pdf', '/carol/files/mine-carol.pdf')" >/dev/null
 
 # The probe row served its purpose; it is not an outcome.

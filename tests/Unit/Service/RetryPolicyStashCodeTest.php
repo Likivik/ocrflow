@@ -45,8 +45,8 @@ class RetryPolicyStashCodeTest extends TestCase
 		$this->assertSame('owner', $entry['actor']);
 		$this->assertSame(1, preg_match('/^[^.!?]+[.]$/', (string) $entry['label']),
 			'the label is one sentence, for a worklist row');
-		$this->assertStringContainsStringIgnoringCase('decide', (string) $entry['fix'],
-			'the fix hint points at the owner decision, not at a retry');
+		$this->assertStringContainsStringIgnoringCase('source changed', (string) $entry['fix'],
+			'the fix hint names the conflict the row is about; the Decide buttons own the action');
 	}
 
 	public function testTheLegacySourceChangedSpellingReadsAsTheStashCode(): void
