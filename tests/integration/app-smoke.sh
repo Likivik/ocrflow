@@ -1073,6 +1073,107 @@ sql "DELETE FROM ${JOBS} WHERE path IN ('/bob/files/mine-bob.pdf', '/carol/files
 # The probe row served its purpose; it is not an outcome.
 sql "DELETE FROM oc_ocrflow_pending_results WHERE id=${probe_id}" >/dev/null
 
+# === failure fixtures: the codes a damaged upload really produces ============
+#
+# Every other section of this script builds its damaged STATE with an INSERT.
+# This one starts from bytes on disk, pushes them through WebDAV and the app's
+# own intake, and reads the code the pipeline wrote — so the assertion is about
+# the code path, not about the schema accepting a string.
+#
+# The fixtures are GENERATED, never committed (tests/fixtures/out is
+# gitignored): tests/fixtures/make_error_fixtures.py assembles a minimal PDF
+# byte by byte and damages it, so no real user document is in the repository
+# and the damage is reviewable in one file.
+#
+# What this harness can and cannot prove — stated plainly:
+#   * zero-bytes.pdf — the whole decision is the app's: Queue::enqueue sees
+#     size 0 and calls recordEmptySource before any dedupe guard. The upload IS
+#     the test; nothing is simulated.
+#   * truncated.pdf — the WORKER decides this one. The harness is a Nextcloud
+#     container with no worker in it, so after the real upload and the real
+#     claim, the result is posted in exactly the shape runner._report sends for
+#     a broken file (status=skipped, reason=broken_pdf, no reason_code: the
+#     worker's VERDICT_CODES has no entry for it). The verdict on these exact
+#     bytes is pinned where pymupdf is real —
+#     worker/tests/test_broken_pdf.py::test_the_shipped_truncated_fixture_is_broken_and_skipped.
+#   * bad-xref.pdf — the negative control: MuPDF rebuilds a shifted xref table
+#     and reads the page, so a corrupted table must NOT become a broken row.
+echo "== failure fixtures: a zero-byte source is a terminal skip, not a job"
+sql "DELETE FROM ${JOBS}" >/dev/null   # this section starts from an empty queue
+FIXTURES=$(mktemp -d)
+python3 "${APP_DIR}/tests/fixtures/make_error_fixtures.py" "$FIXTURES" >/dev/null \
+  || fail "the failure-fixture generator did not run"
+[ -f "${FIXTURES}/zero-bytes.pdf" ] || fail "the generator did not produce zero-bytes.pdf"
+[ ! -s "${FIXTURES}/zero-bytes.pdf" ] || fail "zero-bytes.pdf is not zero bytes"
+
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT \
+  --data-binary @"${FIXTURES}/zero-bytes.pdf" \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/zero-bytes.pdf" || fail "WebDAV upload of zero-bytes.pdf failed"
+sleep 2
+zero_row=$(sql "SELECT status || '|' || COALESCE(reason_code,'<null>') || '|' || COALESCE(reason,'<null>') || '|' || COALESCE(cast(size as text),'<null>') || '|' || COALESCE(cast(retryable as text),'<null>') FROM ${JOBS} WHERE path LIKE '%/zero-bytes.pdf'")
+[ "$zero_row" = "skipped|error_source_file_zero_bytes|error_source_file_zero_bytes|0|false" ] \
+  || fail "a zero-byte upload must be recorded as a terminal skip with error_source_file_zero_bytes, got '${zero_row}'"
+# The verdict must outlive the job row: retention deletes job rows, the ledger
+# is what a later scan reads.
+zero_ledger=$(sql "SELECT status || '|' || COALESCE(reason,'<null>') FROM ${FILES} WHERE path LIKE '%/zero-bytes.pdf'")
+[ "$zero_ledger" = "skipped|error_source_file_zero_bytes" ] \
+  || fail "the zero-byte verdict must also land in the ledger, got '${zero_ledger}'"
+# It is not work: the worker must never be handed it.
+code=$(claim)
+[ "$code" = "204" ] || fail "a zero-byte file must never be claimable, claim answered $code"
+zero_errors=$(occ ocrflow:errors --code=error_source_file_zero_bytes)
+case "$zero_errors" in *zero-bytes.pdf*) ;; *) fail "the worklist does not list the zero-byte file under error_source_file_zero_bytes: ${zero_errors}" ;; esac
+ok "zero-byte upload -> error_source_file_zero_bytes (job + ledger), never claimable, listed in the worklist"
+
+echo "== failure fixtures: a damaged PDF becomes error_file_broken"
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT \
+  --data-binary @"${FIXTURES}/truncated.pdf" \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/truncated.pdf" || fail "WebDAV upload of truncated.pdf failed"
+sleep 2
+queued_row=$(sql "SELECT status || '|' || COALESCE(cast(size as text),'<null>') FROM ${JOBS} WHERE path LIKE '%/truncated.pdf'")
+case "$queued_row" in
+  queued\|0) fail "truncated.pdf was queued as a 0-byte file (the app should have called it empty): ${queued_row}" ;;
+  queued\|*) ;;
+  *) fail "a non-empty PDF must be queued for the worker, got '${queued_row}'" ;;
+esac
+claim_one
+code=$(curl -s -o /tmp/ocrflow-broken -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
+  -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
+  --data-urlencode 'status=skipped' --data-urlencode 'reason=broken_pdf' \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result")
+[ "$code" = "200" ] || fail "the broken-PDF result should be 200, got $code body=$(cat /tmp/ocrflow-broken)"
+broken_row=$(sql "SELECT status || '|' || COALESCE(reason,'<null>') || '|' || COALESCE(reason_code,'<null>') FROM ${JOBS} WHERE id = ${jobid}")
+case "$broken_row" in
+  # The worker's word is `broken_pdf` and it sends no reason_code for it — that
+  # is what the row says, and pretending otherwise would hide the alias.
+  "skipped|broken_pdf|<null>") ;;
+  *) fail "the damaged-PDF row should read skipped|broken_pdf|<null>, got '${broken_row}'" ;;
+esac
+broken_ledger=$(sql "SELECT status || '|' || COALESCE(reason,'<null>') FROM ${FILES} WHERE path LIKE '%/truncated.pdf'")
+[ "$broken_ledger" = "skipped|broken_pdf" ] \
+  || fail "the ledger must carry the worker's verdict for truncated.pdf, got '${broken_ledger}'"
+# The user-visible code is the canonical one: the app aliases broken_pdf on read,
+# which is the only place error_file_broken comes from today.
+broken_errors=$(occ ocrflow:errors --code=error_file_broken)
+case "$broken_errors" in *truncated.pdf*) ;; *) fail "the worklist does not report truncated.pdf under error_file_broken: ${broken_errors}" ;; esac
+ok "damaged PDF -> worker broken_pdf, read back as error_file_broken in the worklist"
+
+echo "== failure fixtures: a corrupted xref table is repaired, not an error"
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT \
+  --data-binary @"${FIXTURES}/bad-xref.pdf" \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/bad-xref.pdf" || fail "WebDAV upload of bad-xref.pdf failed"
+sleep 2
+badx_row=$(sql "SELECT status || '|' || COALESCE(reason_code,'<null>') FROM ${JOBS} WHERE path LIKE '%/bad-xref.pdf'")
+[ "$badx_row" = "queued|<null>" ] \
+  || fail "a repaired PDF must be a normal job, got '${badx_row}' (intake must not classify it broken)"
+case "$(occ ocrflow:errors --code=error_file_broken)" in
+  *bad-xref.pdf*) fail "bad-xref.pdf is readable (MuPDF rebuilds the table) and must not be on the broken worklist" ;;
+esac
+ok "corrupted xref -> queued like any PDF, not broken (the reader repairs it)"
+
+sql "DELETE FROM ${JOBS}" >/dev/null   # the fixtures' rows are evidence, not state
+rm -rf "$FIXTURES"
+
 # Restore the default cap for whoever runs the instance after the smoke.
 occ config:app:set ocrflow attention_retry_cap --value 500 >/dev/null
 
