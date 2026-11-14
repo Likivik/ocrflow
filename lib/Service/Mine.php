@@ -54,7 +54,13 @@ class Mine
 		private ?LoggerInterface $logger = null,
 		private ?IRootFolder $rootFolder = null,
 		private ?IUserMountCache $mountCache = null,
+		private ?RetryPolicy $retryPolicy = null,
 	) {
+	}
+
+	private function policy(): RetryPolicy
+	{
+		return $this->retryPolicy ??= new RetryPolicy();
 	}
 
 	/**
@@ -77,8 +83,11 @@ class Mine
 		$span = min($limit + $offset, self::MAX_ROWS);
 
 		$rows = [];
-		foreach ($this->attention->list($span, 0, null, RetryPolicy::VERDICT_NEEDS_FIX, $prefix)['rows'] as $row) {
-			$rows[] = $this->row($row, 'job', true);
+		// Actionable, not needs_fix: the list must contain the rows a retry
+		// can help, or the Retry button has nowhere to appear. `retryable` is
+		// then answered per row by the same policy the endpoint enforces.
+		foreach ($this->attention->list($span, 0, null, RetryPolicy::VERDICT_ACTIONABLE, $prefix)['rows'] as $row) {
+			$rows[] = $this->row($row, 'job', $this->policy()->isRetryable((string) ($row['code'] ?? '')));
 		}
 		foreach ($this->outcomes->list('redo', $span, 0, null, $prefix)['rows'] as $row) {
 			$origin = is_string($row['origin'] ?? null) ? $row['origin'] : 'ledger';

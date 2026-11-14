@@ -85,7 +85,7 @@ class MineOwnershipTest extends TestCase
 		$job = new Job();
 		$job->setId(42);
 		$job->setPath('/alice/files/scan.pdf');
-		$job->setReasonCode('error_file_broken');
+		$job->setReasonCode('error_provider_timed_out');
 		$job->setFileId(7);
 
 		$queue = $this->createMock(Queue::class);
@@ -168,7 +168,7 @@ class MineOwnershipTest extends TestCase
 			$j = new Job();
 			$j->setId($id);
 			$j->setPath($path);
-			$j->setReasonCode('error_file_broken');
+			$j->setReasonCode('error_provider_timed_out');
 			$j->setFileId($id);
 			return $j;
 		};

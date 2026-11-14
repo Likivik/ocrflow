@@ -68,7 +68,7 @@ class Attention
 	 *
 	 * @return array{rows: list<array{id: int, path: string, code: string, label: string, fix: string, error: ?string, attempts: int, finished_at: ?int}>, total: int, cap: int}
 	 */
-	public function list(int $limit, int $offset = 0, ?string $code = null, string $verdict = RetryPolicy::VERDICT_NEEDS_FIX, ?string $pathPrefix = null): array
+	public function list(int $limit, int $offset = 0, ?string $code = null, string $verdict = RetryPolicy::VERDICT_ACTIONABLE, ?string $pathPrefix = null): array
 	{
 		$spellings = $this->spellings($code, $verdict);
 		$total = $this->fetchTotal($spellings, $pathPrefix);
@@ -122,8 +122,14 @@ class Attention
 			return false;
 		}
 		$code = $this->rowCode($job->getReasonCode(), $job->getReason());
-		if ($this->retryPolicy->verdict($code) !== RetryPolicy::VERDICT_NEEDS_FIX) {
-			$this->logger?->warning('ocrflow: attention: job ' . $id . ' was asked for a retry but its code is not needs_fix (' . (string) $code . '); refused');
+		// One question, one owner: is this code worth another attempt? The
+		// old code asked `verdict === needs_fix`, which is a different
+		// question and answers it backwards — every needs_fix code is
+		// permanent (a damaged file, an empty source) and every code worth
+		// retrying is `wait`. So the check refused exactly the rows the panel
+		// offers Retry on, and the button did nothing.
+		if (!$this->retryPolicy->isRetryable($code)) {
+			$this->logger?->warning('ocrflow: attention: job ' . $id . ' carries the code ' . (string) $code . ', which a retry cannot fix; refused');
 			return false;
 		}
 		$fileId = $job->getFileId();
@@ -166,7 +172,12 @@ class Attention
 	public function retryAll(): int
 	{
 		$cap = $this->cap();
-		$ids = $this->fetchIds($cap, $this->spellings(null));
+		// Retry-all must select the rows a retry can actually help. The
+		// needs_fix verdict is by definition the set a retry cannot fix — a
+		// damaged file, an empty source — so selecting it made the button
+		// return "0 retried" every time. The retryable set is the `wait`
+		// spellings, the same rule `retryById()` applies per row.
+		$ids = $this->fetchIds($cap, $this->spellings(null, RetryPolicy::VERDICT_WAIT));
 		$retried = 0;
 		foreach ($ids as $id) {
 			if ($this->retryById((int) $id)) {
@@ -209,18 +220,29 @@ class Attention
 
 	/**
 	 * THE retry implementation: clear the permanent verdict and delete the
-	 * file's terminal job rows, so the next scan queues the file again as a
-	 * fresh attempt. One log line per retry, whichever door it came from.
+	 * file's terminal job rows, then queue it again immediately.
+	 *
+	 * The queueing step is not a convenience. Before it, this method only
+	 * cleared state and the panel told the user "queued again" while nothing
+	 * had been queued: the file waited for a hand-started scan of that folder,
+	 * and there is no periodic scan that would have found it. A button that
+	 * says it queued something must queue something.
 	 */
 	private function retryFile(int $fileId, string $path, string $door): int
 	{
+		$ledger = $this->queue->findFileByPath($path);
 		$deleted = $this->queue->deleteTerminalForFile($fileId);
 		$this->queue->clearPermanentVerdict($fileId);
 		// The requeue is exempt from the loop breaker: resetting the count
 		// is what makes an operator's "queue it once more" work exactly
 		// once, without the scan refusing it as a repeat.
 		$this->queue->resetTimesEnqueued($fileId);
-		$this->logger?->info('ocrflow: ' . $door . ': cleared the failure verdict for ' . $path . ' (file_id ' . $fileId . '); deleted ' . $deleted . ' terminal job row(s); the next scan will queue it again');
+		// `fromScan` stays false: a human pressed the button, which is the
+		// same door as an upload event and must not count as a scan repeat.
+		$jobId = $this->queue->enqueue($path, $fileId, null, $ledger['etag'] ?? null);
+		$this->logger?->info('ocrflow: ' . $door . ': cleared the failure verdict for ' . $path
+			. ' (file_id ' . $fileId . '); deleted ' . $deleted . ' terminal job row(s); '
+			. ($jobId === null ? 'nothing queued (already pending for this version)' : 'queued job ' . $jobId));
 		return $deleted;
 	}
 

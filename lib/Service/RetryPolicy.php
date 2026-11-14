@@ -49,6 +49,9 @@ final class RetryPolicy
 	public const VERDICT_NOTHING_TO_DO = 'nothing_to_do';
 	public const VERDICT_REDO = 'redo';
 	public const VERDICT_WAIT = 'wait';
+
+	/** Both answers a reader acts on: needs_fix plus wait. */
+	public const VERDICT_ACTIONABLE = 'actionable';
 	public const VERDICT_NEEDS_FIX = 'needs_fix';
 	public const VERDICT_DROP = 'drop';
 
@@ -406,6 +409,16 @@ final class RetryPolicy
 	 */
 	public function spellingsForVerdict(string $verdict): array
 	{
+		// The panel's one list holds two different answers: rows a human must
+		// repair (needs_fix) and rows a retry can still fix (wait). Listing
+		// only the first is what made Retry invisible — the button appears on
+		// the rows isRetryable() approves, and none of those were listed.
+		if ($verdict === self::VERDICT_ACTIONABLE) {
+			return array_values(array_unique(array_merge(
+				$this->spellingsFor($this->codesForVerdict(self::VERDICT_NEEDS_FIX)),
+				$this->spellingsFor($this->codesForVerdict(self::VERDICT_WAIT)),
+			)));
+		}
 		return $this->spellingsFor($this->codesForVerdict($verdict));
 	}
 

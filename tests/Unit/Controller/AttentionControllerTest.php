@@ -168,7 +168,7 @@ class AttentionControllerTest extends TestCase
 				'path' => 'alice/files/scan.pdf',
 				'status' => 'error',
 				'reason' => null,
-				'reason_code' => 'error_file_broken',
+				'reason_code' => 'error_provider_timed_out',
 				'engine' => null,
 				'claimed_by' => null,
 				'attempts' => 3,
@@ -224,7 +224,7 @@ class AttentionControllerTest extends TestCase
 				'path' => 'alice/files/scan' . $id . '.pdf',
 				'status' => 'error',
 				'reason' => null,
-				'reason_code' => 'error_file_broken',
+				'reason_code' => 'error_provider_timed_out',
 				'engine' => null,
 				'claimed_by' => null,
 				'attempts' => 1,
@@ -246,8 +246,8 @@ class AttentionControllerTest extends TestCase
 			static fn (int $id): array => [
 				'id' => $id,
 				'path' => 'a' . $id,
-				'reason_code' => 'error_file_broken',
-				'reason' => 'error_file_broken',
+				'reason_code' => 'error_provider_timed_out',
+				'reason' => 'error_provider_timed_out',
 				'error' => 'x',
 				'attempts' => 1,
 				'finished_at' => $id,
@@ -272,6 +272,9 @@ class AttentionControllerTest extends TestCase
 
 		$this->controller($attention, ['all' => true])->retry();
 
-		$this->assertSame((new RetryPolicy())->spellingsForVerdict(RetryPolicy::VERDICT_NEEDS_FIX), $attention->idCalls[0]['spellings']);
+		// Retry-all selects what a retry can help: the `wait` spellings. It
+		// used to select the needs_fix worklist, whose every code is permanent,
+		// so the button answered "0 retried" on its own rows by construction.
+		$this->assertSame((new RetryPolicy())->spellingsForVerdict(RetryPolicy::VERDICT_WAIT), $attention->idCalls[0]['spellings']);
 	}
 }
