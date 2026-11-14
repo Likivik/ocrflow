@@ -227,6 +227,11 @@ final class RetryPolicy
 			'text' => 'This file is damaged and cannot be read.',
 			'actor' => 'owner',
 		],
+		'error_image_too_large' => [
+			'verdict' => 'needs_fix',
+			'text' => 'This image is too large to analyse.',
+			'actor' => 'owner',
+		],
 		'error_queued_twice_for_same_bytes' => [
 			'verdict' => 'needs_fix',
 			'text' => 'The scan met this exact file version a second time, and the first job left no verdict.',
@@ -267,6 +272,7 @@ final class RetryPolicy
 		'save_refused' => 'error_result_write_failed',
 		'parse_produced_nothing' => 'error_engine_output_unreadable',
 		'empty_stream' => 'error_worker_got_empty_file',
+		'image_too_large' => 'error_image_too_large',
 		'credentials_missing' => 'error_provider_credentials_missing',
 		'app_4xx' => 'error_worker_request_malformed',
 		'app_5xx' => 'error_app_answered_5xx',

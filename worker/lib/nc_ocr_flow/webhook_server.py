@@ -32,7 +32,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from . import jobstore, quota_gate
-from .classifier import ClassifierUnavailable, classify
+from .classifier import ClassifierUnavailable, ImageTooLarge, classify
 from .config import env_flag, env_float, env_int, env_str
 from .ocr import process_pdf
 from .pdf_classify import classify_pdf
@@ -1768,6 +1768,10 @@ def _process_file(
             with classify_timer:
                 try:
                     cls = classify(local_file)
+                except ImageTooLarge as exc:
+                    # The file is readable and intact; the decoder will not open
+                    # an image this big. Say that instead of blaming the model.
+                    raise RuntimeError(f"image too large to analyse {nc_path!r}: {exc}") from exc
                 except ClassifierUnavailable as exc:
                     # Fail closed. Treating "the model is broken" as "probably a
                     # document" would convert and delete every image in every
