@@ -122,8 +122,9 @@ def test_the_failure_payload_carries_the_stage_events():
     events = json.loads(payload["stage_events"])
     assert [e["stage"] for e in events] == ["intake", "recognize"]
     # The stage that blew up carries the failure code, so the row says which
-    # stage failed rather than only that something did.
-    assert events[-1]["reason_code"] == "unknown"
+    # stage failed rather than only that something did. The code is the app's
+    # canonical name, never the worker's local word (`unknown`).
+    assert events[-1]["reason_code"] == "error_worker_sent_unknown_code"
 
 
 def test_the_key_is_absent_when_no_stage_ran():

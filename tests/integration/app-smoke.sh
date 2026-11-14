@@ -1165,10 +1165,12 @@ sql "DELETE FROM oc_ocrflow_pending_results WHERE id=${probe_id}" >/dev/null
 #   * truncated.pdf — the WORKER decides this one. The harness is a Nextcloud
 #     container with no worker in it, so after the real upload and the real
 #     claim, the result is posted in exactly the shape runner._report sends for
-#     a broken file (status=skipped, reason=broken_pdf, no reason_code: the
-#     worker's VERDICT_CODES has no entry for it). The verdict on these exact
-#     bytes is pinned where pymupdf is real —
-#     worker/tests/test_broken_pdf.py::test_the_shipped_truncated_fixture_is_broken_and_skipped.
+#     a broken file (status=skipped, reason=broken_pdf, reason_code=
+#     error_file_broken — the prose word plus the app's canonical code). The
+#     verdict on these exact bytes is pinned where pymupdf is real:
+#     worker/tests/test_broken_pdf.py::test_the_shipped_truncated_fixture_is_broken_and_skipped,
+#     and the payload shape is pinned by
+#     worker/tests/test_skip_reason_codes.py::test_a_broken_pdf_reports_the_canonical_file_code.
 #   * bad-xref.pdf — the negative control: MuPDF rebuilds a shifted xref table
 #     and reads the page, so a corrupted table must NOT become a broken row.
 echo "== failure fixtures: a zero-byte source is a terminal skip, not a job"
@@ -1213,23 +1215,25 @@ claim_one
 code=$(curl -s -o /tmp/ocrflow-broken -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
   -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
   --data-urlencode 'status=skipped' --data-urlencode 'reason=broken_pdf' \
+  --data-urlencode 'reason_code=error_file_broken' \
   "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result")
 [ "$code" = "200" ] || fail "the broken-PDF result should be 200, got $code body=$(cat /tmp/ocrflow-broken)"
 broken_row=$(sql "SELECT status || '|' || COALESCE(reason,'<null>') || '|' || COALESCE(reason_code,'<null>') FROM ${JOBS} WHERE id = ${jobid}")
 case "$broken_row" in
-  # The worker's word is `broken_pdf` and it sends no reason_code for it — that
-  # is what the row says, and pretending otherwise would hide the alias.
-  "skipped|broken_pdf|<null>") ;;
-  *) fail "the damaged-PDF row should read skipped|broken_pdf|<null>, got '${broken_row}'" ;;
+  # `reason` keeps the worker's human word; `reason_code` is the machine
+  # fact, and it must be the canonical name the app's policy is written in.
+  # A NULL here is the 0.1.16 defect: the code existed only as a read alias.
+  "skipped|broken_pdf|error_file_broken") ;;
+  *) fail "the damaged-PDF row should read skipped|broken_pdf|error_file_broken, got '${broken_row}'" ;;
 esac
 broken_ledger=$(sql "SELECT status || '|' || COALESCE(reason,'<null>') FROM ${FILES} WHERE path LIKE '%/truncated.pdf'")
-[ "$broken_ledger" = "skipped|broken_pdf" ] \
-  || fail "the ledger must carry the worker's verdict for truncated.pdf, got '${broken_ledger}'"
-# The user-visible code is the canonical one: the app aliases broken_pdf on read,
-# which is the only place error_file_broken comes from today.
+[ "$broken_ledger" = "skipped|error_file_broken" ] \
+  || fail "the ledger must carry the canonical code for truncated.pdf, got '${broken_ledger}'"
+# The worklist is keyed by the canonical code, the one the row and the ledger
+# now both carry — no read-time reconstruction needed for new rows.
 broken_errors=$(occ ocrflow:errors --code=error_file_broken)
 case "$broken_errors" in *truncated.pdf*) ;; *) fail "the worklist does not report truncated.pdf under error_file_broken: ${broken_errors}" ;; esac
-ok "damaged PDF -> worker broken_pdf, read back as error_file_broken in the worklist"
+ok "damaged PDF -> job skipped|broken_pdf|error_file_broken, ledger skipped|error_file_broken, listed in the worklist"
 
 echo "== failure fixtures: a corrupted xref table is repaired, not an error"
 curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT \

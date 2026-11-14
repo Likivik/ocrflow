@@ -133,8 +133,76 @@ def test_a_skip_carries_the_code_on_the_stage_event_too():
     assert "skip_text_native" in codes
 
 
+def test_a_broken_pdf_reports_the_canonical_file_code():
+    """A damaged file must not lose its code on the way to the app.
+
+    Until 0.1.17 the worker sent ``reason=broken_pdf`` and no ``reason_code``:
+    the job row carried a NULL code and the alias existed only as a read-time
+    translation in RetryPolicy. The prose stays; the machine layer gets the
+    canonical name.
+    """
+    from nc_ocr_flow import webhook_server
+
+    c, session = client(
+        [
+            FakeResponse(
+                200, envelope({"id": 9, "path": "/u/files/a.pdf", "file_id": 1, "etag": "e1"})
+            ),
+            FakeResponse(200, envelope({"id": 9, "status": "skipped"})),
+        ]
+    )
+
+    assert run_once(c, _skip(webhook_server.SKIP_REASON_BROKEN_PDF)) is True
+
+    payload = session.calls[1]["data"]
+    assert payload["reason"] == "broken_pdf"  # the human word is unchanged
+    assert payload["reason_code"] == "error_file_broken"  # the machine word is canonical
+    events = json.loads(payload["stage_events"])
+    assert [e["reason_code"] for e in events if e["stage"] == "classify"] == ["error_file_broken"]
+
+
+def test_a_failure_reports_the_canonical_code_not_the_local_word():
+    """`classify_failure` speaks app_5xx; the wire must say what the app stores."""
+
+    def process(path, file_id, **_):
+        raise RuntimeError("vision quota exhausted")
+
+    c, session = client(
+        [
+            FakeResponse(
+                200, envelope({"id": 9, "path": "/u/files/a.pdf", "file_id": 1, "etag": "e1"})
+            ),
+            FakeResponse(200, envelope({"id": 9, "status": "error"})),
+        ]
+    )
+
+    assert run_once(c, process) is True
+
+    payload = session.calls[1]["data"]
+    assert payload["reason_code"] == "error_worker_sent_unknown_code"
+    assert payload["reason"] == "worker_error"
+
+
 def test_an_ordinary_skip_still_reports_its_reason():
-    """A skip that is not a classifier verdict keeps its free-text reason."""
+    """A skip with no app code keeps its free-text reason and gets no code."""
+    c, session = client(
+        [
+            FakeResponse(
+                200, envelope({"id": 9, "path": "/u/files/a.pdf", "file_id": 1, "etag": "e1"})
+            ),
+            FakeResponse(200, envelope({"id": 9, "status": "skipped"})),
+        ]
+    )
+
+    assert run_once(c, _skip("pdf_already_exists")) is True
+
+    payload = session.calls[1]["data"]
+    assert payload["reason"] == "pdf_already_exists"
+    assert "reason_code" not in payload
+
+
+def test_an_unsupported_extension_reports_its_canonical_code():
+    """`unsupported_ext` is an alias; the wire carries the canonical name."""
     c, session = client(
         [
             FakeResponse(
@@ -148,4 +216,4 @@ def test_an_ordinary_skip_still_reports_its_reason():
 
     payload = session.calls[1]["data"]
     assert payload["reason"] == "unsupported_ext"
-    assert "reason_code" not in payload
+    assert payload["reason_code"] == "skip_file_type_unsupported"
