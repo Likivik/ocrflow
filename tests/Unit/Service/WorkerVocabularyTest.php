@@ -144,7 +144,7 @@ final class WorkerVocabularyTest extends TestCase
 	private function proseOnlyReasons(): array
 	{
 		$source = (string) file_get_contents($this->workerFile('stage_events.py'));
-		if (!preg_match('/PROSE_ONLY_REASONS[^=]*=\s*frozenset\(\{(.*?)\}\)/s', $source, $block)) {
+		if (!preg_match('/PROSE_ONLY_REASONS[^=]*=\s*frozenset\(\s*\{(.*?)\}\s*\)/s', $source, $block)) {
 			$this->fail('stage_events.py must declare PROSE_ONLY_REASONS');
 			return [];
 		}
