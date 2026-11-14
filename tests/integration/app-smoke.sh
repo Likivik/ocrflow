@@ -1140,21 +1140,6 @@ code=$(curl -s -o /tmp/ocrflow-del-missing -w '%{http_code}' -u "bob:bob-pass-12
 [ "$code" = "404" ] || fail "a missing file id must be 404, got $code body=$(cat /tmp/ocrflow-del-missing)"
 ok "mine/delete: a file that is gone is 404"
 
-# The batch: two of bob's own plus carol's id. One request, an answer that
-# separates what happened, and carol's file still there afterwards.
-code=$(curl -s -o /tmp/ocrflow-del-bulk -w '%{http_code}' -u "bob:bob-pass-123" -X DELETE \
-  -H 'OCS-APIRequest: true' -H 'Accept: application/json' -H 'Content-Type: application/json' \
-  -d "{\"ids\":[${bob_fid2},${bob_fid3},${carol_fid}]}" \
-  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/mine")
-[ "$code" = "200" ] || fail "the bulk delete should answer 200 even when refusing one, got $code body=$(cat /tmp/ocrflow-del-bulk)"
-grep -q '"deleted":2' /tmp/ocrflow-del-bulk || fail "both of bob's files should be deleted: $(cat /tmp/ocrflow-del-bulk)"
-grep -q '"refused":1' /tmp/ocrflow-del-bulk || fail "the foreign id must be REPORTED as refused: $(cat /tmp/ocrflow-del-bulk)"
-[ "$(dav_status 'bob:bob-pass-123' bob mine-del-2.txt)" = "404" ] || fail "mine-del-2.txt survived the batch"
-[ "$(dav_status 'bob:bob-pass-123' bob mine-del-3.txt)" = "404" ] || fail "mine-del-3.txt survived the batch"
-[ "$(dav_status 'carol:carol-pass-123' carol mine-foreign.txt)" = "207" ] || fail "carol's file was deleted by bob's batch"
-[ "$(trash_has bob mine-del-2.txt)" -ge 1 ] || fail "mine-del-2.txt did not reach the trash bin"
-[ "$(trash_has bob mine-del-3.txt)" -ge 1 ] || fail "mine-del-3.txt did not reach the trash bin"
-ok "mine/delete: a batch of 2 own + 1 foreign answers deleted=2 refused=1, and the foreign file is untouched"
 
 sql "DELETE FROM ${JOBS} WHERE path IN ('/bob/files/mine-bob.pdf', '/carol/files/mine-carol.pdf')" >/dev/null
 

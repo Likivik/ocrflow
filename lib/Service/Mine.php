@@ -281,60 +281,6 @@ class Mine
 	}
 
 	/**
-	 * Delete a selection: one request, one answer that says what happened to
-	 * every id. Bounded by the same `attention_retry_cap` a retry-all obeys,
-	 * counted in attempts, so a pasted list cannot delete more files than a
-	 * deliberate batch would.
-	 *
-	 * Refusals are counted and named, never silently skipped — "deleted 2"
-	 * for a list of three reads as though the third one went too.
-	 *
-	 * @param list<mixed> $ids
-	 * @return array{deleted: int, refused: int, refused_ids: list<int>, cap: int}
-	 */
-	public function deleteMany(string $uid, array $ids): array
-	{
-		$result = ['deleted' => 0, 'refused' => 0, 'refused_ids' => [], 'cap' => $this->attention->cap()];
-		if (UserScope::prefixFor($uid) === '') {
-			return $result;
-		}
-
-		// One id, one attempt: a request naming the same id five times must
-		// not spend the cap five times.
-		$unique = [];
-		foreach ($ids as $raw) {
-			if (is_numeric($raw)) {
-				$unique[(int) $raw] = true;
-			}
-		}
-		$wanted = array_keys($unique);
-		sort($wanted);
-
-		foreach ($wanted as $index => $id) {
-			if ($index >= $result['cap']) {
-				$result['refused']++;
-				$result['refused_ids'][] = $id;
-				continue;
-			}
-			if ($this->delete($uid, $id) === self::DELETE_DONE) {
-				$result['deleted']++;
-			} else {
-				$result['refused']++;
-				$result['refused_ids'][] = $id;
-			}
-		}
-
-		// One log line per batch, the way the retry door does it: the ids
-		// themselves are the user's file names, and a log is not the place
-		// for them.
-		if ($result['deleted'] > 0 || $result['refused'] > 0) {
-			$this->logger?->info('ocrflow: mine: ' . $result['deleted'] . ' deleted, ' . $result['refused'] . ' refused for one user');
-		}
-
-		return $result;
-	}
-
-	/**
 	 * One row, cut down to what the personal panel shows: the path, the fix
 	 * hint, which queue it is on, how many attempts it has had and how old
 	 * it is. `age` is seconds since the row was decided; null when the row
