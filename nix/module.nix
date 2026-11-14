@@ -19,25 +19,11 @@ let
 
   workerSrc = pkgs.callPackage ../nix/package-worker.nix { };
 
-  # The OCR stack. Kept as an explicit list so a missing dependency is a build
-  # error with a name, not an ImportError at 3am.
-  python = cfg.package.python3.withPackages (ps: [
-    ps.pymupdf
-    ps.pillow
-    ps.requests
-    ps.img2pdf
-    ps.numpy
-    ps.onnxruntime
-    # `runner` imports `_process_file` from webhook_server, and that module
-    # imports FastAPI at load time. Omitting these two made every worker die at
-    # start with ModuleNotFoundError — found by the poweredge VM smoke, not by
-    # eval, which is the whole reason that smoke exists.
-    ps.fastapi
-    ps.uvicorn
-    ps.pydantic
-    ps.google-cloud-vision
-    ps.google-cloud-storage
-  ]);
+  # The OCR stack lives in ../nix/worker-env.nix, not here: CI builds that same
+  # file as `packages.ocrflow-worker-env`, and a second copy of the dependency
+  # list is exactly the drift the corpus canary would be blind to. Passing
+  # `cfg.package.python3` keeps the deployer's nixpkgs in charge of the binary.
+  python = import ./worker-env.nix { inherit pkgs; python = cfg.package.python3; };
 
   workerBin = pkgs.writeShellScript "ocrflow-worker" ''
     export PYTHONPATH=${workerSrc}/share/ocrflow-worker/lib

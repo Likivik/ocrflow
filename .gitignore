@@ -27,3 +27,7 @@ tests/fixtures/out/
 # needs no node and no network. CI rebuilds it and fails on a diff.
 js/*.map
 js/*.LICENSE.txt
+
+# The PDF corpus canary: 63 MB of real damaged PDFs, fetched on demand and
+# pinned by sha256 in tests/corpora/manifest.json. Never committed.
+tests/corpora/cache/

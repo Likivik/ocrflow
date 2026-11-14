@@ -1,0 +1,80 @@
+# The PDF corpus canary: measure 54 real damaged PDFs with the worker's own
+# classifier, in the interpreter the worker is deployed with.
+#
+# On demand only — workflow_dispatch, no schedule. The inputs are pinned (sha256
+# in tests/corpora/manifest.json) and the interpreter is a Nix derivation, so
+# nothing but a dependency bump can move the answer; a nightly run would print
+# the same numbers and teach everyone to ignore it. Run it when you bump
+# flake.lock, touch the pdf_classify/pdfio path, or are about to deploy a
+# rebuilt worker. See docs/corpus.md.
+#
+# Why Nix and not pip: pip gives you whatever MuPDF wheel matched the runner's
+# Python that morning. This canary exists to catch a parser regression in the
+# binary we ship, so it must measure that binary — the same
+# `nix/worker-env.nix` that `nix/module.nix` gives the systemd unit. A pip
+# environment would measure a different MuPDF and prove nothing.
+name: corpus
+
+on:
+  workflow_dispatch:
+
+# Read-only: this job downloads PDFs and uploads an artifact. It needs no write
+# access to the repository, and a canary with a token is a canary that can be
+# made to lie.
+permissions:
+  contents: read
+
+concurrency:
+  group: corpus-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    name: measure the corpus with the worker env
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Pinned, like every other `uses:` in this repository.
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31
+        with:
+          # The flake's own nixpkgs pin is what we measure; do not let the
+          # action float a second one.
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = false
+
+      # The interpreter, from the same file the NixOS module imports. This is
+      # the whole point of the exercise: module and CI build one derivation, so
+      # the canary cannot drift away from the deploy.
+      - name: Build the worker environment
+        run: |
+          set -euo pipefail
+          env_path=$(nix build .#ocrflow-worker-env -o worker-env --print-out-paths)
+          echo "worker env: $env_path"
+          "$env_path/bin/python" -c 'import sys, pymupdf; print(sys.version); print("pymupdf", pymupdf.__version__)'
+
+      # 63 MB, 54 files, every sha256 checked. A mismatch aborts here rather
+      # than letting the report describe bytes the baseline never saw.
+      - name: Fetch and verify the corpus
+        run: bash tests/corpora/fetch.sh
+
+      - name: Measure and compare against the baseline
+        run: |
+          set -euo pipefail
+          PYTHONPATH=worker/lib ./worker-env/bin/python tests/corpora/check.py \
+            --baseline tests/corpora/baseline.json
+
+      # Always: a failed run's report is the thing you need to read.
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: corpus-report
+          path: |
+            tests/corpora/cache/report.json
+            tests/corpora/baseline.json
+          if-no-files-found: warn
+          retention-days: 30
