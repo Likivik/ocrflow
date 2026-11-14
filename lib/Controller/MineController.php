@@ -84,6 +84,62 @@ class MineController extends OCSController
 	}
 
 	/**
+	 * Move ONE of the caller's own files to their trash bin.
+	 *
+	 * 403 when the file is not inside the caller's folder, 404 when it is
+	 * gone. The distinction is deliberate: a user may learn that a number is
+	 * not theirs (403) without learning whether a file exists there.
+	 *
+	 * @throws OCSForbiddenException
+	 */
+	#[NoAdminRequired]
+	public function delete(int $fileId): DataResponse
+	{
+		$uid = $this->callerUid();
+
+		if (!$this->request->passesCSRFCheck()) {
+			return new DataResponse(['message' => 'CSRF check failed'], Http::STATUS_PRECONDITION_FAILED);
+		}
+
+		$outcome = $this->mine->delete($uid, $fileId);
+		return match ($outcome) {
+			Mine::DELETE_DONE => new DataResponse(['file_id' => $fileId, 'deleted' => 1]),
+			Mine::DELETE_MISSING => new DataResponse(['file_id' => $fileId, 'message' => 'no such file'], Http::STATUS_NOT_FOUND),
+			Mine::DELETE_REFUSED => new DataResponse(['file_id' => $fileId, 'message' => 'not your file'], Http::STATUS_FORBIDDEN),
+			// The delete was ours to attempt and the filesystem refused. That
+			// is a real failure, not an ownership answer or a missing file.
+			default => new DataResponse(['file_id' => $fileId, 'message' => 'the file could not be deleted'], Http::STATUS_INTERNAL_SERVER_ERROR),
+		};
+	}
+
+	/**
+	 * Delete a selection: `{ids: [...]}`, one request, one honest answer.
+	 *
+	 * `deleted` and `refused` are reported separately, so a partial batch
+	 * cannot read as a full one, and `refused_ids` names what was left
+	 * behind. A single id is a selection of one, so the panel has one code
+	 * path whether the user ticked one row or twenty.
+	 *
+	 * @throws OCSForbiddenException
+	 */
+	#[NoAdminRequired]
+	public function deleteMany(): DataResponse
+	{
+		$uid = $this->callerUid();
+
+		if (!$this->request->passesCSRFCheck()) {
+			return new DataResponse(['message' => 'CSRF check failed'], Http::STATUS_PRECONDITION_FAILED);
+		}
+
+		$ids = $this->request->getParam('ids');
+		if (!is_array($ids)) {
+			return new DataResponse(['message' => 'ids is required'], Http::STATUS_BAD_REQUEST);
+		}
+
+		return new DataResponse($this->mine->deleteMany($uid, array_values($ids)));
+	}
+
+	/**
 	 * @throws OCSForbiddenException
 	 */
 	private function callerUid(): string

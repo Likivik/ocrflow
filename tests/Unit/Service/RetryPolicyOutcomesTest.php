@@ -306,7 +306,10 @@ class RetryPolicyOutcomesTest extends TestCase
 		$this->assertNotNull($entry);
 		$this->assertSame('needs_fix', $entry['verdict']);
 		$this->assertNotSame('', trim($entry['label']), 'one sentence a human can read');
-		$this->assertStringContainsStringIgnoringCase('requeue', $entry['fix'], 'the fix must name the way out');
+		// The hint diagnoses; the way out is a button now. What it must still
+		// name is the repeat the loop breaker stopped, or the operator has no
+		// way to tell this row from an ordinary failure.
+		$this->assertStringContainsStringIgnoringCase('second time', $entry['fix'], 'the hint names the repeat');
 		$this->assertNotSame('', trim((string) $entry['actor']), 'an actor is expected to do it');
 	}
 }

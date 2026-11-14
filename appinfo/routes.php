@@ -58,6 +58,15 @@ return [
         // {ids: [...]}; POST, so CSRF is checked, and capped by the same
         // attention_retry_cap a "retry all" click obeys.
         ['name' => 'mine#retry', 'url' => '/api/v1/mine/retry', 'verb' => 'POST'],
+        // One row's file, to the caller's trash bin. DELETE because it
+        // destroys a listing entry, CSRF-checked because it destroys a
+        // file, and ownership-checked on the node's own path: a file id is
+        // global, so an id is not evidence of ownership.
+        ['name' => 'mine#delete', 'url' => '/api/v1/mine/{fileId}', 'verb' => 'DELETE'],
+        // The same decision for a selection: {ids: [...]}, ONE request, an
+        // answer that reports deleted and refused separately. Capped by
+        // attention_retry_cap, so a pasted list cannot outrun a batch.
+        ['name' => 'mine#deleteMany', 'url' => '/api/v1/mine', 'verb' => 'DELETE'],
 
         // --- outcomes: the five admin tabs (see Outcomes service) ---------
         // One reader for three origins (jobs, ledger, pending stashes) and

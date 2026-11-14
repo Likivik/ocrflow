@@ -56,7 +56,16 @@ final class RetryPolicy
 	 * The closed vocabulary: one entry per code, one verdict per code.
 	 *
 	 * verdict — the decision; label — one sentence a human reads;
-	 * fix — what to do about it; actor — who is expected to do it.
+	 * fix — one sentence that names the PROBLEM and stops there; actor —
+	 * who is expected to act, for the admin surfaces.
+	 *
+	 * The fix hint diagnoses, never instructs. It sits in the personal panel
+	 * beside buttons that really do things, so "Retry — the engine was down"
+	 * reads as a second, dead button, and "the owner must re-upload" tells the
+	 * reader to go and find an owner. The hint also cannot know who is reading
+	 * it: the same row is an owner's worklist entry and an operator's. So no
+	 * second person, no owner, no administrator, no verbs — the UI owns the
+	 * actions. `tests/Unit/Service/RetryPolicyWordingTest.php` enforces it.
 	 *
 	 * @var array<string, array{verdict: string, label: string, fix: string, actor: string}>
 	 */
@@ -65,7 +74,7 @@ final class RetryPolicy
 		'needs_ocr' => [
 			'verdict' => 'work',
 			'label' => 'The file has no text layer and is a document; it needs OCR.',
-			'fix' => 'Nothing to fix — the job is already the work.',
+			'fix' => 'The file has no text layer yet.',
 			'actor' => 'worker',
 		],
 
@@ -73,37 +82,37 @@ final class RetryPolicy
 		'skip_text_native' => [
 			'verdict' => 'nothing_to_do',
 			'label' => 'The PDF already carries typed text; there is nothing to read off it.',
-			'fix' => 'Nothing to do — OCR would cost money to learn the same thing.',
+			'fix' => 'The PDF already carries typed text of its own.',
 			'actor' => 'nobody',
 		],
 		'skip_ocred_by_ocrflow' => [
 			'verdict' => 'nothing_to_do',
 			'label' => 'We already OCR\'d this file and the result is at or above the engine bar.',
-			'fix' => 'Nothing to do — unless the engine bar moves, in which case the file reappears as a redo candidate.',
+			'fix' => 'This file was already read and its result is at or above the engine bar.',
 			'actor' => 'nobody',
 		],
 		'skip_classifier_says_photo' => [
 			'verdict' => 'nothing_to_do',
 			'label' => 'The image is a photo of a scene, not a document; OCR has nothing to find.',
-			'fix' => 'Nothing to do — the classifier decided, and the decision is recorded.',
+			'fix' => 'The classifier decided this image is a photo of a scene, not a document.',
 			'actor' => 'nobody',
 		],
 		'skip_file_type_unsupported' => [
 			'verdict' => 'nothing_to_do',
 			'label' => 'The file type is not one the pipeline can convert or read.',
-			'fix' => 'Nothing to do for this file; an operator wanting it read converts it to PDF and requeues.',
+			'fix' => 'This file type is not one the pipeline can read.',
 			'actor' => 'nobody',
 		],
 		'skip_ocred_by_ocrflow_found_nothing' => [
 			'verdict' => 'nothing_to_do',
 			'label' => 'We OCR\'d this file and it genuinely contains no text — a blank sheet.',
-			'fix' => 'Nothing to do — re-running would re-bill the same pages to learn nothing.',
+			'fix' => 'The file was read and genuinely contains no text.',
 			'actor' => 'nobody',
 		],
 		'error_provider_unsupported_file' => [
 			'verdict' => 'nothing_to_do',
 			'label' => 'The engine refuses this file type outright.',
-			'fix' => 'Logged loudly so it is visible, but never retried: the engine answered a question about the bytes.',
+			'fix' => 'This file type is not supported.',
 			'actor' => 'nobody',
 		],
 
@@ -111,7 +120,7 @@ final class RetryPolicy
 		'skip_ocred_by_suspected_foreign' => [
 			'verdict' => 'redo',
 			'label' => 'Another tool\'s OCR is on this file; it is not trusted and not overwritten.',
-			'fix' => 'A redo candidate: the owner decides whether to re-OCR it — never automatic.',
+			'fix' => 'The text layer on this file was written by another tool and is not trusted.',
 			'actor' => 'owner',
 		],
 
@@ -119,67 +128,67 @@ final class RetryPolicy
 		'error_app_answered_5xx' => [
 			'verdict' => 'wait',
 			'label' => 'The Nextcloud app answered 5xx while the worker was talking to it.',
-			'fix' => 'Retry — the app was down or busy; the inputs did not change.',
+			'fix' => 'The Nextcloud app failed with a server error while the worker was talking to it.',
 			'actor' => 'worker',
 		],
 		'error_app_did_not_answer' => [
 			'verdict' => 'wait',
 			'label' => 'The Nextcloud app did not answer at all.',
-			'fix' => 'Retry — a transport fault; check the app is up if it repeats.',
+			'fix' => 'The request to the Nextcloud app got no answer at all.',
 			'actor' => 'worker',
 		],
 		'error_provider_unavailable' => [
 			'verdict' => 'wait',
 			'label' => 'The OCR engine answered 5xx.',
-			'fix' => 'Retry — the engine was down; nothing about the file changed.',
+			'fix' => 'The OCR service answered 5xx.',
 			'actor' => 'worker',
 		],
 		'error_provider_timed_out' => [
 			'verdict' => 'wait',
 			'label' => 'The OCR engine timed out reading the file.',
-			'fix' => 'Retry — a slow engine is not a verdict about the bytes.',
+			'fix' => 'The OCR service took too long to answer.',
 			'actor' => 'worker',
 		],
 		'error_provider_rate_limited' => [
 			'verdict' => 'wait',
 			'label' => 'The OCR engine rate-limited the request.',
-			'fix' => 'Retry with backoff — the quota window passes on its own.',
+			'fix' => 'The OCR service rate-limited the request.',
 			'actor' => 'worker',
 		],
 		'error_provider_quota_exhausted' => [
 			'verdict' => 'wait',
 			'label' => 'The OCR engine\'s quota is exhausted.',
-			'fix' => 'Retry after the quota resets; if it never does, raise the engine\'s quota.',
+			'fix' => 'The OCR service is out of quota, and the file itself is fine.',
 			'actor' => 'deployment',
 		],
 		'error_provider_budget_exhausted' => [
 			'verdict' => 'wait',
 			'label' => 'The OCR engine\'s budget is spent.',
-			'fix' => 'Retry once the billing budget is raised.',
+			'fix' => 'The OCR budget for this engine is spent.',
 			'actor' => 'deployment',
 		],
 		'error_provider_local_quota_exhausted' => [
 			'verdict' => 'wait',
 			'label' => 'The local (self-hosted) engine\'s quota is exhausted.',
-			'fix' => 'Retry when the local engine frees capacity.',
+			'fix' => 'The local engine is out of quota.',
 			'actor' => 'deployment',
 		],
 		'error_provider_local_budget_exhausted' => [
 			'verdict' => 'wait',
 			'label' => 'The local (self-hosted) engine\'s budget is spent.',
-			'fix' => 'Retry when the local engine\'s budget is raised.',
+			'fix' => 'The local engine\'s budget is spent.',
 			'actor' => 'deployment',
 		],
 		'error_worker_storage_failed' => [
 			'verdict' => 'wait',
 			'label' => 'The worker could not reach storage.',
-			'fix' => 'Retry — a storage fault is rarely a verdict about the file.',
+			'fix' => 'A storage fault interrupted the worker before it could read the file.',
 			'actor' => 'worker',
 		],
 		'error_worker_got_empty_file' => [
 			'verdict' => 'wait',
 			'label' => 'The file arrived at the worker empty.',
-			'fix' => 'Retry — transport returned an empty stream; if it repeats, the source is a data problem.',
+			'fix' => 'The file arrived at the worker with no bytes.',
 			'actor' => 'worker',
 		],
 
@@ -187,67 +196,67 @@ final class RetryPolicy
 		'error_worker_secret_rejected' => [
 			'verdict' => 'needs_fix',
 			'label' => 'The worker\'s shared secret was rejected by the app.',
-			'fix' => 'Re-issue the secret (`occ ocrflow:worker:secret`) and put it in the container.',
+			'fix' => 'The app does not accept the secret the worker presents.',
 			'actor' => 'deployment',
 		],
 		'error_provider_permission_denied' => [
 			'verdict' => 'needs_fix',
 			'label' => 'The engine account is not allowed to do what was asked.',
-			'fix' => 'Fix the engine account\'s permissions or scopes.',
+			'fix' => 'The engine account lacks the permission the request needed.',
 			'actor' => 'deployment',
 		],
 		'error_provider_credentials_missing' => [
 			'verdict' => 'needs_fix',
 			'label' => 'The engine credentials are not configured.',
-			'fix' => 'Configure the engine credentials in the app settings.',
+			'fix' => 'The engine has no credentials.',
 			'actor' => 'deployment',
 		],
 		'error_worker_request_malformed' => [
 			'verdict' => 'needs_fix',
 			'label' => 'The app refused the worker\'s request as malformed (4xx).',
-			'fix' => 'A version-skew or code bug: compare the worker and app versions, then report it.',
+			'fix' => 'The app refused the worker request as malformed (4xx).',
 			'actor' => 'deployment',
 		],
 		'error_worker_unclassified' => [
 			'verdict' => 'needs_fix',
 			'label' => 'The worker failed without saying why.',
-			'fix' => 'Read the worker log for this job; the code alone does not carry the cause.',
+			'fix' => 'OCR failed without saying why.',
 			'actor' => 'deployment',
 		],
 		'error_worker_sent_unknown_code' => [
 			'verdict' => 'needs_fix',
 			'label' => 'The worker reported a code this app does not know.',
-			'fix' => 'Version skew: update the app or the worker so both know the same codes.',
+			'fix' => 'The worker reported a code this version of the app does not know.',
 			'actor' => 'deployment',
 		],
 		'error_source_file_zero_bytes' => [
 			'verdict' => 'needs_fix',
 			'label' => 'The source file is zero bytes on disk.',
-			'fix' => 'A data problem: the file must be re-uploaded by its owner.',
+			'fix' => 'This file is empty (0 bytes).',
 			'actor' => 'owner',
 		],
 		'error_result_write_failed' => [
 			'verdict' => 'needs_fix',
 			'label' => 'The OCR result could not be written back.',
-			'fix' => 'Check disk space and permissions on the owner\'s folder.',
+			'fix' => 'The result could not be saved back over the file.',
 			'actor' => 'deployment',
 		],
 		'error_engine_output_unreadable' => [
 			'verdict' => 'needs_fix',
 			'label' => 'The engine returned something the parser could not read.',
-			'fix' => 'A code bug on our side: report it with the engine\'s raw answer.',
+			'fix' => 'The parser could not make sense of what the engine returned.',
 			'actor' => 'deployment',
 		],
 		'error_file_broken' => [
 			'verdict' => 'needs_fix',
 			'label' => 'The file is structurally damaged.',
-			'fix' => 'The owner must repair or re-export the document.',
+			'fix' => 'This file is damaged and cannot be read.',
 			'actor' => 'owner',
 		],
 		'error_queued_twice_for_same_bytes' => [
 			'verdict' => 'needs_fix',
 			'label' => 'The scan tried to queue this exact file version a second time.',
-			'fix' => 'Read the log line that names the etag: the first job left no verdict. `occ ocrflow:requeue "<path>"` queues it once more.',
+			'fix' => 'The scan met this exact file version a second time, and the first job left no verdict.',
 			'actor' => 'deployment',
 		],
 
@@ -255,7 +264,7 @@ final class RetryPolicy
 		'skip_source_changed_result_saved' => [
 			'verdict' => 'redo',
 			'label' => 'The source changed while OCR ran, so the result was saved aside instead of written over it.',
-			'fix' => 'Open the file\'s panel, Decide tab: apply the saved result over the newer version, or discard it.',
+			'fix' => 'The source changed while OCR ran, so the result was kept aside.',
 			'actor' => 'owner',
 		],
 
@@ -263,7 +272,7 @@ final class RetryPolicy
 		'error_worker_job_reference_stale' => [
 			'verdict' => 'drop',
 			'label' => 'The job the worker tried to finish no longer exists.',
-			'fix' => 'Discard the result — the row is gone, so nobody is waiting for it.',
+			'fix' => 'A result arrived for a job that no longer exists.',
 			'actor' => 'worker',
 		],
 	];
