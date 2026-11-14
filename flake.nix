@@ -25,6 +25,13 @@
         # minutes and gigabytes); it is built where it is deployed.
         ocrflow-worker = pkgs.callPackage ./nix/package-worker.nix { };
 
+        # The same interpreter the NixOS module gives the worker, built on its
+        # own. `nix/module.nix` imports this exact file, so the corpus canary
+        # measures the MuPDF the deploy ships instead of a pip wheel of a
+        # different version. Built on demand (.github/workflows/corpus.yml), not
+        # by CI on every PR: it is minutes and gigabytes.
+        ocrflow-worker-env = import ./nix/worker-env.nix { inherit pkgs; };
+
         default = self.packages.${system}.ocrflow-app;
       });
 

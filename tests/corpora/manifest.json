@@ -1,0 +1,389 @@
+{
+  "source": "openpreserve/format-corpus:govdocs1-error-pdfs",
+  "note": "54 real-world damaged PDFs from the govdocs1 corpus. Hash-pinned: a file that changes upstream is a fetch.sh failure, not a silent change in what the canary measured.",
+  "sets": {
+    "error_set_1": 21,
+    "error_set_2": 33
+  },
+  "total_bytes": 65750495,
+  "files": [
+    {
+      "set": "error_set_1",
+      "name": "008677.pdf",
+      "bytes": 2204415,
+      "sha256": "4c8252454a8843ba39908ecc88646179214d567f2f1fa03696754e8392c218b4",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/008677.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "032270.pdf",
+      "bytes": 21492,
+      "sha256": "7f310f196e2878f49c738ba8435d1f98a4bc4499ea133a50cb82f423c86e11f0",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/032270.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "125619.pdf",
+      "bytes": 141832,
+      "sha256": "4f0207451f4930fefb04bba1febd2a22ff9fbe73002ab6dceac87ad2d52a964b",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/125619.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "137036.pdf",
+      "bytes": 258019,
+      "sha256": "418da7abf2beb9ba786da8cd407e511587fa491808ee32b8dc3bd7c0f2feabec",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/137036.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "160721.pdf",
+      "bytes": 37382,
+      "sha256": "3b2f07bf64165ab7d4f28270f29363485d7867be1a7b9f3e32784b751b2653ca",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/160721.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "176446.pdf",
+      "bytes": 130843,
+      "sha256": "47782998dbc908daadf2fb6b1783d19ba3e2e3dd87a6bc4ee9330ded8a794bed",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/176446.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "195981.pdf",
+      "bytes": 421140,
+      "sha256": "f00b5daadb48cd22b6e67dbc46c3a65209bd3402466708dd4a37fc846d62e9a7",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/195981.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "225188.pdf",
+      "bytes": 55969,
+      "sha256": "bb2255f91dac9c829cdf495d077c1e8239c775e6fb6b93c7979f96d795809b13",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/225188.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "225189.pdf",
+      "bytes": 65131,
+      "sha256": "f5e62554a2b8affc18f651f8b6fb013e645a864c22f44401f8855293af93c877",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/225189.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "275884.pdf",
+      "bytes": 461045,
+      "sha256": "780db74d53d008f5534c590a7041b6b094654652da213e55e9fd2fa1cd663780",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/275884.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "316267.pdf",
+      "bytes": 2237950,
+      "sha256": "1ea4d432dfb37b96ec7df4798e059d05d24c5836258c1e1d8e6e64d92662df59",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/316267.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "421197.pdf",
+      "bytes": 190238,
+      "sha256": "bc296be8c9618253d363f1540b34f77fc9206ab153aee1326367090669e128b6",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/421197.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "427330.pdf",
+      "bytes": 23748,
+      "sha256": "5ecb9b137706e2c5706f851a08bc89cdf4f40dd2c5ba92cb9f5555916d11f795",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/427330.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "436840.pdf",
+      "bytes": 973787,
+      "sha256": "c08bba969f4530454b47669f36321ddc760261ce34c7cac2d7ef52d6c5b0511c",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/436840.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "436857.pdf",
+      "bytes": 74523,
+      "sha256": "8034684b7419e422759dd62597edb72732e922ea5b5e3ea599afbae4b87deb04",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/436857.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "447403.pdf",
+      "bytes": 7231715,
+      "sha256": "42d13eddce610aa04ccd67b5b8630e4815256f65c70e03509de003d6fb279557",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/447403.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "459011.pdf",
+      "bytes": 694377,
+      "sha256": "e664c5b6b8ba38f8421542b6b34f6fdbe2e23153137a068533af674ee7e77bc7",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/459011.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "486832.pdf",
+      "bytes": 970731,
+      "sha256": "297d8456799818a02e8834d88b6811600ca8f4537ae233c2fd916d42d64f0a24",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/486832.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "495712.pdf",
+      "bytes": 426821,
+      "sha256": "24137e453e0f606758956404ccee8ac8d55b265dbf740396f4cd0d48dda2e26a",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/495712.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "499039.pdf",
+      "bytes": 5632355,
+      "sha256": "5e1b42bf4f63d50388ecdc4a91c34ffd49473f0a1330ecfe158b69ce3ed346a5",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/499039.pdf"
+    },
+    {
+      "set": "error_set_1",
+      "name": "503492.pdf",
+      "bytes": 36844,
+      "sha256": "bb0c6029f12d61d75f66dc5ad8d76e9c996dc3bf6bd0372e4e60acb71ab88ff4",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_1/503492.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "020747.pdf",
+      "bytes": 871599,
+      "sha256": "43c1918b7ec768777b671fdfcc50ea42771d853bed6cef79392ca3e0a50550ef",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/020747.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "020806.pdf",
+      "bytes": 479562,
+      "sha256": "bdf810f5ed632bbccce85b3a7b07e5db2b29d5bfa79c2d57044f8a534006cf17",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/020806.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "027613.pdf",
+      "bytes": 1651568,
+      "sha256": "68b2c6ce8b10bbdf33ccf700976d8731e2561dc588674f57a9a196a3ae683f55",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/027613.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "029016.pdf",
+      "bytes": 4283321,
+      "sha256": "223d793444e3aa7ee2a95a93d2e9fcae2ca153ded0f0805abbdddb523134cb87",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/029016.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "033689.pdf",
+      "bytes": 43028,
+      "sha256": "c4cdad752b3ee8e6bc65c384793d74f4db64ef27eb52bf9944e83d86e501306f",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/033689.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "040669.pdf",
+      "bytes": 89762,
+      "sha256": "01057c30d1c0a752557e40399981618b0a0b61d34655649a8178f412d372b360",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/040669.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "050734.pdf",
+      "bytes": 485230,
+      "sha256": "9fef171cf6484f8bce98e3a1b78ff658057c28712ce5b54f411fbeee8669fdf8",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/050734.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "064034.pdf",
+      "bytes": 3428964,
+      "sha256": "459584ba2fbb713a4e9be0ce2d6a50956ec67313c8e724a6600aefbb9130d6f7",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/064034.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "073439.pdf",
+      "bytes": 59336,
+      "sha256": "867439f8c3ce263b0953f8680554434e3ef9249988ddf9fa127645cd2cda5d70",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/073439.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "150277.pdf",
+      "bytes": 5206016,
+      "sha256": "6af4b6134eb2624e8a3ac72ae5e32f23c9c6797e609c0c4485f0086e354b4031",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/150277.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "178360.pdf",
+      "bytes": 2372016,
+      "sha256": "1dc4caea98dd644e81027dc5514b8e85671c072d4419272dd7c671e526f52c7d",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/178360.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "189478.pdf",
+      "bytes": 68331,
+      "sha256": "b21dde0e782f38155329e99c6aa9b72e678a28c8353f0efa3e646ae8a34cfb53",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/189478.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "210260.pdf",
+      "bytes": 4445193,
+      "sha256": "1434fdd883cf0f965790aac88bd84c4822f590118afac11d21f13eaae0a821a5",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/210260.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "219789.pdf",
+      "bytes": 527779,
+      "sha256": "d4216fee033c42a71d9909a31d6eb5c97b8d6e4a379d9b60123ed0b094a02476",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/219789.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "226387.pdf",
+      "bytes": 130700,
+      "sha256": "99bbd2970fd189348585be77b7fd28d48d73fd3d6cdd314f4790b589fb6b5c98",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/226387.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "247224.pdf",
+      "bytes": 2903530,
+      "sha256": "c73beef26efff7efdb2e5c3a705d2fffbb38303e2b3af154cf62c333d38cbe28",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/247224.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "268346.pdf",
+      "bytes": 245946,
+      "sha256": "e86d1d7f2b0dff805b6a7c7cd38e06ede2180e4b86fe682f2b6c6dfbd8209982",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/268346.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "303226.pdf",
+      "bytes": 138027,
+      "sha256": "da14d24dd22effebec987312abf0312750bdbbaf93f54c9aef3b9ec7041e40ba",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/303226.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "367594.pdf",
+      "bytes": 149389,
+      "sha256": "fd11de09d913ab2c1e95166edbd3f91d46228d0df9a3963dc95c499395308bbf",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/367594.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "379049.pdf",
+      "bytes": 1636510,
+      "sha256": "42c03ce71ecafd0ec78eba3511ae7ddbf919d583e43a6627f4de50097526392f",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/379049.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "392154.pdf",
+      "bytes": 194709,
+      "sha256": "55da4f4dfdbfde4e6a31a299032da3e08f1213dbb99882701d851ae000e80fed",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/392154.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "427669.pdf",
+      "bytes": 308658,
+      "sha256": "32a58f34855dfad5ed78467a47a7eab537d5f036364aeab8f1f617405ad14dd6",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/427669.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "435321.pdf",
+      "bytes": 95643,
+      "sha256": "fdca9a7bd662b1ad6fab349b2b5012f36c5409a653ca3dae6c818fce92430543",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/435321.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "443752.pdf",
+      "bytes": 4266959,
+      "sha256": "027b774a7f97afde1d3cd22639f10a028dc6f52bdb52c6dc042100e1eea6ad81",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/443752.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "455746.pdf",
+      "bytes": 339873,
+      "sha256": "9e34378057acdc97cd80c3f2e0090597e77d84f5a932f9283235d9f8457df91d",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/455746.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "475121.pdf",
+      "bytes": 5692305,
+      "sha256": "05ee27ef0e80b1f32580d826a8b3dc311820ee3059fa0caff65a2e68f6c42bb3",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/475121.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "477139.pdf",
+      "bytes": 108816,
+      "sha256": "246a2072cabd9b8851ad1ac48fb584cbcfb4c2b2b2667274f23200aef03c1d53",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/477139.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "492484.pdf",
+      "bytes": 1203857,
+      "sha256": "bd680a5ccd0c882964444c1850d1ae53edda8923f8cf85e91b805b9b2100c81a",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/492484.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "498264.pdf",
+      "bytes": 180381,
+      "sha256": "72e804b6e4c2c196b80126dfa97e5f4ad877da5db97fb791d5fcaf71f83b041d",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/498264.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "504076.pdf",
+      "bytes": 385882,
+      "sha256": "587b59c35a2be903c87ba97ac9ac425643a1eff40f19198e2e6ea4b0f82a7a4b",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/504076.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "507618.pdf",
+      "bytes": 93724,
+      "sha256": "a856b85b3cdb3d9b74f86c517dd0b1b94842e2e5964b343200ebb86212f541d1",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/507618.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "507676.pdf",
+      "bytes": 1295096,
+      "sha256": "5d7e87a6511a8c6e16ee4c78691c1746b676bfa5fffb6cc8478389be0b2f45d7",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/507676.pdf"
+    },
+    {
+      "set": "error_set_2",
+      "name": "509284.pdf",
+      "bytes": 78428,
+      "sha256": "35d80b59e402d800d6db6033a7a5aa07c6b870ece7b56246038adacdc501b23e",
+      "url": "https://raw.githubusercontent.com/openpreserve/format-corpus/master/govdocs1-error-pdfs/error_set_2/509284.pdf"
+    }
+  ]
+}

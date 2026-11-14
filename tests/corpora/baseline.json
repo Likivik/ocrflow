@@ -1,0 +1,506 @@
+{
+  "files": {
+    "error_set_1/008677.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 15,
+      "pdf_type": "text_based",
+      "text_chars": 29369
+    },
+    "error_set_1/032270.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 1,
+      "pdf_type": "text_based",
+      "text_chars": 2271
+    },
+    "error_set_1/125619.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 17,
+      "pdf_type": "text_based",
+      "text_chars": 40476
+    },
+    "error_set_1/137036.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 8,
+      "pdf_type": "text_based",
+      "text_chars": 24628
+    },
+    "error_set_1/160721.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 1,
+      "pdf_type": "text_based",
+      "text_chars": 3005
+    },
+    "error_set_1/176446.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 18,
+      "pdf_type": "scanned",
+      "text_chars": 45719
+    },
+    "error_set_1/195981.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 101,
+      "pdf_type": "text_based",
+      "text_chars": 148871
+    },
+    "error_set_1/225188.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 1,
+      "pdf_type": "text_based",
+      "text_chars": 2966
+    },
+    "error_set_1/225189.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 1,
+      "pdf_type": "text_based",
+      "text_chars": 3006
+    },
+    "error_set_1/275884.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 98,
+      "pdf_type": "text_based",
+      "text_chars": 422924
+    },
+    "error_set_1/316267.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 104,
+      "pdf_type": "text_based",
+      "text_chars": 328096
+    },
+    "error_set_1/421197.pdf": {
+      "broken": null,
+      "mupdf_warnings": 4,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 53,
+      "pdf_type": "text_based",
+      "text_chars": 17478
+    },
+    "error_set_1/427330.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 2,
+      "pdf_type": "text_based",
+      "text_chars": 3811
+    },
+    "error_set_1/436840.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 11,
+      "pdf_type": "text_based",
+      "text_chars": 13004
+    },
+    "error_set_1/436857.pdf": {
+      "broken": null,
+      "mupdf_warnings": 4,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 2,
+      "pdf_type": "text_based",
+      "text_chars": 1704
+    },
+    "error_set_1/447403.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 1,
+      "pdf_type": "text_based",
+      "text_chars": 13193
+    },
+    "error_set_1/459011.pdf": {
+      "broken": null,
+      "mupdf_warnings": 4,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 49,
+      "pdf_type": "text_based",
+      "text_chars": 71202
+    },
+    "error_set_1/486832.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 22,
+      "pdf_type": "text_based",
+      "text_chars": 48610
+    },
+    "error_set_1/495712.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 8,
+      "pdf_type": "text_based",
+      "text_chars": 20013
+    },
+    "error_set_1/499039.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 464,
+      "pdf_type": "scanned",
+      "text_chars": 978683
+    },
+    "error_set_1/503492.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 1,
+      "pdf_type": "text_based",
+      "text_chars": 2157
+    },
+    "error_set_2/020747.pdf": {
+      "broken": null,
+      "mupdf_warnings": 582,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 12,
+      "pdf_type": "scanned",
+      "text_chars": 47033
+    },
+    "error_set_2/020806.pdf": {
+      "broken": null,
+      "mupdf_warnings": 568,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 6,
+      "pdf_type": "scanned",
+      "text_chars": 8384
+    },
+    "error_set_2/027613.pdf": {
+      "broken": null,
+      "mupdf_warnings": 472,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 429,
+      "pdf_type": "scanned",
+      "text_chars": 640471
+    },
+    "error_set_2/029016.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 175,
+      "pdf_type": "scanned",
+      "text_chars": 314187
+    },
+    "error_set_2/033689.pdf": {
+      "broken": null,
+      "mupdf_warnings": 230,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 3,
+      "pdf_type": "scanned",
+      "text_chars": 693
+    },
+    "error_set_2/040669.pdf": {
+      "broken": null,
+      "mupdf_warnings": 280,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 26,
+      "pdf_type": "text_based",
+      "text_chars": 27212
+    },
+    "error_set_2/050734.pdf": {
+      "broken": null,
+      "mupdf_warnings": 1062,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 22,
+      "pdf_type": "scanned",
+      "text_chars": 41876
+    },
+    "error_set_2/064034.pdf": {
+      "broken": null,
+      "mupdf_warnings": 64,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 113,
+      "pdf_type": "scanned",
+      "text_chars": 336348
+    },
+    "error_set_2/073439.pdf": {
+      "broken": null,
+      "mupdf_warnings": 218,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 18,
+      "pdf_type": "text_based",
+      "text_chars": 29401
+    },
+    "error_set_2/150277.pdf": {
+      "broken": null,
+      "mupdf_warnings": 665,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 138,
+      "pdf_type": "scanned",
+      "text_chars": 299276
+    },
+    "error_set_2/178360.pdf": {
+      "broken": null,
+      "mupdf_warnings": 620,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 24,
+      "pdf_type": "scanned",
+      "text_chars": 66131
+    },
+    "error_set_2/189478.pdf": {
+      "broken": null,
+      "mupdf_warnings": 303,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 18,
+      "pdf_type": "scanned",
+      "text_chars": 49861
+    },
+    "error_set_2/210260.pdf": {
+      "broken": null,
+      "mupdf_warnings": 3,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 233,
+      "pdf_type": "scanned",
+      "text_chars": 718039
+    },
+    "error_set_2/219789.pdf": {
+      "broken": null,
+      "mupdf_warnings": 1411,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 54,
+      "pdf_type": "scanned",
+      "text_chars": 113290
+    },
+    "error_set_2/226387.pdf": {
+      "broken": null,
+      "mupdf_warnings": 218,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 11,
+      "pdf_type": "text_based",
+      "text_chars": 21621
+    },
+    "error_set_2/247224.pdf": {
+      "broken": null,
+      "mupdf_warnings": 0,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 45,
+      "pdf_type": "scanned",
+      "text_chars": 94256
+    },
+    "error_set_2/268346.pdf": {
+      "broken": null,
+      "mupdf_warnings": 158,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 20,
+      "pdf_type": "text_based",
+      "text_chars": 99645
+    },
+    "error_set_2/303226.pdf": {
+      "broken": null,
+      "mupdf_warnings": 288,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 19,
+      "pdf_type": "text_based",
+      "text_chars": 89378
+    },
+    "error_set_2/367594.pdf": {
+      "broken": null,
+      "mupdf_warnings": 208,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 9,
+      "pdf_type": "text_based",
+      "text_chars": 46213
+    },
+    "error_set_2/379049.pdf": {
+      "broken": null,
+      "mupdf_warnings": 4,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 179,
+      "pdf_type": "scanned",
+      "text_chars": 558795
+    },
+    "error_set_2/392154.pdf": {
+      "broken": null,
+      "mupdf_warnings": 75,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 90,
+      "pdf_type": "scanned",
+      "text_chars": 75305
+    },
+    "error_set_2/427669.pdf": {
+      "broken": null,
+      "mupdf_warnings": 52,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 24,
+      "pdf_type": "scanned",
+      "text_chars": 44340
+    },
+    "error_set_2/435321.pdf": {
+      "broken": null,
+      "mupdf_warnings": 558,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 19,
+      "pdf_type": "scanned",
+      "text_chars": 46636
+    },
+    "error_set_2/443752.pdf": {
+      "broken": null,
+      "mupdf_warnings": 4,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 80,
+      "pdf_type": "scanned",
+      "text_chars": 136007
+    },
+    "error_set_2/455746.pdf": {
+      "broken": null,
+      "mupdf_warnings": 560,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 86,
+      "pdf_type": "scanned",
+      "text_chars": 177195
+    },
+    "error_set_2/475121.pdf": {
+      "broken": null,
+      "mupdf_warnings": 2,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 1,
+      "pdf_type": "text_based",
+      "text_chars": 5126
+    },
+    "error_set_2/477139.pdf": {
+      "broken": null,
+      "mupdf_warnings": 228,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 29,
+      "pdf_type": "text_based",
+      "text_chars": 73577
+    },
+    "error_set_2/492484.pdf": {
+      "broken": null,
+      "mupdf_warnings": 640,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 32,
+      "pdf_type": "text_based",
+      "text_chars": 15564
+    },
+    "error_set_2/498264.pdf": {
+      "broken": null,
+      "mupdf_warnings": 28,
+      "needs_ocr": true,
+      "openable": true,
+      "pages": 3,
+      "pdf_type": "scanned",
+      "text_chars": 0
+    },
+    "error_set_2/504076.pdf": {
+      "broken": null,
+      "mupdf_warnings": 656,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 33,
+      "pdf_type": "text_based",
+      "text_chars": 105903
+    },
+    "error_set_2/507618.pdf": {
+      "broken": null,
+      "mupdf_warnings": 126,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 23,
+      "pdf_type": "text_based",
+      "text_chars": 42553
+    },
+    "error_set_2/507676.pdf": {
+      "broken": null,
+      "mupdf_warnings": 616,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 10,
+      "pdf_type": "text_based",
+      "text_chars": 32421
+    },
+    "error_set_2/509284.pdf": {
+      "broken": null,
+      "mupdf_warnings": 98,
+      "needs_ocr": false,
+      "openable": true,
+      "pages": 20,
+      "pdf_type": "text_based",
+      "text_chars": 28242
+    }
+  },
+  "measured_with": {
+    "classifier_path": "heuristic fallback \u2014 the Nix worker env has no pdf-inspector (see docs/corpus.md)",
+    "pymupdf": "1.28.2",
+    "python": "3.14.8 (nixpkgs python3, nix/worker-env.nix)"
+  },
+  "note": "Measured baseline for tests/corpora/check.py. Regenerate only on purpose: a deliberate dependency bump that changes a verdict is a reason to look at the report and re-baseline in a reviewed commit, not to retry the job.",
+  "summary": {
+    "broken": 0,
+    "errors": 0,
+    "needs_ocr": 22,
+    "openable": 54,
+    "pages": 2982,
+    "text_based": 32,
+    "text_chars": 6606165,
+    "total": 54
+  }
+}
