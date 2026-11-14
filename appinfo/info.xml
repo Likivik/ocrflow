@@ -24,7 +24,7 @@ Behaviour worth knowing:
 * Fail closed. If the classifier cannot decide whether a file is a scan, the job
   errors and the file is left untouched.
 	]]></description>
-	<version>0.1.15</version>
+	<version>0.1.16</version>
 	<licence>AGPL-3.0-or-later</licence>
 	<author mail="likivik@likivik.com" homepage="https://likivik.com">Likivik</author>
 	<namespace>OcrFlow</namespace>

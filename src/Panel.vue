@@ -408,13 +408,34 @@ export default {
 	border-bottom: 1px solid var(--color-border);
 }
 
-/* min-width: 0 is what lets a long path ellipsize instead of pushing the
-   button off the panel — the flex default (min-width: auto) refuses to. */
+/* Flexible text column: it must be allowed to shrink (min-width: 0) so the
+   path ellipsizes, and the button must never be the thing that shrinks — a
+   squeezed NcButton truncates its label to "Re…", which is unreadable. */
 .ocrflow-panel__mine-text {
 	display: flex;
 	min-width: 0;
+	flex: 1 1 auto;
 	flex-direction: column;
 	gap: calc(var(--default-grid-baseline, 4px) * 1);
+}
+
+.ocrflow-panel__mine-row :deep(.button-vue) {
+	flex: 0 0 auto;
+	white-space: nowrap;
+}
+
+/* On a phone the row cannot hold text and a button side by side: stack them,
+   with the action full width so its label always fits. */
+@media (max-width: 600px) {
+	.ocrflow-panel__mine-row {
+		flex-direction: column;
+		align-items: stretch;
+		gap: calc(var(--default-grid-baseline, 4px) * 2);
+	}
+
+	.ocrflow-panel__mine-row :deep(.button-vue) {
+		width: 100%;
+	}
 }
 
 .ocrflow-panel__mine-path {
