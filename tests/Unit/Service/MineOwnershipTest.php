@@ -57,6 +57,33 @@ class MineOwnershipTest extends TestCase
 		], $overrides);
 	}
 
+	public function testAnUnclassifiedFailureShowsTheWorkersOwnMessage(): void
+	{
+		$queue = $this->createMock(Queue::class);
+		$attention = $this->attentionWith($queue);
+		$attention->rows = [
+			$this->jobRow(1, '/alice/files/mystery.pdf', 100, [
+				'reason_code' => null,
+				'reason' => 'worker_error',
+				'error' => 'QueueProtocolError: the app streamed an empty file',
+			]),
+		];
+		$mine = new Mine($attention, $this->outcomes());
+
+		$row = $mine->list('alice', 10)['rows'][0];
+
+		self::assertSame(
+			'QueueProtocolError: the app streamed an empty file',
+			$row['error'],
+			'the worker\'s message must reach the panel, not be dropped on the way',
+		);
+		self::assertStringContainsString(
+			"worker's message is below",
+			(string) $row['fix'],
+			'a hint must not claim there is no message while the message is shown',
+		);
+	}
+
 	public function testAUserCannotRetryAnotherUsersJob(): void
 	{
 		$job = new Job();

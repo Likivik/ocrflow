@@ -297,6 +297,15 @@ class Attention
 	 * @param array<string, mixed> $row
 	 * @return array{id: int, file_id: int, path: string, code: string, label: string, fix: string, error: ?string, attempts: int, finished_at: ?int}
 	 */
+	/**
+	 * No canonical code, or the code that means "the worker gave none".
+	 */
+	private function isUnclassified(?string $code): bool
+	{
+		$canonical = $this->retryPolicy->canonical($code);
+		return $canonical === null || $canonical === '' || $canonical === 'error_worker_unclassified';
+	}
+
 	private function toApi(array $row): array
 	{
 		$code = $this->rowCode(
@@ -313,7 +322,12 @@ class Attention
 			'path' => (string) $row['path'],
 			'code' => $this->retryPolicy->canonical($code),
 			'label' => $entry['label'] ?? 'unknown',
-			'fix' => $entry['fix'] ?? 'unknown',
+			// 'OCR failed without saying why' is only true when there is no
+			// text. The worker's own message is in the row and the panel
+			// shows it, so the hint must not deny it exists.
+			'fix' => $error !== null && $this->isUnclassified($code)
+				? 'OCR failed; the worker\'s message is below.'
+				: ($entry['fix'] ?? 'unknown'),
 			// Prose can be a full exception trace; nobody needs 50 KB of it
 			// in a table row.
 			'error' => $error === null ? null : (mb_strlen($error) > self::ERROR_TRUNCATE

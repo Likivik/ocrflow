@@ -370,6 +370,9 @@ class Mine
 			'code' => (string) ($row['code'] ?? ''),
 			'label' => (string) ($row['label'] ?? ''),
 			'fix' => (string) ($row['fix'] ?? ''),
+			// The worker's own words, when there are any: an unclassified
+			// failure is not a mystery if the exception text is in the row.
+			'error' => isset($row['error']) && is_string($row['error']) && $row['error'] !== '' ? $row['error'] : null,
 			'attempts' => isset($row['attempts']) && $row['attempts'] !== null ? (int) $row['attempts'] : null,
 			'age' => $age,
 			'retryable' => $retryable,
