@@ -368,8 +368,7 @@ class Mine
 			'kind' => (($row['verdict'] ?? null) === RetryPolicy::VERDICT_REDO) ? 'redo' : 'needs_fix',
 			'path' => (string) ($row['path'] ?? ''),
 			'code' => (string) ($row['code'] ?? ''),
-			'label' => (string) ($row['label'] ?? ''),
-			'fix' => (string) ($row['fix'] ?? ''),
+			'text' => (string) ($row['text'] ?? ''),
 			// The worker's own words, when there are any: an unclassified
 			// failure is not a mystery if the exception text is in the row.
 			'error' => isset($row['error']) && is_string($row['error']) && $row['error'] !== '' ? $row['error'] : null,

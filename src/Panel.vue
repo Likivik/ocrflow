@@ -78,10 +78,10 @@
 					<div class="ocrflow-panel__mine-text">
 						<span class="ocrflow-panel__mine-dir">{{ pathParts(row.path).dir }}</span>
 						<span class="ocrflow-panel__mine-name" :title="row.path">{{ pathParts(row.path).name }}</span>
-						<span class="ocrflow-panel__mine-fix">{{ row.fix }}</span>
+						<span class="ocrflow-panel__mine-text">{{ row.text }}</span>
 						<span v-if="row.error" class="ocrflow-panel__mine-error">{{ row.error }}</span>
 						<span class="ocrflow-panel__mine-meta">
-							{{ row.label }}<template v-if="row.age !== null"> · {{ age(row.age) }}</template><template v-if="row.attempts !== null"> · {{ t('{count} attempts', { count: row.attempts }) }}</template>
+							<template v-if="row.age !== null">{{ age(row.age) }}</template><template v-if="row.attempts !== null"> · {{ t('{count} attempts', { count: row.attempts }) }}</template>
 						</span>
 					</div>
 					<div class="ocrflow-panel__mine-actions">
@@ -849,7 +849,7 @@ export default {
 	overflow-wrap: anywhere;
 }
 
-.ocrflow-panel__mine-fix {
+.ocrflow-panel__mine-text {
 	overflow-wrap: anywhere;
 }
 

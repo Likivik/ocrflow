@@ -1020,7 +1020,7 @@ grep -q '"total":1' /tmp/ocrflow-mine-bob || fail "bob's own row count should be
 if grep -q 'mine-carol.pdf' /tmp/ocrflow-mine-bob; then
   fail "bob's list leaked carol's path: $(cat /tmp/ocrflow-mine-bob)"
 fi
-grep -q '"fix"' /tmp/ocrflow-mine-bob || fail "a row must carry its fix hint: $(cat /tmp/ocrflow-mine-bob)"
+grep -q '"text"' /tmp/ocrflow-mine-bob || fail "a row must carry its one human sentence: $(cat /tmp/ocrflow-mine-bob)"
 
 code=$(curl -s -o /tmp/ocrflow-mine-carol -w '%{http_code}' -u "carol:carol-pass-123" \
   -H 'OCS-APIRequest: true' -H 'Accept: application/json' \

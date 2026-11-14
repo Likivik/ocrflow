@@ -90,26 +90,26 @@ class RetryPolicyWordingTest extends TestCase
 	public function testEveryHintIsExactlyOneSentence(): void
 	{
 		foreach ($this->codes() as $code) {
-			$fix = (string) ($this->policy->entry($code)['fix'] ?? '');
-			$this->assertNotSame('', trim($fix), $code . ': a hint is required');
+			$text = (string) ($this->policy->entry($code)['text'] ?? '');
+			$this->assertNotSame('', trim($text), $code . ': a hint is required');
 
-			$sentences = $this->sentences($fix);
-			$this->assertCount(1, $sentences, $code . ': a hint is ONE sentence, got: ' . $fix);
-			$this->assertSame(trim($fix), $sentences[0], $code . ': no leading or trailing prose');
-			$this->assertStringEndsWith('.', trim($fix), $code . ': a sentence ends with a full stop');
+			$sentences = $this->sentences($text);
+			$this->assertCount(1, $sentences, $code . ': a hint is ONE sentence, got: ' . $text);
+			$this->assertSame(trim($text), $sentences[0], $code . ': no leading or trailing prose');
+			$this->assertStringEndsWith('.', trim($text), $code . ': a sentence ends with a full stop');
 		}
 	}
 
 	public function testNoHintInstructsTheReader(): void
 	{
 		foreach ($this->codes() as $code) {
-			$fix = (string) ($this->policy->entry($code)['fix'] ?? '');
-			$lower = mb_strtolower($fix);
+			$text = (string) ($this->policy->entry($code)['text'] ?? '');
+			$lower = mb_strtolower($text);
 			foreach (self::FORBIDDEN as $word) {
 				$this->assertDoesNotMatchRegularExpression(
 					'/\b' . preg_quote($word, '/') . '\b/u',
 					$lower,
-					$code . ': the hint must diagnose, not instruct — "' . $word . '" in: ' . $fix,
+					$code . ': the hint must diagnose, not instruct — "' . $word . '" in: ' . $text,
 				);
 			}
 		}
@@ -128,26 +128,15 @@ class RetryPolicyWordingTest extends TestCase
 			'error_provider_unsupported_file' => 'This file type is not supported.',
 			'error_provider_timed_out' => 'The OCR service took too long to answer.',
 		];
-		foreach ($expected as $code => $fix) {
-			$this->assertSame($fix, $this->policy->entry($code)['fix'], $code);
+		foreach ($expected as $code => $text) {
+			$this->assertSame($text, $this->policy->entry($code)['text'], $code);
 		}
 
 		// The quota code says the file is fine — the reassurance IS the
 		// diagnosis here — but it still may not tell anyone to do anything.
-		$quota = (string) $this->policy->entry('error_provider_quota_exhausted')['fix'];
+		$quota = (string) $this->policy->entry('error_provider_quota_exhausted')['text'];
 		$this->assertStringContainsStringIgnoringCase('quota', $quota);
 		$this->assertStringContainsStringIgnoringCase('file itself is fine', $quota);
 	}
 
-	public function testAHintIsNeverJustTheLabelRepeated(): void
-	{
-		foreach ($this->codes() as $code) {
-			$entry = $this->policy->entry($code);
-			$this->assertNotSame(
-				mb_strtolower(trim((string) $entry['label'])),
-				mb_strtolower(trim((string) $entry['fix'])),
-				$code . ': the hint must add something to the label',
-			);
-		}
-	}
 }

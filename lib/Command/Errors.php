@@ -74,7 +74,7 @@ class Errors extends Command
 				$row['id'],
 				$row['path'],
 				$row['code'],
-				$row['label'],
+				$row['text'],
 				$row['attempts'],
 				self::age($row['finished_at']),
 			));

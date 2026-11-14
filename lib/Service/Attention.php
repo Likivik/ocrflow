@@ -100,7 +100,7 @@ class Attention
 		foreach ($this->retryPolicy->codesForVerdict(RetryPolicy::VERDICT_NEEDS_FIX) as $code) {
 			$entry = $this->retryPolicy->entry($code);
 			if ($entry !== null) {
-				$out[$code] = $entry['label'];
+				$out[$code] = $entry['text'];
 			}
 		}
 		return $out;
@@ -321,13 +321,10 @@ class Attention
 			'file_id' => (int) ($row['file_id'] ?? 0),
 			'path' => (string) $row['path'],
 			'code' => $this->retryPolicy->canonical($code),
-			'label' => $entry['label'] ?? 'unknown',
-			// 'OCR failed without saying why' is only true when there is no
-			// text. The worker's own message is in the row and the panel
-			// shows it, so the hint must not deny it exists.
-			'fix' => $error !== null && $this->isUnclassified($code)
-				? 'OCR failed; the worker\'s message is below.'
-				: ($entry['fix'] ?? 'unknown'),
+			// One human sentence, never two. The vocabulary used to carry a
+			// `label` and a `fix` that said the same thing in different words,
+			// and the panel rendered both.
+			'text' => $entry['text'] ?? 'OCR failed; the app recorded no code for it.',
 			// Prose can be a full exception trace; nobody needs 50 KB of it
 			// in a table row.
 			'error' => $error === null ? null : (mb_strlen($error) > self::ERROR_TRUNCATE
