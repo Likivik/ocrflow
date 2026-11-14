@@ -113,6 +113,33 @@ class MineController extends OCSController
 	}
 
 	/**
+	 * Delete a selection: `{ids: [...]}`, one request, one honest answer.
+	 *
+	 * `deleted` and `refused` are reported separately, so a partial batch
+	 * cannot read as a full one, and `refused_ids` names what was left
+	 * behind. A single id is a selection of one, so the panel has one code
+	 * path whether the user ticked one row or twenty.
+	 *
+	 * @throws OCSForbiddenException
+	 */
+	#[NoAdminRequired]
+	public function deleteMany(): DataResponse
+	{
+		$uid = $this->callerUid();
+
+		if (!$this->request->passesCSRFCheck()) {
+			return new DataResponse(['message' => 'CSRF check failed'], Http::STATUS_PRECONDITION_FAILED);
+		}
+
+		$ids = $this->request->getParam('ids');
+		if (!is_array($ids)) {
+			return new DataResponse(['message' => 'ids is required'], Http::STATUS_BAD_REQUEST);
+		}
+
+		return new DataResponse($this->mine->deleteMany($uid, array_values($ids)));
+	}
+
+	/**
 	 * @throws OCSForbiddenException
 	 */
 	private function callerUid(): string

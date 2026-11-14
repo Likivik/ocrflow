@@ -31,8 +31,53 @@
 			{{ t('Nothing of yours needs attention.') }}
 		</p>
 		<template v-else>
-			<ul class="ocrflow-panel__mine">
-				<li v-for="row in mineRows" :key="rowKey(row)" class="ocrflow-panel__mine-row">
+			<div class="ocrflow-panel__filters">
+				<div class="ocrflow-panel__chips" role="group" :aria-label="t('Filter by problem')">
+					<NcButton
+						v-for="chip in filterChips"
+						:key="chip.id"
+						:pressed="activeFilter === chip.id"
+						variant="tertiary"
+						@click="activeFilter = chip.id">
+						{{ chip.label }} ({{ chip.count }})
+					</NcButton>
+				</div>
+				<NcTextField
+					v-model="pathQuery"
+					class="ocrflow-panel__search"
+					:label="t('Search by path')"
+					placeholder="Scans/2026" />
+			</div>
+
+			<div class="ocrflow-panel__list-head">
+				<NcCheckboxRadioSwitch
+					type="checkbox"
+					:checked="allVisibleSelected"
+					@update:checked="toggleAllVisible">
+					{{ t('Select all shown ({count})', { count: visibleRows.length }) }}
+				</NcCheckboxRadioSwitch>
+				<span class="ocrflow-panel__list-count">
+					{{ t('{shown} of {total} shown', { shown: visibleRows.length, total: mineRows.length }) }}
+				</span>
+			</div>
+
+			<p v-if="!visibleRows.length" class="ocrflow-panel__empty">
+				{{ t('No files match this filter.') }}
+				<NcButton variant="tertiary" @click="clearFilters">
+					{{ t('Show all') }}
+				</NcButton>
+			</p>
+			<ul v-else class="ocrflow-panel__mine">
+				<li
+					v-for="row in visibleRows"
+					:key="rowKey(row)"
+					class="ocrflow-panel__mine-row"
+					:class="{ 'is-selected': isSelected(row) }">
+					<NcCheckboxRadioSwitch
+						type="checkbox"
+						:checked="isSelected(row)"
+						:aria-label="t('Select {path}', { path: shortPath(row.path) })"
+						@update:checked="(checked) => setSelected(row, checked)" />
 					<div class="ocrflow-panel__mine-text">
 						<span class="ocrflow-panel__mine-path" :title="row.path">{{ shortPath(row.path) }}</span>
 						<span class="ocrflow-panel__mine-fix">{{ row.fix }}</span>
@@ -61,6 +106,23 @@
 					</div>
 				</li>
 			</ul>
+
+			<!-- Sticky, because the selection is about rows that may have
+			     scrolled away: the bar says how many and what will happen. -->
+			<div v-if="selectedCount" class="ocrflow-panel__bulk">
+				<span class="ocrflow-panel__bulk-count">
+					{{ t('{count} selected', { count: selectedCount }) }}
+				</span>
+				<NcButton
+					v-if="selectedRetryableCount"
+					:disabled="mineBusy"
+					@click="bulkRetry">
+					{{ t('Retry {count}', { count: selectedRetryableCount }) }}
+				</NcButton>
+				<NcButton variant="error" :disabled="mineBusy" @click="askDeleteSelected">
+					{{ t('Delete {count}', { count: selectedCount }) }}
+				</NcButton>
+			</div>
 		</template>
 		<p v-if="mineMessage" class="ocrflow-panel__result">
 			{{ mineMessage }}
@@ -139,6 +201,19 @@ import NcTextField from '@nextcloud/vue/components/NcTextField'
 
 const BASE = '/ocs/v2.php/apps/ocrflow/api/v1'
 
+// The filter chips are a READING of the reason_code, not a second source of
+// truth: every bucket below names codes the server already decided on, so a
+// file cannot appear under "Damaged" here and under something else in the
+// admin worklist. A code nobody mapped falls into "Failed" only if it is an
+// error, and into nothing at all otherwise.
+const BUCKETS = [
+	{ id: 'all', label: 'All' },
+	{ id: 'damaged', label: 'Damaged' },
+	{ id: 'empty', label: 'Empty' },
+	{ id: 'failed', label: 'Failed' },
+	{ id: 'decide', label: 'To decide' },
+]
+
 export default {
 	name: 'OcrFlowPanel',
 	components: { NcButton, NcCheckboxRadioSwitch, NcDialog, NcNoteCard, NcTextField },
@@ -163,6 +238,14 @@ export default {
 			mineBusy: false,
 			mineMessage: '',
 			retrying: '',
+			// Filters are client-side over the loaded rows: the endpoint is a
+			// worklist, not a query engine, and a chip that re-queries would
+			// make a 200-row page feel like a search box.
+			activeFilter: 'all',
+			pathQuery: '',
+			// Selection is by row key (origin + id), because a job id and a
+			// ledger row id share a number space and must not alias.
+			selected: [],
 			// The rows awaiting the trash confirmation, or null.
 			deleteTarget: null,
 		}
@@ -173,9 +256,46 @@ export default {
 		rows() {
 			return Object.entries(this.counts ?? {}).map(([status, count]) => ({ status, count }))
 		},
+		filterChips() {
+			return BUCKETS.map((bucket) => ({
+				...bucket,
+				label: this.t(bucket.label),
+				count: bucket.id === 'all'
+					? this.mineRows.length
+					: this.mineRows.filter((row) => this.bucketFor(row) === bucket.id).length,
+			}))
+		},
+		visibleRows() {
+			const query = this.pathQuery.trim().toLowerCase()
+			return this.mineRows.filter((row) => {
+				if (this.activeFilter !== 'all' && this.bucketFor(row) !== this.activeFilter) {
+					return false
+				}
+				if (query === '') {
+					return true
+				}
+				return `${row.path} ${this.shortPath(row.path)}`.toLowerCase().includes(query)
+			})
+		},
+		selectedRows() {
+			return this.mineRows.filter((row) => this.selected.includes(this.rowKey(row)))
+		},
+		selectedCount() {
+			return this.selectedRows.length
+		},
+		selectedRetryableCount() {
+			return this.selectedRows.filter((row) => row.retryable).length
+		},
+		allVisibleSelected() {
+			return this.visibleRows.length > 0
+				&& this.visibleRows.every((row) => this.selected.includes(this.rowKey(row)))
+		},
 		deleteMessage() {
-			const row = (this.deleteTarget ?? [])[0]
-			return this.t('“{name}” moves to your trash. You can restore it for about 30 days.', { name: this.shortPath(row?.path ?? '') })
+			const rows = this.deleteTarget ?? []
+			if (rows.length === 1) {
+				return this.t('“{name}” moves to your trash. You can restore it for about 30 days.', { name: this.shortPath(rows[0].path) })
+			}
+			return this.t('{count} files move to your trash. You can restore them for about 30 days.', { count: rows.length })
 		},
 		deleteButtons() {
 			return [
@@ -224,6 +344,46 @@ export default {
 			// we only know which file.
 			return `/f/${row.file_id}`
 		},
+		bucketFor(row) {
+			const code = row.code ?? ''
+			if (code === 'error_file_broken') {
+				return 'damaged'
+			}
+			if (code === 'error_source_file_zero_bytes') {
+				return 'empty'
+			}
+			if (row.kind === 'redo') {
+				return 'decide'
+			}
+			if (code.startsWith('error_')) {
+				return 'failed'
+			}
+			return 'other'
+		},
+		clearFilters() {
+			this.activeFilter = 'all'
+			this.pathQuery = ''
+		},
+		isSelected(row) {
+			return this.selected.includes(this.rowKey(row))
+		},
+		setSelected(row, checked) {
+			const key = this.rowKey(row)
+			if (checked === true && !this.selected.includes(key)) {
+				this.selected = [...this.selected, key]
+			}
+			if (checked !== true) {
+				this.selected = this.selected.filter((k) => k !== key)
+			}
+		},
+		toggleAllVisible(checked) {
+			const keys = this.visibleRows.map((row) => this.rowKey(row))
+			if (checked === true) {
+				this.selected = Array.from(new Set([...this.selected, ...keys]))
+			} else {
+				this.selected = this.selected.filter((key) => !keys.includes(key))
+			}
+		},
 		age(seconds) {
 			if (seconds < 60) {
 				return this.t('just now')
@@ -251,11 +411,16 @@ export default {
 					throw new Error('unexpected answer')
 				}
 				this.mineRows = rows
+				// A selection that survived a reload would point at rows the
+				// user can no longer see.
+				const keys = new Set(rows.map((row) => this.rowKey(row)))
+				this.selected = this.selected.filter((key) => keys.has(key))
 				this.mineLoaded = true
 			} catch (e) {
 				// Keep the last known rows out of sight: a stale row next to
 				// an error reads like it is still true.
 				this.mineRows = []
+				this.selected = []
 				this.mineMessage = ''
 				this.mineError = e?.response?.status ?? e?.message ?? 'unknown error'
 			} finally {
@@ -266,6 +431,13 @@ export default {
 			this.retrying = this.rowKey(row)
 			await this.requestRetry([row.id])
 			this.retrying = ''
+		},
+		async bulkRetry() {
+			const ids = this.selectedRows.filter((row) => row.retryable).map((row) => row.id)
+			if (!ids.length) {
+				return
+			}
+			await this.requestRetry(ids)
 		},
 		async requestRetry(ids) {
 			this.mineError = ''
@@ -298,6 +470,11 @@ export default {
 			this.mineMessage = ''
 			this.deleteTarget = [row]
 		},
+		askDeleteSelected() {
+			this.mineError = ''
+			this.mineMessage = ''
+			this.deleteTarget = [...this.selectedRows]
+		},
 		async confirmDelete() {
 			const rows = this.deleteTarget ?? []
 			this.deleteTarget = null
@@ -305,26 +482,44 @@ export default {
 			const ids = rows
 				.map((row) => Number(row.file_id))
 				.filter((id) => Number.isInteger(id) && id > 0)
-			if (ids.length !== 1) {
-				this.mineError = this.t('This row does not name a file, so nothing was deleted.')
+			if (!ids.length) {
+				this.mineError = this.t('These rows do not name a file, so nothing was deleted.')
 				return
 			}
 			this.mineBusy = true
 			this.mineError = ''
 			this.mineMessage = ''
 			try {
-				// One file per dialog: the single-file route, so a refusal
-				// and a vanished file get their own answers (403 / 404).
-				try {
-					await axios.delete(`${BASE}/mine/${ids[0]}`, { headers: { 'OCS-APIRequest': 'true' } })
-					this.mineMessage = this.t('Moved to your trash. You can restore it for about 30 days.')
-				} catch (e) {
-					if (e?.response?.status === 404) {
-						this.mineMessage = this.t('That file was already gone.')
+				if (ids.length === 1) {
+					// One row: the single-file route, so a refusal and a
+					// vanished file get their own answers (403 / 404).
+					try {
+						await axios.delete(`${BASE}/mine/${ids[0]}`, { headers: { 'OCS-APIRequest': 'true' } })
+						this.mineMessage = this.t('Moved to your trash. You can restore it for about 30 days.')
+					} catch (e) {
+						if (e?.response?.status === 404) {
+							this.mineMessage = this.t('That file was already gone.')
+						} else {
+							throw e
+						}
+					}
+				} else {
+					// A selection: ONE request, and the answer says what
+					// happened to every id instead of a cheerful total.
+					const { data } = await axios.delete(`${BASE}/mine`, {
+						data: { ids },
+						headers: { 'OCS-APIRequest': 'true' },
+					})
+					const result = data?.ocs?.data ?? {}
+					const deleted = result.deleted ?? 0
+					const refused = result.refused ?? 0
+					if (refused > 0) {
+						this.mineMessage = this.t('{deleted} moved to trash, {refused} left alone.', { deleted, refused })
 					} else {
-						throw e
+						this.mineMessage = this.t('{count} moved to your trash. You can restore them for about 30 days.', { count: deleted })
 					}
 				}
+				this.selected = []
 				await this.loadMine()
 			} catch (e) {
 				this.mineError = e?.response?.status ?? e?.message ?? 'unknown error'
@@ -493,6 +688,49 @@ export default {
 	margin-bottom: 1rem;
 }
 
+/* Filters: chips wrap, the search takes the rest of the line. Both are
+   controls for the list below, so they sit above it and above the header. */
+.ocrflow-panel__filters {
+	display: flex;
+	flex-wrap: wrap;
+	gap: calc(var(--default-grid-baseline, 4px) * 3);
+	align-items: flex-end;
+	margin-top: calc(var(--default-grid-baseline, 4px) * 3);
+}
+
+.ocrflow-panel__chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--default-grid-baseline, 4px);
+}
+
+/* A chip must not shrink its label to "...": it wraps onto its own line
+   instead, which is what the flex-wrap above is for. */
+.ocrflow-panel__chips :deep(.button-vue) {
+	flex: 0 0 auto;
+	white-space: nowrap;
+}
+
+.ocrflow-panel__search {
+	flex: 1 1 12rem;
+	min-width: 0;
+}
+
+.ocrflow-panel__list-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: calc(var(--default-grid-baseline, 4px) * 2);
+	flex-wrap: wrap;
+	margin-top: calc(var(--default-grid-baseline, 4px) * 3);
+}
+
+.ocrflow-panel__list-count {
+	color: var(--color-text-maxcontrast);
+	font-size: 0.9em;
+	font-variant-numeric: tabular-nums;
+}
+
 /* Your own rows: path first (it is what the user recognises), then the fix
    hint, then the provenance. The actions stay on the inline end and never
    shrink the text to nothing. */
@@ -508,6 +746,10 @@ export default {
 	gap: calc(var(--default-grid-baseline, 4px) * 3);
 	padding: calc(var(--default-grid-baseline, 4px) * 3) 0;
 	border-bottom: 1px solid var(--color-border);
+}
+
+.ocrflow-panel__mine-row.is-selected {
+	background-color: var(--color-background-hover);
 }
 
 /* Flexible text column: it must be allowed to shrink (min-width: 0) so the
@@ -545,6 +787,27 @@ export default {
 	.ocrflow-panel__mine-actions {
 		flex-wrap: wrap;
 	}
+}
+
+/* The selection bar follows the scroll: the rows it acts on may be above or
+   below the fold, and a bar that scrolls away is a bar nobody finds. */
+.ocrflow-panel__bulk {
+	position: sticky;
+	bottom: 0;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: calc(var(--default-grid-baseline, 4px) * 2);
+	margin-top: calc(var(--default-grid-baseline, 4px) * 2);
+	padding: calc(var(--default-grid-baseline, 4px) * 2);
+	background-color: var(--color-main-background);
+	border-top: 2px solid var(--color-border);
+	z-index: 1;
+}
+
+.ocrflow-panel__bulk-count {
+	font-weight: bold;
+	font-variant-numeric: tabular-nums;
 }
 
 .ocrflow-panel__mine-path {
