@@ -79,6 +79,7 @@
 						<span class="ocrflow-panel__mine-dir">{{ pathParts(row.path).dir }}</span>
 						<span class="ocrflow-panel__mine-name" :title="row.path">{{ pathParts(row.path).name }}</span>
 						<span class="ocrflow-panel__mine-fix">{{ row.fix }}</span>
+						<span v-if="row.error" class="ocrflow-panel__mine-error">{{ row.error }}</span>
 						<span class="ocrflow-panel__mine-meta">
 							{{ row.label }}<template v-if="row.age !== null"> · {{ age(row.age) }}</template><template v-if="row.attempts !== null"> · {{ t('{count} attempts', { count: row.attempts }) }}</template>
 						</span>
@@ -837,6 +838,15 @@ export default {
 
 .ocrflow-panel__mine-name {
 	font-weight: bold;
+}
+
+.ocrflow-panel__mine-error {
+	/* The worker's own words. Monospace and quiet: it is evidence, not prose,
+	   and it is the only reason an unclassified failure is not a mystery. */
+	color: var(--color-text-maxcontrast);
+	font-family: var(--font-face-monospace, monospace);
+	font-size: var(--font-size-small, 13px);
+	overflow-wrap: anywhere;
 }
 
 .ocrflow-panel__mine-fix {
