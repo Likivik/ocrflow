@@ -29,7 +29,7 @@ class AttentionRetryResetTest extends TestCase
 		$job = new Job();
 		$job->setId(9);
 		$job->setPath('/alice/files/scan.pdf');
-		$job->setReasonCode('error_queued_twice_for_same_bytes');
+		$job->setReasonCode('error_provider_timed_out');
 		$job->setFileId(7);
 
 		$queue = $this->createMock(Queue::class);

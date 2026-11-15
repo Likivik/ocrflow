@@ -1001,10 +1001,12 @@ ok "Apply writes with versioning; Discard deletes the bytes and keeps the row"
 echo "== mine: a user sees their own rows and cannot touch anyone else's"
 $ENGINE exec -e OC_PASS=carol-pass-123 -u www-data "$NAME" php occ user:add --password-from-env carol >/dev/null 2>&1 || true
 
-# Two needs_fix rows, one per user, in the shape the listener writes (a leading
+# Two actionable rows, one per user, in the shape the listener writes (a leading
 # slash, then <uid>/files/...). Inserted directly on purpose: this section is
 # about the READER's scoping, not about the worker that would produce the rows.
-sql "INSERT INTO ${JOBS} (file_id, path, status, reason, reason_code, attempts, etag, created_at, finished_at) VALUES (980000001, '/bob/files/mine-bob.pdf', 'error', 'error_file_broken', 'error_file_broken', 2, 'mine-bob', 1700000000, 1700000000)" >/dev/null
+# Bob's row carries a `wait` code on purpose: Retry is offered only where
+# `isRetryable()` says another attempt can help, and a damaged file is refused.
+sql "INSERT INTO ${JOBS} (file_id, path, status, reason, reason_code, attempts, etag, created_at, finished_at) VALUES (980000001, '/bob/files/mine-bob.pdf', 'error', 'error_provider_timed_out', 'error_provider_timed_out', 2, 'mine-bob', 1700000000, 1700000000)" >/dev/null
 sql "INSERT INTO ${JOBS} (file_id, path, status, reason, reason_code, attempts, etag, created_at, finished_at) VALUES (980000002, '/carol/files/mine-carol.pdf', 'error', 'error_file_broken', 'error_file_broken', 2, 'mine-carol', 1700000001, 1700000001)" >/dev/null
 bob_job=$(sql "SELECT id FROM ${JOBS} WHERE path = '/bob/files/mine-bob.pdf'")
 [ -n "$bob_job" ] || fail "the bob fixture row was not inserted"
@@ -1044,9 +1046,10 @@ rows=$(sql "SELECT count(*) FROM ${JOBS} WHERE path = '/bob/files/mine-bob.pdf'"
 [ "$rows" = "1" ] || fail "bob's row disappeared after carol's refused retry (${rows} rows left)"
 ok "mine: another user's id is refused, and their row is untouched"
 
-# The owner's own retry DOES run: the terminal row is cleared, so the next
-# scan queues the file again. Without this, "refused" would be
-# indistinguishable from "the endpoint never retries anything".
+# The owner's own retry DOES run: the terminal row is cleared AND the file is
+# queued again (a retry that only cleared state left the file waiting for a
+# hand-started scan). Without this, "refused" would be indistinguishable from
+# "the endpoint never retries anything".
 code=$(curl -s -o /tmp/ocrflow-mine-own -w '%{http_code}' -u "bob:bob-pass-123" \
   -H 'OCS-APIRequest: true' -H 'Accept: application/json' -H 'Content-Type: application/json' \
   -d "{\"ids\":[${bob_job}]}" "$BASE/ocs/v2.php/apps/ocrflow/api/v1/mine/retry")
@@ -1054,6 +1057,25 @@ code=$(curl -s -o /tmp/ocrflow-mine-own -w '%{http_code}' -u "bob:bob-pass-123" 
 grep -q '"retried":1' /tmp/ocrflow-mine-own || fail "bob's own row must be retried: $(cat /tmp/ocrflow-mine-own)"
 left=$(sql "SELECT count(*) FROM ${JOBS} WHERE id = ${bob_job}")
 [ "$left" = "0" ] || fail "the retried terminal row was not cleared (${left} rows left)"
+queued=$(sql "SELECT count(*) FROM ${JOBS} WHERE path = '/bob/files/mine-bob.pdf' AND status = 'queued'")
+[ "${queued:-0}" -ge 1 ] || fail "a retry must queue the file again; found ${queued:-0} queued row(s)"
+ok "mine: the owner's retry clears the row AND queues the file again"
+
+# A permanent code is refused even for its owner. Another attempt can only fail
+# the same way, and on a paid engine that is paid for twice — the panel hides
+# the button for these rows, and the endpoint must not be more permissive.
+sql "INSERT INTO ${JOBS} (file_id, path, status, reason, reason_code, attempts, etag, created_at, finished_at) VALUES (980000003, '/bob/files/mine-bob-broken.pdf', 'error', 'error_file_broken', 'error_file_broken', 2, 'mine-bob-broken', 1700000002, 1700000002)" >/dev/null
+broken_job=$(sql "SELECT id FROM ${JOBS} WHERE path = '/bob/files/mine-bob-broken.pdf'")
+[ -n "$broken_job" ] || fail "the broken-file fixture row was not inserted"
+code=$(curl -s -o /tmp/ocrflow-mine-broken -w '%{http_code}' -u "bob:bob-pass-123" \
+  -H 'OCS-APIRequest: true' -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d "{\"ids\":[${broken_job}]}" "$BASE/ocs/v2.php/apps/ocrflow/api/v1/mine/retry")
+[ "$code" = "200" ] || fail "a refused retry still answers 200, got $code body=$(cat /tmp/ocrflow-mine-broken)"
+grep -q '"retried":0' /tmp/ocrflow-mine-broken || fail "a damaged file must not be retried: $(cat /tmp/ocrflow-mine-broken)"
+grep -q '"refused":1' /tmp/ocrflow-mine-broken || fail "the permanent refusal must be reported: $(cat /tmp/ocrflow-mine-broken)"
+still=$(sql "SELECT count(*) FROM ${JOBS} WHERE id = ${broken_job}")
+[ "$still" = "1" ] || fail "the refused permanent row was touched (${still} rows left)"
+ok "mine: a damaged file is refused for its own owner, and its row is untouched"
 
 # The admin plane is unchanged by the user plane: the same two rows are still
 # visible to an admin, and a normal user is still refused there.

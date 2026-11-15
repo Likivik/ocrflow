@@ -1,8 +1,5 @@
 <template>
 	<div class="ocrflow-panel">
-		<p class="ocrflow-panel__intro">
-			{{ intro }}
-		</p>
 
 		<div v-if="!engineConfigured" class="ocrflow-panel__notice">
 			<NcNoteCard type="warning">
@@ -79,7 +76,8 @@
 						:aria-label="t('Select {path}', { path: shortPath(row.path) })"
 						@update:checked="(checked) => setSelected(row, checked)" />
 					<div class="ocrflow-panel__mine-text">
-						<span class="ocrflow-panel__mine-path" :title="row.path">{{ shortPath(row.path) }}</span>
+						<span class="ocrflow-panel__mine-dir">{{ pathParts(row.path).dir }}</span>
+						<span class="ocrflow-panel__mine-name" :title="row.path">{{ pathParts(row.path).name }}</span>
 						<span class="ocrflow-panel__mine-fix">{{ row.fix }}</span>
 						<span class="ocrflow-panel__mine-meta">
 							{{ row.label }}<template v-if="row.age !== null"> · {{ age(row.age) }}</template><template v-if="row.attempts !== null"> · {{ t('{count} attempts', { count: row.attempts }) }}</template>
@@ -219,7 +217,6 @@ export default {
 	components: { NcButton, NcCheckboxRadioSwitch, NcDialog, NcNoteCard, NcTextField },
 	data() {
 		return {
-			intro: 'Files you upload are queued automatically. Counts below are for this instance, not this folder.',
 			counts: {},
 			folder: '',
 			busy: false,
@@ -330,6 +327,22 @@ export default {
 			// Origins have separate id spaces: a job id and a ledger row id
 			// can be the same number for different files.
 			return `${row.origin}-${row.id}`
+		},
+		pathParts(path) {
+			// The worklist row shows where the file lives and what it is
+			// called, as two pieces rather than one truncated string: the
+			// directory is long and generic, the file name is what the reader
+			// is looking for, and neither may be cut off. The `/alice/files/`
+			// prefix is noise inside the user's own settings, so it is dropped.
+			const marker = '/files/'
+			const raw = typeof path === 'string' ? path : ''
+			const i = raw.indexOf(marker)
+			const shown = i === -1 ? raw : raw.slice(i + marker.length)
+			const cut = shown.lastIndexOf('/')
+			if (cut === -1) {
+				return { dir: '', name: shown }
+			}
+			return { dir: shown.slice(0, cut + 1), name: shown.slice(cut + 1) }
 		},
 		shortPath(path) {
 			// The panel lives inside the user's own settings, so the
@@ -458,7 +471,7 @@ export default {
 				} else if (refused > 0) {
 					this.mineMessage = this.t('{retried} queued again, {refused} left alone.', { retried, refused })
 				} else {
-					this.mineMessage = this.t('Queued again — the next OCR run picks it up.')
+					this.mineMessage = this.t('Queued for another attempt.')
 				}
 				await this.loadMine()
 			} catch (e) {
@@ -810,11 +823,20 @@ export default {
 	font-variant-numeric: tabular-nums;
 }
 
-.ocrflow-panel__mine-path {
-	overflow: hidden;
+.ocrflow-panel__mine-dir,
+.ocrflow-panel__mine-name {
+	/* Both wrap instead of ellipsizing: the point of the row is that the
+	   reader can read the whole location and the whole file name. */
+	overflow-wrap: anywhere;
+}
+
+.ocrflow-panel__mine-dir {
+	color: var(--color-text-maxcontrast);
+	font-size: var(--font-size-small, 13px);
+}
+
+.ocrflow-panel__mine-name {
 	font-weight: bold;
-	text-overflow: ellipsis;
-	white-space: nowrap;
 }
 
 .ocrflow-panel__mine-fix {

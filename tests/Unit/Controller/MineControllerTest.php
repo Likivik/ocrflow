@@ -147,7 +147,7 @@ class MineControllerTest extends TestCase
 		$alice = new Job();
 		$alice->setId(1);
 		$alice->setPath('/alice/files/a.pdf');
-		$alice->setReasonCode('error_file_broken');
+		$alice->setReasonCode('error_provider_timed_out');
 		$alice->setFileId(1);
 
 		$queue = $this->createMock(Queue::class);
