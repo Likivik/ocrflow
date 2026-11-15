@@ -65,6 +65,8 @@ def _classify_by_text(exc: BaseException) -> str:
     text = str(exc).lower()
     if "empty file" in text or "streamed an empty" in text:
         return "empty_stream"
+    if name == "ImageTooLarge" or "too large to analyse" in text:
+        return "image_too_large"
     if "no such job" in text or "no longer exists" in text:
         return "app_4xx"
     if "credentials" in text or "defaultcredentials" in name.lower():

@@ -10,6 +10,7 @@ API:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +49,17 @@ def _get_session():
     return _MOBILENET_SESSION
 
 
+class ImageTooLarge(RuntimeError):
+    """The image is bigger than the decoder will open at all.
+
+    Pillow refuses anything above its decompression-bomb ceiling
+    (2 x Image.MAX_IMAGE_PIXELS, 178,956,970 px by default) at ``open()``
+    time. That is a property of the FILE, not of the model, and it used to
+    be reported as ``ClassifierUnavailable`` — which told the operator to
+    fix a model that was working.
+    """
+
+
 class ClassifierUnavailable(RuntimeError):
     """The image classifier cannot run (model missing, ONNX broken, …).
 
@@ -73,10 +85,18 @@ def classify(image_path: str | Path) -> ClassifyResult:
         import numpy as np
         from PIL import Image
 
-        img = (
-            Image.open(path)
-            .convert("RGB")
-            .resize((_MOBILENET_SIZE, _MOBILENET_SIZE), Image.Resampling.BILINEAR)
+        # Draft before load: for JPEG the decoder then produces a 1/2, 1/4 or
+        # 1/8 image directly, without ever materialising the full bitmap. The
+        # classifier wants 224x224, so the full-size decode was waste — and for
+        # a 247 M px scan it was impossible: Pillow's decompression-bomb guard
+        # rejects the file at open(), the resize never runs, and a healthy photo
+        # was reported as a broken model.
+        raw = Image.open(path)
+        with contextlib.suppress(Exception):
+            # JPEG/TIFF only; other formats ignore the request.
+            raw.draft("RGB", (_MOBILENET_SIZE, _MOBILENET_SIZE))
+        img = raw.convert("RGB").resize(
+            (_MOBILENET_SIZE, _MOBILENET_SIZE), Image.Resampling.BILINEAR
         )
         arr = np.asarray(img, dtype=np.float32) / 255.0
         arr = (arr - _MOBILENET_MEAN) / _MOBILENET_STD
@@ -88,6 +108,12 @@ def classify(image_path: str | Path) -> ClassifyResult:
         return ClassifyResult(is_document=is_doc, reason="mobilenet")
 
     except Exception as exc:
+        from PIL import Image
+
+        if isinstance(exc, Image.DecompressionBombError):
+            raise ImageTooLarge(
+                f"image too large to analyse ({type(exc).__name__}: {exc})"
+            ) from exc
         raise ClassifierUnavailable(
             f"image classifier unavailable ({type(exc).__name__}: {exc}); "
             "refusing to guess document-vs-photo. Fix the model "

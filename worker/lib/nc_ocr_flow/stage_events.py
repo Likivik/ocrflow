@@ -76,6 +76,8 @@ REASON_CODES: dict[str, str] = {
     "app_4xx": "error_worker_request_malformed",
     "app_5xx": "error_app_answered_5xx",
     "engine_timeout": "error_provider_timed_out",
+    # The decoder refused the file: too many pixels to open at all.
+    "image_too_large": "error_image_too_large",
     "worker_error": "error_worker_unclassified",
     "unknown": "error_worker_sent_unknown_code",
     "error_worker_job_reference_stale": "error_worker_job_reference_stale",
