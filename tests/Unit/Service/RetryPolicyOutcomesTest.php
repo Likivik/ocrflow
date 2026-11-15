@@ -102,14 +102,20 @@ class RetryPolicyOutcomesTest extends TestCase
 		);
 	}
 
-	public function testEveryEntryCarriesALabelAFixAndAnActor(): void
+	/**
+	 * One human sentence per code. The vocabulary used to carry a `label` and a
+	 * `fix` that said the same thing twice; the panel rendered both, so every
+	 * row read as three lines. Nothing may reintroduce the pair.
+	 */
+	public function testEveryEntryCarriesOneHumanSentenceAndAnActor(): void
 	{
 		foreach ($this->allCodes() as $code) {
 			$entry = $this->policy->entry($code);
 			$this->assertNotNull($entry, $code);
 			$this->assertSame($this->verdictOf($code), $entry['verdict'], $code . ' verdict');
-			$this->assertNotSame('', trim((string) $entry['label']), $code . ' needs a one-sentence label');
-			$this->assertNotSame('', trim((string) $entry['fix']), $code . ' needs a fix hint');
+			$this->assertNotSame('', trim((string) $entry['text']), $code . ' needs one human sentence');
+			$this->assertArrayNotHasKey('label', $entry, $code . ' must not carry a second sentence under `label`');
+			$this->assertArrayNotHasKey('fix', $entry, $code . ' must not carry a second sentence under `fix`');
 			$this->assertNotSame('', trim((string) $entry['actor']), $code . ' needs an actor');
 			$this->assertContains($entry['verdict'], [
 				'work', 'nothing_to_do', 'redo', 'wait', 'needs_fix', 'drop',
@@ -305,11 +311,11 @@ class RetryPolicyOutcomesTest extends TestCase
 
 		$this->assertNotNull($entry);
 		$this->assertSame('needs_fix', $entry['verdict']);
-		$this->assertNotSame('', trim($entry['label']), 'one sentence a human can read');
+		$this->assertNotSame('', trim($entry['text']), 'one sentence a human can read');
 		// The hint diagnoses; the way out is a button now. What it must still
 		// name is the repeat the loop breaker stopped, or the operator has no
 		// way to tell this row from an ordinary failure.
-		$this->assertStringContainsStringIgnoringCase('second time', $entry['fix'], 'the hint names the repeat');
+		$this->assertStringContainsStringIgnoringCase('second time', $entry['text'], 'the sentence names the repeat');
 		$this->assertNotSame('', trim((string) $entry['actor']), 'an actor is expected to do it');
 	}
 }

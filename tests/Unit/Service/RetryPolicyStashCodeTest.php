@@ -43,9 +43,9 @@ class RetryPolicyStashCodeTest extends TestCase
 		$this->assertNotNull($entry);
 		$this->assertSame('redo', $entry['verdict']);
 		$this->assertSame('owner', $entry['actor']);
-		$this->assertSame(1, preg_match('/^[^.!?]+[.]$/', (string) $entry['label']),
+		$this->assertSame(1, preg_match('/^[^.!?]+[.]$/', (string) $entry['text']),
 			'the label is one sentence, for a worklist row');
-		$this->assertStringContainsStringIgnoringCase('source changed', (string) $entry['fix'],
+		$this->assertStringContainsStringIgnoringCase('source changed', (string) $entry['text'],
 			'the fix hint names the conflict the row is about; the Decide buttons own the action');
 	}
 

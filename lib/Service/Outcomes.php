@@ -244,7 +244,7 @@ class Outcomes
 		foreach ($this->retryPolicy->codesForVerdict($v) as $code) {
 			$entry = $this->retryPolicy->entry($code);
 			if ($entry !== null) {
-				$out[$code] = $entry['label'];
+				$out[$code] = $entry['text'];
 			}
 		}
 		return $out;
@@ -466,8 +466,7 @@ class Outcomes
 			'file_id' => (int) ($row['file_id'] ?? 0),
 			'path' => (string) ($row['path'] ?? ''),
 			'code' => $canonical === '' ? 'done' : $canonical,
-			'label' => $entry['label'] ?? 'done',
-			'fix' => $entry['fix'] ?? '',
+			'text' => $entry['text'] ?? 'done',
 			'error' => null,
 			'attempts' => null,
 			'finished_at' => ($row['updated_at'] ?? null) !== null ? (int) $row['updated_at'] : null,
@@ -496,8 +495,7 @@ class Outcomes
 			'file_id' => (int) ($stash['file_id'] ?? 0),
 			'path' => $path,
 			'code' => 'skip_source_changed_result_saved',
-			'label' => $entry['label'] ?? 'Stashed result',
-			'fix' => $entry['fix'] ?? 'Apply or discard the stashed result',
+			'text' => $entry['text'] ?? 'A result was set aside instead of overwriting a changed file.',
 			'error' => null,
 			'attempts' => null,
 			'finished_at' => ($stash['created_at'] ?? null) !== null ? (int) $stash['created_at'] : null,

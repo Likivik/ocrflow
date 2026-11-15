@@ -129,13 +129,12 @@
 						</label>
 						<span class="ocrflow-attention__path" :title="row.path">{{ row.path }}</span>
 						<span class="ocrflow-attention__code">
-							{{ row.label }}
+							{{ row.text }}
 							<span v-if="row.pending" class="ocrflow-attention__stash">{{ t('stashed result') }}</span>
 							<span v-else-if="row.done" class="ocrflow-attention__stash">{{ t('done by this app') }}</span>
 						</span>
 					</div>
 					<p class="ocrflow-attention__fix">
-						{{ row.fix }}
 						<span v-if="row.note" class="ocrflow-attention__engine">{{ row.note }}</span>
 						<span v-if="row.engine" class="ocrflow-attention__engine">
 							{{ t('(OCR’d by {engine} {version})', { engine: row.engine, version: row.engine_version ?? t('version unknown') }) }}

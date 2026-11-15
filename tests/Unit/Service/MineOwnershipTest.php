@@ -77,10 +77,10 @@ class MineOwnershipTest extends TestCase
 			$row['error'],
 			'the worker\'s message must reach the panel, not be dropped on the way',
 		);
-		self::assertStringContainsString(
-			"worker's message is below",
-			(string) $row['fix'],
-			'a hint must not claim there is no message while the message is shown',
+		self::assertSame(
+			'OCR failed without saying why.',
+			(string) $row['text'],
+			'one human sentence, and the raw line carries the evidence',
 		);
 	}
 
