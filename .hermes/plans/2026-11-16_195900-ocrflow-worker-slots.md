@@ -74,15 +74,75 @@ The worker logs the value and what the host offers at startup (`slots=8, host: 4
 
 ---
 
-## Phase 2 — app-controlled slots (the UI knob)
+## Phase 1 — as built (merged #132, deployed 0.1.27)
 
-### Task 2.1: setting
-- `Settings` gains `worker_slots` (any positive integer — no cap), served in the existing settings payload; admin panel gets a number field with the memory note.
+The plan said threads with a global fitz lock. **That was wrong and the build went another way** — kept here so the next reader knows why:
 
-### Task 2.2: worker re-reads on idle
-- After an empty poll, the worker fetches the setting (the same authenticated client) and resizes the pool: start threads to grow, set a per-thread retire flag to shrink. Never kill a thread mid-job.
+- PyMuPDF's maintainers state threading is unsupported regardless of the GIL, and a lock around every fitz call means auditing seven modules forever with a segfault as the failure mode.
+- A slot is a **process** (fork): its own MuPDF context, HTTP session, Vision client, SQLite connections. No shared mutable state to reason about.
+- `NC_OCR_SLOTS` (default 2, no cap) via `services.ocrflow.slots`; `slots=1` keeps the old in-process loop, no fork.
+- `SlotSupervisor`: dead slot → exit 1 (systemd restarts); SIGTERM → request stop, join 20 s, then terminate.
+- Classifier `_MOBILENET_SESSION` lazy init locked, `prewarm()` at slot start.
+- 11 tests in `worker/tests/test_slots.py`.
 
-**Test:** `test_slots.py::test_pool_grows_and_shrinks_on_setting` — fake settings source returns 1, then 3, then 1; assert thread count follows without dropping work.
+**Defect found in Phase 1 review:** `start_vision_quota_sampler()` ran in the parent *before* the fork. Forking a process with a live thread is the classic way to inherit a held lock, and the parent did not need the sampler — each child starts its own. Fixed: sampler starts only on the serial path.
+
+---
+
+## Phase 2 — live resize, per-process identity
+
+### Task 2.1: identity `host:pid:nonce6`
+
+Today a slot is named `worker-1` and a restart reuses the name. The registry already keeps them apart (`WorkerRegistry::register()` always inserts, so every start gets a fresh row id, and claims key on the id) — but the panel and the log show two different lives under one label.
+
+Adopted format: **`poweredge:809912:3f9a1c`** — `socket.gethostname()`, `os.getpid()`, `secrets.token_hex(3)`.
+
+Why this shape, from the field's own conventions:
+
+- **Sidekiq** (`lib/sidekiq/component.rb:74`): `identity = "#{hostname}:#{Process.pid}:#{process_nonce}"` — pid is reusable, so a per-boot nonce disambiguates it.
+- **OpenTelemetry** `service.instance.id`: *"MUST be unique for each instance of the same service.namespace,service.name pair"* — identity is a field separate from the human-readable name, example value a UUID.
+- **No timestamp in the identity.** `started_at` is already a registry column; encoding clocks invites skew duplicates and tells you nothing the column doesn't.
+- **No UUID appended on top.** The nonce exists only to make the tuple unique; a UUID would make it redundant and add 36 unreadable characters to a UI column.
+
+Collision safety: a collision needs the same host *and* the same pid value reused *and* the same nonce — and even then it is harmless, because ids, not names, key the claims. 6 hex = 16.7 M per pid; the real risk is a confusing log line.
+
+- `slots.slot_identity(base, slot)` returns `f"{host}:{pid}:{nonce}"`; length guard ≤ 64 (the app's column).
+- Log line at start: `slot 2 starting as poweredge:809912:3f9a1c`.
+- A retiring slot's identity is never reused: every new slot generates a fresh nonce.
+
+**Tests:** two identities from two processes differ; identity contains this pid and host; ≤64 chars; a restart of the same slot yields a different identity.
+
+### Task 2.2: setting
+
+- `Settings` gains `worker_slots` (positive integer, no cap) in the existing settings payload; admin panel gets a number field with the memory note (~600 MB per slot).
+
+### Task 2.3: live resize without redoing work
+
+- The supervisor polls `worker_slots` while the pool is idle (same authenticated client), and resizes.
+- **Grow:** fork a new slot with a fresh identity. Immediate.
+- **Shrink:** set a retire flag on one slot; it finishes its current job, reports it, and exits — the stop check happens only *between* jobs, so **no claim is ever dropped and nothing is redone**.
+- Never `SIGKILL` a working slot; never resize mid-job.
+- A slot that dies without retiring is still reported as a dead slot (exit 1), unchanged.
+
+**Tests:** grow 1→3 spawns two distinct identities; shrink 3→1 leaves one alive *after* the in-flight job completes and is reported once; no job handled twice across a resize.
+
+### Task 2.4: per-batch control
+
+- `occ ocrflow:slots <n>` writes the setting (admin door, no OCS session), so a batch can run at 3 and return to 2 afterwards.
+- **Test:** the command writes the value and a second call restores it.
+
+### Non-goals (decided)
+
+- **Raising the shutdown budget** — rejected: it buys redo-free deploys only, and deploys are rare.
+- Lazy grow-on-queue-depth: parked; the number is the operator's.
+- Restart-free deploys.
+
+### Risks
+
+1. **Fork safety.** New slots are forked from a parent that must hold no threads and no open documents. The parent runs no jobs; the Phase 1 sampler defect showed how easily a thread creeps in — a test asserts the parent's thread count is 1 (`MainThread`) at fork time.
+2. **Identity churn.** Frequent resizes leave dead registry rows; pruning is heartbeat-driven and already exists, so this is bounded noise in the workers list.
+3. **Settings polling cost** is one authenticated GET per idle cycle — negligible against a 33 s job.
+
 
 ---
 

@@ -216,6 +216,16 @@ class SlotSupervisor:
         self.processes: list[Any] = []
 
     def start(self, target: Callable[..., None], **kwargs: Any) -> None:
+        # Fork safety: a thread that holds a lock at fork time leaves that lock
+        # held forever in the child. The parent must be single-threaded — the
+        # heartbeat and the quota sampler belong to the slots, not to it.
+        live = threading.active_count()
+        if live > 1:
+            log.warning(
+                "forking with %d live thread(s) in the parent: a lock held at "
+                "fork time would stay held in every child",
+                live - 1,
+            )
         for index in range(1, self.slots + 1):
             proc = self.ctx.Process(
                 target=target,
