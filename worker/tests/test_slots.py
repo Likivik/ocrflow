@@ -223,3 +223,33 @@ def test_supervisor_reports_a_dead_slot() -> None:
 
     assert code == 1
     assert supervisor.alive() == 0
+
+
+def test_supervisor_warns_when_forking_with_live_threads(caplog) -> None:
+    """A thread holding a lock at fork time leaves it held in every child.
+
+    The parent must be single-threaded: heartbeat and quota sampling belong to
+    the slots. This pins the warning so the trap cannot be reintroduced
+    silently — it is exactly how the Phase 1 sampler ended up in the parent.
+    """
+    import logging
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("fork")
+    supervisor = slots.SlotSupervisor(slots=1, ctx=ctx)
+    stop_sleeper = threading.Event()
+
+    def _sleeper() -> None:
+        stop_sleeper.wait(2)
+
+    thread = threading.Thread(target=_sleeper)
+    thread.start()
+    try:
+        with caplog.at_level(logging.WARNING):
+            supervisor.start(lambda index, stop: None)
+            supervisor.join()
+    finally:
+        stop_sleeper.set()
+        thread.join(3)
+
+    assert "forking with" in caplog.text

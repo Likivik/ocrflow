@@ -476,11 +476,11 @@ def main(argv: list[str] | None = None) -> int:
         verify_dav_credentials,
     )
 
-    # The claim gate needs fresh quota samples in this process (the scheduler
-    # the sampling loop belongs to does not run here). Starts a daemon thread
-    # only when quota gating applies: Vision credentials present and the
-    # engine can actually use them. No-ops otherwise, gate disabled.
-    start_vision_quota_sampler()
+    # The claim gate needs fresh quota samples in the process that reads it.
+    # On the serial path that is this one; with slots, every child samples for
+    # itself. This process must NOT start one: forking a parent that holds a
+    # live thread is how a child inherits a lock taken at fork time, and the
+    # parent never claims a job, so its samples would be wasted API calls.
 
     # Before claiming anything: a worker with no way to reach files would claim a
     # job, fail to fetch it, and blame the document. Refuse to start instead.
@@ -531,6 +531,7 @@ def main(argv: list[str] | None = None) -> int:
     if slot_count == 1:
         # One slot runs in this process: no fork, and a traceback in the log
         # still points at the process systemd started.
+        start_vision_quota_sampler()
         slots_mod.slot_loop(
             client,
             _process_file,
