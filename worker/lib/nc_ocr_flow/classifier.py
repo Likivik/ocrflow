@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +29,11 @@ _MOBILENET_MEAN = [0.485, 0.456, 0.406]
 _MOBILENET_STD = [0.229, 0.224, 0.225]
 
 _MOBILENET_SESSION = None
+# The lazy init above is a check-then-set. One job at a time never noticed;
+# a worker running several slots would race on the first files. The lock makes
+# the first build single, and `prewarm()` lets the worker pay it at startup
+# instead of inside a job.
+_MOBILENET_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -36,16 +42,26 @@ class ClassifyResult:
     reason: str  # "mobilenet" | "error:ClassName"
 
 
+def prewarm() -> None:
+    """Build the MobileNet session now, not inside the first job."""
+    _get_session()
+
+
 def _get_session():
     global _MOBILENET_SESSION
-    if _MOBILENET_SESSION is None:
-        import onnxruntime as ort
+    if _MOBILENET_SESSION is not None:
+        return _MOBILENET_SESSION
+    with _MOBILENET_LOCK:
+        if _MOBILENET_SESSION is None:
+            import onnxruntime as ort
 
-        model_path = env_str(
-            "NC_OCR_MOBILENET_MODEL",
-            "/etc/static/nc-ocr/mobilenet_v3_small_fp32.onnx",
-        )
-        _MOBILENET_SESSION = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+            model_path = env_str(
+                "NC_OCR_MOBILENET_MODEL",
+                "/etc/static/nc-ocr/mobilenet_v3_small_fp32.onnx",
+            )
+            _MOBILENET_SESSION = ort.InferenceSession(
+                model_path, providers=["CPUExecutionProvider"]
+            )
     return _MOBILENET_SESSION
 
 

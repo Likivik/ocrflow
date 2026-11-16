@@ -18,17 +18,23 @@ import os
 import signal
 import sys
 import threading
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from . import quota_gate
+from . import slots as slots_mod
 from .config import env_float, env_int, env_str
 from .queue_client import ClaimStale, Job, QueueClient
 from .quota_gate import QuotaGate
 from .readiness import report_configured_engine
 from .stage_events import StageCollector, collector_scope, reason_code_for, verdict_code
+
+# The slot supervisor, when this process is supervising forked slots. Kept
+# module-level so the SIGTERM handler can ask the children to stop before the
+# process exits; otherwise the signal kills the parent and the children are
+# left to the cgroup, mid-job, holding claims nobody asked to release.
+_SUPERVISOR: Any = None
 
 
 # What the worker can tell the app about a failure. Deliberately small: every
@@ -360,6 +366,12 @@ def _graceful_shutdown(signum: int, *, stop=None, requeue=None) -> None:
     tested without a live scheduler: a test that has to patch module globals
     behind a running thread pool is testing the patch, not the shutdown.
     """
+    supervisor = _SUPERVISOR
+    if supervisor is not None:
+        # First, before anything else waits: the children stop claiming, so
+        # the queue does not grow a new in-flight job while we shut down.
+        log.info("signal %s: asking %d slot(s) to stop", signum, len(supervisor.processes))
+        supervisor.request_stop()
     log.info("signal %s: stopping the scheduler", signum)
     try:
         (stop or _default_stop())()
@@ -417,17 +429,23 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     idle = env_float("NC_OCR_IDLE_SECONDS", DEFAULT_IDLE_SECONDS)
-    client = QueueClient(
-        base_url=base_url,
-        secret=secret,
-        worker_name=env_str("NC_OCR_WORKER_NAME", "worker"),
-    )
+    worker_name = env_str("NC_OCR_WORKER_NAME", "worker")
+    heartbeat = env_int("NC_OCR_HEARTBEAT_SECONDS", 60)
+    slot_count = slots_mod.slots_from_env()
+
+    client = QueueClient(base_url=base_url, secret=secret, worker_name=worker_name)
 
     # Register with the app's worker registry and keep the heartbeat going:
     # it is the evidence stale-claim recovery reads. Without it a claim of
     # ours would be requeued as soon as its holder looked unknown — which
     # is every claim, for a worker the registry has never heard of.
-    start_heartbeat(client, env_int("NC_OCR_HEARTBEAT_SECONDS", 60))
+    #
+    # Only the serial deployment registers here. With slots, each child
+    # registers as `worker-N` and beats for itself: one shared row would be
+    # kept fresh by a healthy sibling and would hide a dead slot's claims
+    # from the stale-claim reconciler forever.
+    if slot_count == 1:
+        start_heartbeat(client, heartbeat)
 
     # Probe surface. Off unless NC_OCR_HEALTH_PORT is set, so native deployments
     # keep their current behaviour. Started before the checks below: a container
@@ -491,23 +509,66 @@ def main(argv: list[str] | None = None) -> int:
             log.error("%s", exc)
             return 2
 
-    log.info("worker started: %s, idle %ss", base_url, idle)
-    while True:
-        try:
-            # A blocked quota gate must not fall through to the idle sleep:
-            # the bounded gate sleep IS the wait, so a recovered quota is
-            # picked up within at most MAX_SLEEP_S, not idle + latency.
-            verdict = quota_gate.GATE.check()
-            if verdict.blocked:
-                time.sleep(quota_gate.GATE.sleep_seconds())
-                continue
-            handled = run_once(client, _process_file, gate=quota_gate.GATE)
-        except Exception as exc:
-            log.error("worker loop error: %s", exc)
-            time.sleep(min(idle * 4, 60))
-            continue
-        if not handled:
-            time.sleep(idle)
+    # The slot number is an instruction, not a suggestion: nothing clamps it.
+    # What the host can actually hold is logged next to it so a wrong number
+    # is one visible line instead of a mystery OOM kill.
+    log.info(
+        "worker started: %s, idle %ss, slots=%d (host: %s cores, %s available)",
+        base_url,
+        idle,
+        slot_count,
+        os.cpu_count() or 0,
+        _available_memory(),
+    )
+    if slot_count > 1:
+        log.info(
+            "slots forked as %s-1..%s-%d; each is its own registry row",
+            worker_name,
+            worker_name,
+            slot_count,
+        )
+
+    if slot_count == 1:
+        # One slot runs in this process: no fork, and a traceback in the log
+        # still points at the process systemd started.
+        slots_mod.slot_loop(
+            client,
+            _process_file,
+            idle=idle,
+            stop=threading.Event(),  # never set; SIGTERM exits instead
+            gate=quota_gate.GATE,
+        )
+        return 0
+
+    global _SUPERVISOR
+    supervisor = slots_mod.SlotSupervisor(slots=slot_count)
+    _SUPERVISOR = supervisor
+    supervisor.start(
+        slots_mod.slot_main,
+        base_url=base_url,
+        secret=secret,
+        worker_name=worker_name,
+        idle=idle,
+        heartbeat=heartbeat,
+    )
+    try:
+        return supervisor.wait()
+    except SystemExit:
+        # The signal handler asked for a clean exit; the supervisor's join
+        # has run in `wait`'s finally, so the children are already stopped.
+        return 0
+
+
+def _available_memory() -> str:
+    """MemAvailable from /proc/meminfo, or '?' where there is no /proc."""
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return f"{int(line.split()[1]) // 1024} MB"
+    except OSError:
+        pass
+    return "?"
 
 
 if __name__ == "__main__":
