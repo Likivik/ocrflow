@@ -674,6 +674,31 @@ class Queue extends QBMapper
 	}
 
 	/**
+	 * Ids of terminal rows whose reason code is $code, oldest first.
+	 *
+	 * The bulk door of `forceRequeue()`: an operator selects a population
+	 * ("everything skipped as a foreign text layer"), not a list of ids they
+	 * would have to build by hand.
+	 *
+	 * @return int[]
+	 * @throws Exception
+	 */
+	public function idsWithReasonCode(string $code, int $limit): array
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('id')->from(self::JOBS)
+			->where($qb->expr()->eq('reason_code', $qb->createNamedParameter($code)))
+			->andWhere($qb->expr()->in('status', $qb->createNamedParameter(
+				[self::STATUS_DONE, self::STATUS_SKIPPED, self::STATUS_ERROR],
+				IQueryBuilder::PARAM_STR_ARRAY,
+			)))
+			->orderBy('id', 'ASC')
+			->setMaxResults($limit);
+		$rows = $qb->executeQuery()->fetchAll();
+		return array_map(static fn (array $row): int => (int) $row['id'], $rows);
+	}
+
+	/**
 	 * Put terminal rows back in the queue with the operator's force bit set.
 	 *
 	 * The worker has always honoured `force` (it returns before every skip
