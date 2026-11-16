@@ -929,10 +929,27 @@ def _image_to_pdf(image_path: Path) -> Path:
     regardless — so a legal tag is honoured and an illegal one is ignored.
     """
     import img2pdf
+    from PIL import Image
 
-    target = image_path.with_suffix(".pdf")
-    with target.open("wb") as f:
-        f.write(img2pdf.convert(str(image_path), rotation=img2pdf.Rotation.ifvalid))
+    # img2pdf reads the image header through Pillow, so the decompression-bomb
+    # guard fires here too — at a 247 M px scan it fired *after* the classifier
+    # had already handled the same file, and the job died as a raw
+    # DecompressionBombError the app had no code for (`unknown`). The guard is
+    # lifted for this call only: img2pdf embeds the JPEG stream as-is, it never
+    # decodes the pixels, so nothing large is materialised. Our own ceiling
+    # (>400 M px) is decided in classify(), before this runs.
+    previous = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = None
+    try:
+        target = image_path.with_suffix(".pdf")
+        with target.open("wb") as f:
+            f.write(img2pdf.convert(str(image_path), rotation=img2pdf.Rotation.ifvalid))
+    except Image.DecompressionBombError as exc:
+        # Nothing weaker than the decoder's own refusal: report it as the file
+        # being too large, which is what it is.
+        raise ImageTooLarge(f"{image_path.name}: {exc}") from exc
+    finally:
+        Image.MAX_IMAGE_PIXELS = previous
     return target
 
 

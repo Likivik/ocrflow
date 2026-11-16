@@ -11,6 +11,7 @@ use OCA\OcrFlow\BackgroundJob\ScanJob;
 use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\EnginePolicy;
+use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\NoAdminRequired;
 use OCP\AppFramework\Http\DataResponse;
@@ -38,6 +39,7 @@ class StatusController extends OCSController
 		private IUserSession $userSession,
 		private AccessGate $access,
 		private EnginePolicy $engine,
+		private ?RetryPolicy $retryPolicy = null,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -47,11 +49,37 @@ class StatusController extends OCSController
 	{
 		return new DataResponse([
 			'queue' => $this->queue->counts(),
+			// "Skipped" is six decisions, not one: a photo, a born-digital
+			// PDF, our own stamp, a foreign tesseract layer, an unsupported
+			// type. Split by the code the worker already records, with the
+			// sentence the app already writes for that code.
+			'skip_reasons' => $this->skipReasons(),
 			// Whether the instance will do OCR at all. The sidebar can say
 			// "not configured" instead of offering a button that queues nothing.
 			'engine' => $this->engine->current(),
 			'engine_configured' => $this->engine->isConfigured(),
 		]);
+	}
+
+	/**
+	 * @return list<array{code: string, label: string, count: int}>
+	 */
+	private function skipReasons(): array
+	{
+		$policy = $this->retryPolicy ?? new RetryPolicy();
+		$out = [];
+		foreach ($this->queue->skippedByReason() as $code => $count) {
+			// `entry()` answers a sentence even for a code it has never
+			// heard of — the "unknown code" one, which is about the worker,
+			// not about this skip. An unknown skip reason shows itself.
+			$entry = $policy->isKnown($code) ? $policy->entry($code) : null;
+			$out[] = [
+				'code' => $code,
+				'label' => $entry['text'] ?? $code,
+				'count' => $count,
+			];
+		}
+		return $out;
 	}
 
 	#[NoAdminRequired]

@@ -38,4 +38,10 @@ def test_empty_stream_text_still_wins_without_status():
 
 
 def test_file_gone_is_not_a_transport_retry():
-    assert classify_failure(FileGone("job 7: no longer exists")) in ("app_4xx", "unknown")
+    """A file that is gone is not retried — and no longer borrows `app_4xx`.
+
+    It read as `error_worker_request_malformed` ("the app refused the request
+    as malformed") for a file the owner had deleted. The intent of this test
+    never changed: no retry. It now says so with its own word.
+    """
+    assert classify_failure(FileGone("job 7: no longer exists")) == "file_gone"

@@ -138,10 +138,22 @@
 			{{ t('Queue') }}
 		</h3>
 		<ul v-if="rows.length" class="ocrflow-panel__counts">
-			<li v-for="row in rows" :key="row.status" :class="{ 'is-error': row.status === 'error' }">
-				<span class="ocrflow-panel__status">{{ row.status }}</span>
-				<span class="ocrflow-panel__count">{{ row.count }}</span>
-			</li>
+			<template v-for="row in rows" :key="row.status">
+				<li :class="{ 'is-error': row.status === 'error' }">
+					<span class="ocrflow-panel__status">{{ row.status }}</span>
+					<span class="ocrflow-panel__count">{{ row.count }}</span>
+				</li>
+				<!-- Skipped is six decisions, not one: the reasons are the answer
+				     the reader actually wants, so they sit under the total. -->
+				<li
+					v-for="reason in row.reasons"
+					:key="row.status + '-' + reason.code"
+					class="ocrflow-panel__counts-reason"
+					:title="reason.code">
+					<span class="ocrflow-panel__status">{{ t(reason.label) }}</span>
+					<span class="ocrflow-panel__count">{{ reason.count }}</span>
+				</li>
+			</template>
 		</ul>
 		<p v-else class="ocrflow-panel__empty">
 			{{ t('Nothing has been queued yet.') }}
@@ -219,6 +231,7 @@ export default {
 	data() {
 		return {
 			counts: {},
+			skipReasons: [],
 			folder: '',
 			busy: false,
 			error: '',
@@ -252,7 +265,14 @@ export default {
 		// Whatever the queue reports, rendered as-is: hardcoding the status list
 		// here would silently drop a new state ("claimed" was added that way).
 		rows() {
-			return Object.entries(this.counts ?? {}).map(([status, count]) => ({ status, count }))
+			const reasons = this.skipReasons ?? []
+			return Object.entries(this.counts ?? {}).map(([status, count]) => ({
+				status,
+				count,
+				// Only the skipped total has a breakdown: done and error are what
+				// they say, and a second dimension there would be a second screen.
+				reasons: status === 'skipped' ? reasons : [],
+			}))
 		},
 		filterChips() {
 			return BUCKETS.map((bucket) => ({
@@ -665,6 +685,15 @@ export default {
 .ocrflow-panel__count {
 	font-variant-numeric: tabular-nums;
 	font-weight: bold;
+}
+
+/* A reason under the Skipped total: indented, quieter, no bottom rule of its
+   own — it belongs to the row above it, not beside it. */
+.ocrflow-panel__counts-reason {
+	padding-inline-start: calc(var(--default-grid-baseline, 4px) * 4);
+	border-bottom: 0 !important;
+	font-size: 0.9em;
+	color: var(--color-text-maxcontrast);
 }
 
 /* The one state that needs colour: failures. Nextcloud's status tokens carry

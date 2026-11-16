@@ -54,6 +54,7 @@ class RetryPolicyOutcomesTest extends TestCase
 			'error_provider_credentials_missing',
 			'error_worker_request_malformed',
 			'error_worker_unclassified',
+			'error_classifier_unavailable',
 			'error_worker_sent_unknown_code',
 			'error_source_file_zero_bytes',
 			'error_result_write_failed',
@@ -61,7 +62,7 @@ class RetryPolicyOutcomesTest extends TestCase
 			'error_file_broken',
 			'error_queued_twice_for_same_bytes',
 		],
-		'drop' => ['error_worker_job_reference_stale'],
+		'drop' => ['error_worker_job_reference_stale', 'error_worker_file_gone'],
 	];
 
 	protected function setUp(): void
@@ -206,6 +207,8 @@ class RetryPolicyOutcomesTest extends TestCase
 			'save_refused' => 'error_result_write_failed',
 			'parse_produced_nothing' => 'error_engine_output_unreadable',
 			'empty_stream' => 'error_worker_got_empty_file',
+			'file_gone' => 'error_worker_file_gone',
+			'classifier_unavailable' => 'error_classifier_unavailable',
 			'credentials_missing' => 'error_provider_credentials_missing',
 			'app_4xx' => 'error_worker_request_malformed',
 			'app_5xx' => 'error_app_answered_5xx',
