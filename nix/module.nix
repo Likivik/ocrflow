@@ -30,6 +30,7 @@ let
     export NC_OCR_URL=${lib.escapeShellArg cfg.url}
     export NC_OCR_WORKER_NAME=${lib.escapeShellArg cfg.workerName}
     export NC_OCR_IDLE_SECONDS=${toString cfg.idleSeconds}
+    export NC_OCR_SLOTS=${toString cfg.slots}
     ${lib.optionalString (cfg.engine != null) "export NC_OCR_ENGINE=${lib.escapeShellArg cfg.engine}"}
     # Without a DAV identity the worker exits 2 at start-up (deliberate: the
     # invented "likivik" default was removed). The username had no source at all —
@@ -60,6 +61,22 @@ in
       type = lib.types.ints.positive;
       default = 5;
       description = "Sleep between claims when the queue is empty.";
+    };
+
+    slots = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 2;
+      description = ''
+        Concurrent OCR jobs, one forked process each. Nothing clamps this: the
+        value is the instruction. Each slot holds ~600 MB of peak RSS on a
+        scanned document (190 MB of interpreter, libraries and ONNX models,
+        plus the PyMuPDF arena for the largest document it has seen), so a
+        host with 4 GB free carries 2 comfortably and 3 tightly. Processes,
+        not threads, because PyMuPDF does not support threading — MuPDF keeps
+        one global context and a crash is the failure mode, not an exception.
+        Each slot registers as <workerName>-N with its own heartbeat, so a
+        dead slot's claim goes back on the queue.
+      '';
     };
 
     engine = lib.mkOption {
