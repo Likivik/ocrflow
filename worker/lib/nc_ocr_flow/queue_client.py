@@ -184,6 +184,36 @@ class QueueClient:
         self.worker_id = int(payload["id"])
         return self.worker_id
 
+    def slots(self) -> int | None:
+        """How many slots the app wants, or ``None`` when it cannot say.
+
+        Worker plane, read between jobs. A missing answer is not an error: an
+        app older than this build has no such route, and a worker that cannot
+        read the number keeps the pool it started with rather than dying.
+        """
+        try:
+            response = self.session.get(
+                f"{self.base_url}{API_PATH}/worker/slots",
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+        except requests.RequestException:
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            payload = self._data(response)
+        except Exception:
+            return None
+        raw = payload.get("slots")
+        if raw is None:
+            return None
+        try:
+            slots = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return slots if slots >= 1 else None
+
     def heartbeat(self) -> bool:
         """One beat: `last_seen_at` = now on our registry row.
 

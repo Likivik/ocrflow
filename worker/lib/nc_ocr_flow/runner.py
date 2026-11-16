@@ -542,7 +542,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     global _SUPERVISOR
-    supervisor = slots_mod.SlotSupervisor(slots=slot_count)
+    # The pool follows the app's `worker_slots` setting from here on: the
+    # supervisor re-reads it while idle and resizes. Growth forks immediately;
+    # shrinkage retires a slot after its current job, so nothing is redone.
+    supervisor = slots_mod.SlotSupervisor(slots=slot_count, target_source=client.slots)
     _SUPERVISOR = supervisor
     supervisor.start(
         slots_mod.slot_main,

@@ -11,6 +11,7 @@ use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\SettingsController;
 use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\EnginePolicy;
+use OCA\OcrFlow\Service\SlotsPolicy;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\OCS\OCSForbiddenException;
 use OCP\IConfig;
@@ -72,6 +73,7 @@ class SettingsControllerTest extends TestCase
             $groupManager,
             new EnginePolicy($config),
             new AccessGate($config, $groupManager),
+            new SlotsPolicy($config),
         );
     }
 
@@ -158,6 +160,7 @@ class SettingsControllerTest extends TestCase
             $groupManager,
             new EnginePolicy($config),
             new AccessGate($config, $groupManager),
+            new SlotsPolicy($config),
         );
 
         $response = $controller->update();
@@ -189,6 +192,7 @@ class SettingsControllerTest extends TestCase
             $groupManager,
             new EnginePolicy($config),
             new AccessGate($config, $groupManager),
+            new SlotsPolicy($config),
         );
 
         $controller->update();

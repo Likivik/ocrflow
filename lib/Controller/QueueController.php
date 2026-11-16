@@ -32,6 +32,7 @@ use Psr\Log\LoggerInterface;
  * user can read, which is more than it needs.
  */
 use OCA\OcrFlow\Service\RetryPolicy;
+use OCA\OcrFlow\Service\SlotsPolicy;
 
 class QueueController extends OCSController
 {
@@ -45,6 +46,9 @@ class QueueController extends OCSController
 		private RetryPolicy $retryPolicy,
 		private WorkerRegistry $workers,
 		private ?PendingResults $pendingResults = null,
+		// Optional so every existing caller (and every existing test) keeps
+		// working: the policy is derivable from the config we already hold.
+		private ?SlotsPolicy $slots = null,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -482,6 +486,24 @@ class QueueController extends OCSController
 	}
 
 	/**
+	 * How many slots the worker may run right now.
+	 *
+	 * The worker asks between jobs and resizes its pool. Worker plane, not
+	 * admin plane: the process that needs the number is the one that cannot
+	 * hold a session, and the number itself is not a secret — it is the
+	 * operator's instruction, written by `occ ocrflow:slots` or the settings
+	 * page and read here by the only caller that acts on it.
+	 */
+	#[PublicPage]
+	public function workerSlots(): DataResponse
+	{
+		if (($denied = $this->denyIfNotWorker()) !== null) {
+			return $denied;
+		}
+		return new DataResponse(['slots' => $this->slotsPolicy()->current()]);
+	}
+
+	/**
 	 * The registry row id, when this caller registered. Optional on `claim`:
 	 * a claim without one is recovered by the first reconcile tick (its
 	 * holder is unknown, therefore presumed dead).
@@ -873,6 +895,11 @@ class QueueController extends OCSController
 			return new DataResponse(['message' => 'unauthorized'], Http::STATUS_UNAUTHORIZED);
 		}
 		return null;
+	}
+
+	private function slotsPolicy(): SlotsPolicy
+	{
+		return $this->slots ?? new SlotsPolicy($this->config);
 	}
 
 	private function nullableString(string $key): ?string
