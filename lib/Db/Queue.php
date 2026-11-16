@@ -674,6 +674,55 @@ class Queue extends QBMapper
 	}
 
 	/**
+	 * Put terminal rows back in the queue with the operator's force bit set.
+	 *
+	 * The worker has always honoured `force` (it returns before every skip
+	 * decision); this is the missing other half — a way for the app to SET it.
+	 * Without this, a row that was skipped as `skip_text_native`,
+	 * `skip_ocred_by_suspected_foreign` or `skip_ocred_by_ocrflow` offered no
+	 * action anywhere in the UI, and the only escape was editing the table.
+	 *
+	 * The row is reused, never re-inserted: `UNIQUE (file_id, etag)` means one
+	 * row per file version, and re-queueing that row is exactly what "rescan
+	 * these bytes" means. Only terminal states are touched — a queued or
+	 * claimed row is somebody else's work in flight.
+	 *
+	 * @param int[] $ids
+	 * @return array{requeued: int[], refused: int[]}
+	 * @throws Exception
+	 */
+	public function forceRequeue(array $ids): array
+	{
+		$requeued = [];
+		$refused = [];
+		foreach ($ids as $id) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->update(self::JOBS)
+				->set('status', $qb->createNamedParameter(self::STATUS_QUEUED))
+				->set('force', $qb->createNamedParameter(1, IQueryBuilder::PARAM_INT))
+				->set('attempts', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT))
+				->set('error', $qb->createNamedParameter(null))
+				->set('reason', $qb->createNamedParameter(null))
+				->set('reason_code', $qb->createNamedParameter(null))
+				->set('retryable', $qb->createNamedParameter(null))
+				->set('finished_at', $qb->createNamedParameter(null))
+				->set('claimed_at', $qb->createNamedParameter(null))
+				->set('claim_token', $qb->createNamedParameter(null))
+				->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
+				->andWhere($qb->expr()->in('status', $qb->createNamedParameter(
+					[self::STATUS_DONE, self::STATUS_SKIPPED, self::STATUS_ERROR],
+					IQueryBuilder::PARAM_STR_ARRAY,
+				)));
+			if ($qb->executeStatement() === 1) {
+				$requeued[] = $id;
+			} else {
+				$refused[] = $id;
+			}
+		}
+		return ['requeued' => $requeued, 'refused' => $refused];
+	}
+
+	/**
 	 * Oldest queued job, now owned by $worker. Null when the queue is empty.
 	 *
 	 * @throws Exception
@@ -760,6 +809,10 @@ class Queue extends QBMapper
 			->set('finished_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
 			->set('claim_token', $qb->createNamedParameter(null))
 			->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
+			// The operator's one-off decision ends with the job it was taken
+			// for: a force bit left on the row would make the NEXT ordinary
+			// scan of this file bypass the skip bar too, which nobody asked for.
+			->set('force', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT))
 			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
 			// Only the worker holding the claim may finish it, and the claim
 			// is the token minted at claim time. A stale claim is requeued

@@ -197,6 +197,10 @@ def run_once(
                 engine=job.engine,
                 job_id=job.id,
                 claim_token=job.claim_token,
+                # The app's "rescan anyway" rides the claim. Without passing
+                # it on, a forced job would be skipped again by the exact
+                # decision the operator was overriding.
+                force=job.force,
             )
     except ClaimStale as exc:
         # 409: this claim is no longer ours — requeued or finished elsewhere

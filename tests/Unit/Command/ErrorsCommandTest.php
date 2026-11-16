@@ -60,7 +60,7 @@ class ErrorsCommandTest extends TestCase
 		$request->method('getParam')->willReturnCallback(
 			static fn (string $key, mixed $default = null): mixed => $key === 'limit' ? 200 : $default,
 		);
-		$controller = new AttentionController('ocrflow', $request, $attention, $session, $groups, new RetryPolicy());
+		$controller = new AttentionController('ocrflow', $request, $attention, $session, $groups, new RetryPolicy(), $this->createMock(Queue::class));
 		$endpointIds = array_column($controller->index()->getData()['rows'], 'id');
 
 		// The terminal door, over the SAME service instance.
@@ -99,7 +99,7 @@ class ErrorsCommandTest extends TestCase
 		$request->method('getParam')->willReturnCallback(
 			static fn (string $key, mixed $default = null): mixed => $key === 'limit' ? 200 : $default,
 		);
-		$controller = new AttentionController('ocrflow', $request, $attention, $session, $groups, new RetryPolicy());
+		$controller = new AttentionController('ocrflow', $request, $attention, $session, $groups, new RetryPolicy(), $this->createMock(Queue::class));
 		$endpointIds = array_column($controller->index()->getData()['rows'], 'id');
 
 		$tester = new CommandTester(new Errors($attention));
