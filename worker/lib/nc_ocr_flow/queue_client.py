@@ -109,6 +109,11 @@ class Job:
     # persistent state, because the token's whole point is that a restarted
     # worker must NOT be able to keep a claim it cannot finish.
     claim_token: str | None = None
+    # The operator's "rescan anyway" bit. Set by the app when a settled row is
+    # put back in the queue on purpose: the worker then returns before every
+    # skip decision (born-digital, stamped by us, foreign text layer) and OCRs
+    # the file regardless. False for every ordinary scan.
+    force: bool = False
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> Job:
@@ -126,6 +131,7 @@ class Job:
                 attempts=int(data.get("attempts") or 0),
                 engine=None if data.get("engine") is None else str(data["engine"]),
                 claim_token=None if data.get("claim_token") is None else str(data["claim_token"]),
+                force=bool(data.get("force") or False),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise QueueProtocolError(f"claim returned a job we cannot read: {data!r}") from exc

@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Controller;
 
+use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\Attention;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\AppFramework\Http;
@@ -30,6 +31,12 @@ class AttentionController extends OCSController
 {
 	private const MAX_LIMIT = 200;
 
+	/**
+	 * One rescan call may queue this many rows. Each row costs one engine run
+	 * per page, so a fat-fingered "select all" must not start thousands.
+	 */
+	private const MAX_RESCAN = 500;
+
 	public function __construct(
 		string $appName,
 		IRequest $request,
@@ -37,6 +44,7 @@ class AttentionController extends OCSController
 		private IUserSession $userSession,
 		private IGroupManager $groupManager,
 		private RetryPolicy $retryPolicy,
+		private Queue $queue,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -99,6 +107,56 @@ class AttentionController extends OCSController
 		// holds, so a double click or a replay does no second work.
 		$retried = $this->attention->retryById((int) $id);
 		return new DataResponse(['retried' => $retried ? 1 : 0, 'id' => (int) $id]);
+	}
+
+	/**
+	 * Rescan anyway: re-queue rows the pipeline decided about, with the
+	 * operator's force bit set.
+	 *
+	 * The worker honours `force` by returning before every skip decision —
+	 * born-digital, stamped by us, someone else's OCR layer — so this is the
+	 * only way to redo a file the classifier settled months ago. It spends
+	 * engine money per page, hence admin-only, CSRF-checked, and capped.
+	 *
+	 * @throws OCSForbiddenException
+	 */
+	public function rescan(): DataResponse
+	{
+		$this->requireAdmin();
+
+		if (!$this->request->passesCSRFCheck()) {
+			return new DataResponse(['message' => 'CSRF check failed'], Http::STATUS_PRECONDITION_FAILED);
+		}
+
+		$ids = $this->request->getParam('ids');
+		if (!is_array($ids)) {
+			$one = $this->request->getParam('id');
+			$ids = $one === null || $one === '' ? [] : [$one];
+		}
+
+		$clean = [];
+		foreach ($ids as $value) {
+			if (is_int($value) || (is_string($value) && ctype_digit($value))) {
+				$clean[] = (int) $value;
+			}
+		}
+		$clean = array_values(array_unique($clean));
+		if ($clean === []) {
+			return new DataResponse(['message' => 'id or ids is required'], Http::STATUS_BAD_REQUEST);
+		}
+		if (count($clean) > self::MAX_RESCAN) {
+			return new DataResponse(
+				['message' => 'too many ids in one call', 'max' => self::MAX_RESCAN],
+				Http::STATUS_BAD_REQUEST,
+			);
+		}
+
+		$result = $this->queue->forceRequeue($clean);
+		return new DataResponse([
+			'requeued' => count($result['requeued']),
+			'refused' => count($result['refused']),
+			'refused_ids' => $result['refused'],
+		]);
 	}
 
 	/**

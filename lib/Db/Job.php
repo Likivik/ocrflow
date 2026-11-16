@@ -37,6 +37,7 @@ use OCP\AppFramework\Db\Entity;
  * @method int getCreatedAt()
  * @method ?int getClaimedAt()
  * @method ?int getFinishedAt()
+ * @method bool getForce()
  */
 class Job extends Entity
 {
@@ -61,6 +62,13 @@ class Job extends Entity
 	protected ?int $claimedAt = null;
 	protected ?int $finishedAt = null;
 
+	/**
+	 * The operator's "rescan anyway": OCR this job even if the file would be
+	 * skipped as born-digital, stamped-by-us or foreign-OCRed. Carried to the
+	 * worker in the claim payload, cleared when the job finishes.
+	 */
+	protected bool $force = false;
+
 	public function __construct()
 	{
 		$this->addType('fileId', 'integer');
@@ -72,6 +80,7 @@ class Job extends Entity
 		$this->addType('claimedAt', 'integer');
 		$this->addType('finishedAt', 'integer');
 		$this->addType('claimedByWorkerId', 'integer');
+		$this->addType('force', 'boolean');
 	}
 
 	/**
@@ -130,6 +139,7 @@ class Job extends Entity
 		$job->setCreatedAt((int) ($row['created_at'] ?? 0));
 		$job->setClaimedAt($row['claimed_at'] === null ? null : (int) $row['claimed_at']);
 		$job->setFinishedAt($row['finished_at'] === null ? null : (int) $row['finished_at']);
+		$job->setForce(self::toOptionalBool($row['force'] ?? null) ?? false);
 		$job->resetUpdatedFields();
 		return $job;
 	}
@@ -160,6 +170,10 @@ class Job extends Entity
 			'created_at' => $this->getCreatedAt(),
 			'claimed_at' => $this->getClaimedAt(),
 			'finished_at' => $this->getFinishedAt(),
+			// The one bit the worker must not lose in transit: with it, every
+			// skip branch is bypassed; without it, a foreign text layer is
+			// skipped again and the redo is billed twice for nothing.
+			'force' => $this->getForce(),
 		];
 	}
 }

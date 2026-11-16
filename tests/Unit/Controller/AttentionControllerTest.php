@@ -55,6 +55,7 @@ class AttentionControllerTest extends TestCase
 			$session,
 			$groups,
 			new RetryPolicy(),
+			$this->createMock(Queue::class),
 		);
 	}
 

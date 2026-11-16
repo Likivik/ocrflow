@@ -48,6 +48,10 @@ return [
         // One implementation, two front doors: this and occ ocrflow:requeue
         // share the Attention service's retry. POST, so CSRF is checked.
         ['name' => 'attention#retry', 'url' => '/api/v1/attention/retry', 'verb' => 'POST'],
+        // "Rescan anyway": re-queue settled rows with the worker's force bit
+        // set, so a file skipped as born-digital or foreign-OCRed can be
+        // re-OCR'd on purpose. Admin only; every id costs engine money.
+        ['name' => 'attention#rescan', 'url' => '/api/v1/attention/rescan', 'verb' => 'POST'],
 
         // --- mine: one user's own rows, scoped by the session's uid --------
         // The admin listings above refuse non-admins on purpose; these two
