@@ -72,6 +72,53 @@ class ClassifierUnavailable(RuntimeError):
     """
 
 
+#: Formats whose decoder can serve a reduced-size version without ever building
+#: the full bitmap. ``draft()`` is a no-op everywhere else.
+_DRAFTABLE = frozenset({"JPEG", "MPO", "TIFF"})
+
+#: The largest image this worker will ever attempt, in pixels: ~30 000 x 13 000.
+#: A big scan, never a decompression bomb.
+_MAX_PIXELS_WE_WILL_TRY = 400_000_000
+
+
+def _open_thumbnail_source(Image, path: Path):
+    """Open ``path`` and ask the decoder for a thumbnail-sized decode.
+
+    Pillow refuses to OPEN an image above its decompression-bomb ceiling
+    (2 x ``Image.MAX_IMAGE_PIXELS``). That check runs while the header is
+    parsed, i.e. BEFORE ``draft()`` can be requested — which is why "just draft
+    first" does not work, and why a 247 M px scan was reported as a broken
+    model.
+
+    The guard is lifted for the header parse only and restored immediately.
+    Nothing is decoded at that point, so no memory is committed; the decode that
+    follows is a draft, 1/64 of the pixels at 1/8 scale. A format that cannot
+    draft is held to Pillow's own ceiling, because there the full bitmap really
+    would be allocated.
+    """
+    previous = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = None
+    try:
+        raw = Image.open(path)
+    finally:
+        Image.MAX_IMAGE_PIXELS = previous
+
+    pixels = raw.size[0] * raw.size[1]
+    if pixels > _MAX_PIXELS_WE_WILL_TRY:
+        raise ImageTooLarge(
+            f"image too large to analyse ({pixels} pixels, limit {_MAX_PIXELS_WE_WILL_TRY})"
+        )
+    if raw.format in _DRAFTABLE:
+        with contextlib.suppress(Exception):
+            raw.draft("RGB", (_MOBILENET_SIZE, _MOBILENET_SIZE))
+    elif pixels > (previous or _MAX_PIXELS_WE_WILL_TRY):
+        raise ImageTooLarge(
+            f"image too large to analyse without a draft decode "
+            f"({pixels} pixels, {raw.format or 'unknown'} format)"
+        )
+    return raw
+
+
 def classify(image_path: str | Path) -> ClassifyResult:
     """Classify image as document or photo.
 
@@ -91,10 +138,7 @@ def classify(image_path: str | Path) -> ClassifyResult:
         # a 247 M px scan it was impossible: Pillow's decompression-bomb guard
         # rejects the file at open(), the resize never runs, and a healthy photo
         # was reported as a broken model.
-        raw = Image.open(path)
-        with contextlib.suppress(Exception):
-            # JPEG/TIFF only; other formats ignore the request.
-            raw.draft("RGB", (_MOBILENET_SIZE, _MOBILENET_SIZE))
+        raw = _open_thumbnail_source(Image, path)
         img = raw.convert("RGB").resize(
             (_MOBILENET_SIZE, _MOBILENET_SIZE), Image.Resampling.BILINEAR
         )
@@ -107,6 +151,9 @@ def classify(image_path: str | Path) -> ClassifyResult:
         is_doc = int(out[0].argmax()) == 0
         return ClassifyResult(is_document=is_doc, reason="mobilenet")
 
+    except ImageTooLarge:
+        # Already the right answer: the file is the problem, not the model.
+        raise
     except Exception as exc:
         from PIL import Image
 
