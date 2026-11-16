@@ -9,6 +9,7 @@ namespace OCA\OcrFlow\Controller;
 
 use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\EnginePolicy;
+use OCA\OcrFlow\Service\SlotsPolicy;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\DataResponse;
 use OCP\AppFramework\OCS\OCSForbiddenException;
@@ -33,6 +34,7 @@ class SettingsController extends OCSController
 		private IGroupManager $groupManager,
 		private EnginePolicy $engine,
 		private AccessGate $access,
+		private SlotsPolicy $slots,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -75,6 +77,9 @@ class SettingsController extends OCSController
 			'engines' => array_merge(EnginePolicy::ENGINES, [EnginePolicy::NONE]),
 			'enabled_groups' => $this->access->enabledGroups(),
 			'available_groups' => $groups,
+			// How many jobs the worker runs at once. Read by the worker between
+			// jobs, so saving it here resizes the pool without a restart.
+			'worker_slots' => $this->slots->current(),
 		]);
 	}
 
@@ -104,12 +109,23 @@ class SettingsController extends OCSController
 			$this->access->setEnabledGroups($groups);
 		}
 
+		$slots = $this->request->getParam('worker_slots');
+		if ($slots !== null && $slots !== '') {
+			if (!is_numeric($slots) || (int) $slots < 1) {
+				return new DataResponse([
+					'message' => 'worker_slots must be a whole number, at least 1',
+				], Http::STATUS_BAD_REQUEST);
+			}
+			$this->slots->set((int) $slots);
+		}
+
 		// Read the state back from the services, not from the request: the answer
 		// must be what the instance now does, not what was asked for.
 		return new DataResponse([
 			'engine' => $this->engine->current(),
 			'engine_configured' => $this->engine->isConfigured(),
 			'enabled_groups' => $this->access->enabledGroups(),
+			'worker_slots' => $this->slots->current(),
 		]);
 	}
 }

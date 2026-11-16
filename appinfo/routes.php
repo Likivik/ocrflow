@@ -27,6 +27,9 @@ return [
         // evidence stale-claim recovery reads instead of a timer.
         ['name' => 'queue#workerRegister', 'url' => '/api/v1/worker/register', 'verb' => 'POST'],
         ['name' => 'queue#workerHeartbeat', 'url' => '/api/v1/worker/heartbeat', 'verb' => 'POST'],
+        // How many slots to run. Read between jobs; a change resizes the pool
+        // without dropping a claim in flight.
+        ['name' => 'queue#workerSlots', 'url' => '/api/v1/worker/slots', 'verb' => 'GET'],
 
         // --- user plane: the Files sidebar / admin settings -------------------
         ['name' => 'status#index', 'url' => '/api/v1/status', 'verb' => 'GET'],

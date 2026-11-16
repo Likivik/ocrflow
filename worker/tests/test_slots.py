@@ -16,6 +16,7 @@ arguments, so the fakes are the whole harness.
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -72,11 +73,29 @@ def test_slots_from_env_rejects_zero(monkeypatch) -> None:
         slots.slots_from_env()
 
 
-def test_slot_worker_names_are_distinct_and_bounded() -> None:
-    names = [slots.slot_worker_name("w" * 64, i) for i in range(1, 4)]
-    assert names == [("w" * 62) + "-1", ("w" * 62) + "-2", ("w" * 62) + "-3"]
-    assert all(len(name) <= 64 for name in names)
-    assert len(set(names)) == 3
+def test_identity_is_label_pid_and_nonce() -> None:
+    """`poweredge:809912:3f9a1c` — readable in ps, unique per process."""
+    identity = slots.slot_identity("poweredge", pid=809912, nonce="3f9a1c")
+    assert identity == "poweredge:809912:3f9a1c"
+
+
+def test_identity_uses_this_process_and_a_fresh_nonce() -> None:
+    first = slots.slot_identity("worker")
+    second = slots.slot_identity("worker")
+    assert f":{os.getpid()}:" in first
+    assert first != second, "a restarted slot must never reuse an identity"
+
+
+def test_identity_stays_inside_the_app_column() -> None:
+    identity = slots.slot_identity("w" * 60)
+    assert len(identity) <= 64
+
+
+def test_a_dead_pid_does_not_collide_across_restarts() -> None:
+    """Same pid, different nonce: two lives, two names."""
+    a = slots.slot_identity("poweredge", pid=4242, nonce="aaaaaa")
+    b = slots.slot_identity("poweredge", pid=4242, nonce="bbbbbb")
+    assert a != b
 
 
 def test_two_slots_never_handle_the_same_job(monkeypatch) -> None:
@@ -225,6 +244,139 @@ def test_supervisor_reports_a_dead_slot() -> None:
     assert supervisor.alive() == 0
 
 
+# -- resize: grow immediately, shrink only after the job in hand -----------
+
+
+def _working_child(index, stop, retire, workdir):
+    """A child that does one job, then waits. The real loop's shape."""
+    import time as _time
+
+    with open(f"{workdir}/job-{index}.done", "w", encoding="utf-8") as handle:
+        handle.write("done")
+    while not retire.is_set() and not stop.is_set():
+        _time.sleep(0.02)
+
+
+def test_grow_forks_more_slots(tmp_path) -> None:
+    import multiprocessing
+
+    supervisor = slots.SlotSupervisor(slots=1, ctx=multiprocessing.get_context("fork"))
+    supervisor.start(_working_child, workdir=str(tmp_path))
+    try:
+        assert supervisor.alive() == 1
+        assert supervisor.grow(2) == 2
+        deadline = time.time() + 5
+        while supervisor.alive() < 3 and time.time() < deadline:
+            time.sleep(0.02)
+        assert supervisor.alive() == 3
+    finally:
+        supervisor.request_stop()
+        supervisor.wait(poll=0.05)
+    assert supervisor.alive() == 0
+
+
+def test_shrink_lets_the_current_job_finish(tmp_path) -> None:
+    """A retired slot completes its work and exits — the job is not dropped."""
+    import multiprocessing
+
+    supervisor = slots.SlotSupervisor(slots=2, ctx=multiprocessing.get_context("fork"))
+    supervisor.start(_working_child, workdir=str(tmp_path))
+    try:
+        deadline = time.time() + 5
+        while len(list(tmp_path.glob("job-*.done"))) < 2 and time.time() < deadline:
+            time.sleep(0.02)
+        assert len(list(tmp_path.glob("job-*.done"))) == 2, "both slots did their job"
+
+        assert supervisor.shrink(1) == 1
+        deadline = time.time() + 5
+        while supervisor.alive() > 1 and time.time() < deadline:
+            supervisor.reap()
+            time.sleep(0.02)
+
+        assert supervisor.alive() == 1, "one slot retired, one left"
+        assert len(list(tmp_path.glob("job-*.done"))) == 2, "no job was lost on the way out"
+    finally:
+        supervisor.request_stop()
+        supervisor.wait(poll=0.05)
+    assert supervisor.alive() == 0
+
+
+def test_shrink_never_asks_more_than_there_are(tmp_path) -> None:
+    import multiprocessing
+
+    supervisor = slots.SlotSupervisor(slots=2, ctx=multiprocessing.get_context("fork"))
+    supervisor.start(_working_child, workdir=str(tmp_path))
+    try:
+        assert supervisor.shrink(5) == 2
+        assert supervisor.shrink(1) == 0, "already retiring slots are not counted twice"
+    finally:
+        supervisor.request_stop()
+        supervisor.wait(poll=0.05)
+
+
+def test_resize_to_the_same_number_does_nothing(tmp_path) -> None:
+    import multiprocessing
+
+    supervisor = slots.SlotSupervisor(slots=2, ctx=multiprocessing.get_context("fork"))
+    supervisor.start(_working_child, workdir=str(tmp_path))
+    try:
+        supervisor.resize(2)
+        assert supervisor.alive() == 2
+        assert all(not entry["retire"].is_set() for entry in supervisor.processes)
+    finally:
+        supervisor.request_stop()
+        supervisor.wait(poll=0.05)
+
+
+# -- the app's answer ------------------------------------------------------
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, body: dict) -> None:
+        self.status_code = status_code
+        self._body = body
+        self.request = type("Req", (), {"method": "GET", "path_url": "/worker/slots"})()
+
+    def json(self):
+        return self._body
+
+
+class _FakeSession:
+    def __init__(self, response) -> None:
+        self._response = response
+        self.calls: list[tuple[str, dict]] = []
+
+    def get(self, url, headers=None, timeout=None):
+        self.calls.append((url, headers or {}))
+        return self._response
+
+
+def test_client_reads_the_slot_setting_from_the_app() -> None:
+    from nc_ocr_flow.queue_client import QueueClient
+
+    session = _FakeSession(
+        _FakeResponse(200, {"ocs": {"meta": {"statuscode": 200}, "data": {"slots": 3}}})
+    )
+    client = QueueClient(base_url="http://app", secret="s", session=session)
+
+    assert client.slots() == 3
+    url, headers = session.calls[0]
+    assert url.endswith("/worker/slots")
+    assert headers.get("OCS-APIRequest") == "true"
+
+
+def test_client_returns_none_when_the_app_cannot_say() -> None:
+    from nc_ocr_flow.queue_client import QueueClient
+
+    for response in (
+        _FakeResponse(404, {}),
+        _FakeResponse(200, {"ocs": {"meta": {"statuscode": 200}, "data": {}}}),
+        _FakeResponse(200, {"ocs": {"meta": {"statuscode": 200}, "data": {"slots": 0}}}),
+    ):
+        client = QueueClient(base_url="http://app", secret="s", session=_FakeSession(response))
+        assert client.slots() is None, "an unreadable answer must leave the pool alone"
+
+
 def test_supervisor_warns_when_forking_with_live_threads(caplog) -> None:
     """A thread holding a lock at fork time leaves it held in every child.
 
@@ -246,7 +398,7 @@ def test_supervisor_warns_when_forking_with_live_threads(caplog) -> None:
     thread.start()
     try:
         with caplog.at_level(logging.WARNING):
-            supervisor.start(lambda index, stop: None)
+            supervisor.start(lambda index, stop, retire: None, workdir=".")
             supervisor.join()
     finally:
         stop_sleeper.set()

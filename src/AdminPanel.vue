@@ -42,6 +42,20 @@
 			:label="t('Groups')"
 			:clearable="true" />
 
+		<h3 class="ocrflow-admin__heading">
+			{{ t('Concurrent jobs') }}
+		</h3>
+		<p class="ocrflow-admin__hint">
+			{{ t('How many files the worker OCRs at once. Each job holds roughly 600 MB on a large scan. The worker re-reads this between jobs, so a change takes effect without a restart and nothing in flight is dropped.') }}
+		</p>
+		<NcTextField
+			v-model="workerSlots"
+			class="ocrflow-admin__field"
+			type="number"
+			:min="1"
+			:disabled="busy"
+			:label="t('Slots')" />
+
 		<div class="ocrflow-admin__actions">
 			<NcButton type="primary" :disabled="busy" @click="save">
 				{{ busy ? t('Saving…') : t('Save') }}
@@ -212,6 +226,7 @@ import { t as translate } from '@nextcloud/l10n'
 import NcButton from '@nextcloud/vue/components/NcButton'
 import NcNoteCard from '@nextcloud/vue/components/NcNoteCard'
 import NcSelect from '@nextcloud/vue/components/NcSelect'
+import NcTextField from '@nextcloud/vue/components/NcTextField'
 
 const BASE = '/ocs/v2.php/apps/ocrflow/api/v1'
 
@@ -233,11 +248,12 @@ const TABS = [
 
 export default {
 	name: 'OcrFlowAdminPanel',
-	components: { NcButton, NcNoteCard, NcSelect },
+	components: { NcButton, NcNoteCard, NcSelect, NcTextField },
 	data() {
 		return {
 			engine: 'none',
 			groups: [],
+			workerSlots: 2,
 			availableGroups: [],
 			busy: false,
 			error: '',
@@ -461,6 +477,7 @@ export default {
 				this.engine = settings.engine ?? 'none'
 				this.groups = settings.enabled_groups ?? []
 				this.availableGroups = settings.available_groups ?? []
+				this.workerSlots = settings.worker_slots ?? 2
 			} catch (e) {
 				this.error = `Could not read the settings: ${e?.response?.status ?? e?.message ?? 'unknown error'}`
 			} finally {
@@ -474,7 +491,7 @@ export default {
 			try {
 				const { data } = await axios.put(
 					`${BASE}/settings`,
-					{ engine: this.engine, enabled_groups: this.groups },
+					{ engine: this.engine, enabled_groups: this.groups, worker_slots: Number(this.workerSlots) },
 					{ headers: { 'OCS-APIRequest': 'true' } },
 				)
 				const saved = data?.ocs?.data ?? {}
@@ -482,6 +499,9 @@ export default {
 				// does, not what the page asked for.
 				this.engine = saved.engine ?? this.engine
 				this.groups = saved.enabled_groups ?? this.groups
+				if (saved.worker_slots !== undefined) {
+					this.workerSlots = saved.worker_slots
+				}
 				this.saved = true
 			} catch (e) {
 				this.error = `Could not save the settings: ${e?.response?.status ?? e?.message ?? 'unknown error'}`
