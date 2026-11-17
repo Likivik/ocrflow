@@ -1198,6 +1198,36 @@ class Queue extends QBMapper
 	 * @throws Exception
 	 */
 	/**
+	 * What read these files, and with which engine version.
+	 *
+	 * The per-file ledger keeps provenance (`engine`, `engine_version`) and is
+	 * never purged, so this is the durable answer to "is my archive read, and
+	 * by whom" — the question a person actually has. Job rows are runs; the
+	 * ledger is the state of the file.
+	 *
+	 * @return list<array{engine: ?string, version: ?string, count: int}>
+	 */
+	public function provenanceCounts(): array
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('engine', 'engine_version')
+			->selectAlias($qb->func()->count('*'), 'n')
+			->from(self::FILES)
+			->groupBy('engine')
+			->groupBy('engine_version')
+			->orderBy('n', 'DESC');
+		$out = [];
+		foreach ($qb->executeQuery()->fetchAll() as $row) {
+			$out[] = [
+				'engine' => isset($row['engine']) && $row['engine'] !== '' ? (string) $row['engine'] : null,
+				'version' => isset($row['engine_version']) && $row['engine_version'] !== '' ? (string) $row['engine_version'] : null,
+				'count' => (int) $row['n'],
+			];
+		}
+		return $out;
+	}
+
+	/**
 	 * Skipped rows by reason code, biggest first.
 	 *
 	 * One "Skipped" number hides six different decisions: a photo, a born-digital
@@ -1210,11 +1240,31 @@ class Queue extends QBMapper
 	 */
 	public function skippedByReason(): array
 	{
+		return $this->reasonsForStatus(self::STATUS_SKIPPED);
+	}
+
+	/**
+	 * Error rows by reason code, biggest first — the mirror of the skip split,
+	 * so the three blocks the panel shows (read / not read / needs you) each
+	 * answer with the sentence the app already writes for the code.
+	 *
+	 * @return array<string, int>
+	 */
+	public function errorReasons(): array
+	{
+		return $this->reasonsForStatus(self::STATUS_ERROR);
+	}
+
+	/**
+	 * @return array<string, int>
+	 */
+	private function reasonsForStatus(string $status): array
+	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('reason_code')
 			->selectAlias($qb->func()->count('*'), 'n')
 			->from(self::JOBS)
-			->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_SKIPPED)))
+			->where($qb->expr()->eq('status', $qb->createNamedParameter($status)))
 			->groupBy('reason_code');
 		$out = [];
 		foreach ($qb->executeQuery()->fetchAll() as $row) {
@@ -1224,6 +1274,229 @@ class Queue extends QBMapper
 			$out[(string) ($row['reason_code'] ?? '')] = (int) $row['n'];
 		}
 		arsort($out);
+		return $out;
+	}
+
+	/**
+	 * The extensions the pipeline can actually read.
+	 *
+	 * Must match the worker's `PROCESSABLE_EXTS` (`webhook_server.py:126`), or
+	 * the report promises work that the worker will refuse.
+	 */
+	public const READABLE_EXTS = ['pdf', 'jpg', 'jpeg', 'png', 'webp', 'heic'];
+
+	/**
+	 * Everything the panel needs, counted per FILE.
+	 *
+	 * Rows were the old unit and they lied three ways: a file read once and
+	 * refused once counted twice; `status` put 5 damaged and 2 empty files in
+	 * the skip block; and "done" described our activity instead of the file.
+	 *
+	 * So: the on-disk set comes from `filecache` (no filesystem walk — Nextcloud
+	 * already knows every file), each file is described by its **latest** job
+	 * row, and a file with no row at all is "not processed yet".
+	 *
+	 * @return array{
+	 *   total: int, never_processed: int, empty: int, unreadable_format: int,
+	 *   queue: array{queued: int, claimed: int},
+	 *   by_code: array<string, int>,
+	 *   read_by_engine: list<array{engine: ?string, version: ?string, count: int}>
+	 * }
+	 */
+	public function fileReport(string $uid): array
+	{
+		$ids = $this->diskFileIds($uid);
+		$empty = $this->diskCountWhere($uid, true);
+		$unreadable = $this->diskCountUnreadable($uid);
+
+		$latest = $this->latestRowsFor(array_keys($ids));
+		$byCode = [];
+		$queue = ['queued' => 0, 'claimed' => 0];
+		$readIds = [];
+		foreach ($latest as $fileId => $row) {
+			$status = (string) ($row['status'] ?? '');
+			if ($status === self::STATUS_QUEUED || $status === self::STATUS_CLAIMED) {
+				$queue[$status]++;
+				continue;
+			}
+			$code = $row['reason_code'] === null ? '' : (string) $row['reason_code'];
+			$byCode[$code] = ($byCode[$code] ?? 0) + 1;
+			// "Read, no text found" is a *subset* marker, so it is counted in
+			// `by_code` but kept out of the engine split: otherwise the rows of
+			// the read block would sum to more than the block.
+			if ($code === '' || $code === 'skip_ocred_by_ocrflow') {
+				$readIds[$fileId] = $row['engine'] === null ? null : (string) $row['engine'];
+			}
+		}
+
+		return [
+			'total' => count($ids),
+			'never_processed' => count($ids) - count($latest),
+			'empty' => $empty,
+			'unreadable_format' => $unreadable,
+			'queue' => $queue,
+			'by_code' => $byCode,
+			'read_by_engine' => $this->engineSplitFor($readIds),
+		];
+	}
+
+	/**
+	 * Processable files on disk for this user: fileid => size.
+	 *
+	 * @return array<int, int>
+	 */
+	private function diskFileIds(string $uid): array
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('f.fileid')
+			->from('filecache', 'f')
+			->innerJoin('f', 'storages', 's', $qb->expr()->eq('s.numeric_id', 'f.storage'))
+			->where($qb->expr()->eq('s.id', $qb->createNamedParameter('home::' . $uid)))
+			->andWhere($qb->expr()->like('f.path', $qb->createNamedParameter('files/%')))
+			->andWhere($qb->expr()->gt('f.size', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->orX(...$this->extPredicates($qb)));
+		$out = [];
+		foreach ($qb->executeQuery()->fetchAll() as $row) {
+			$out[(int) $row['fileid']] = 1;
+		}
+		return $out;
+	}
+
+	/**
+	 * @return array<string, mixed>
+	 */
+	private function diskCountWhere(string $uid, bool $emptyOnly): int
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->selectAlias($qb->func()->count('*'), 'n')
+			->from('filecache', 'f')
+			->innerJoin('f', 'storages', 's', $qb->expr()->eq('s.numeric_id', 'f.storage'))
+			->where($qb->expr()->eq('s.id', $qb->createNamedParameter('home::' . $uid)))
+			->andWhere($qb->expr()->like('f.path', $qb->createNamedParameter('files/%')))
+			->andWhere(
+				$emptyOnly
+					? $qb->expr()->eq('f.size', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT))
+					: $qb->expr()->gt('f.size', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT)),
+			)
+			->andWhere($qb->expr()->orX(...$this->extPredicates($qb)));
+		return (int) $qb->executeQuery()->fetchOne();
+	}
+
+	/**
+	 * Files on disk in a format the pipeline does not read (TIFF today).
+	 */
+	private function diskCountUnreadable(string $uid): int
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->selectAlias($qb->func()->count('*'), 'n')
+			->from('filecache', 'f')
+			->innerJoin('f', 'storages', 's', $qb->expr()->eq('s.numeric_id', 'f.storage'))
+			->where($qb->expr()->eq('s.id', $qb->createNamedParameter('home::' . $uid)))
+			->andWhere($qb->expr()->like('f.path', $qb->createNamedParameter('files/%')))
+			->andWhere($qb->expr()->gt('f.size', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->orX(
+				$qb->expr()->like($qb->func()->lower('f.name'), $qb->createNamedParameter('%.tif')),
+				$qb->expr()->like($qb->func()->lower('f.name'), $qb->createNamedParameter('%.tiff')),
+			));
+		return (int) $qb->executeQuery()->fetchOne();
+	}
+
+	/**
+	 * @return list<\OCP\DB\QueryBuilder\ICompositeExpression|string>
+	 */
+	private function extPredicates(IQueryBuilder $qb): array
+	{
+		$out = [];
+		foreach (self::READABLE_EXTS as $ext) {
+			$out[] = $qb->expr()->like($qb->func()->lower('f.name'), $qb->createNamedParameter('%.' . $ext));
+		}
+		return $out;
+	}
+
+	/**
+	 * The newest job row for each of these files.
+	 *
+	 * `max(id)` and not `max(finished_at)`: a queued row has no finish time, and
+	 * the newest row is the newest decision either way.
+	 *
+	 * @param list<int> $fileIds
+	 * @return array<int, array{status: mixed, reason_code: mixed, engine: mixed}>
+	 */
+	private function latestRowsFor(array $fileIds): array
+	{
+		$out = [];
+		foreach (array_chunk($fileIds, 2000) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('file_id')
+				->selectAlias($qb->func()->max('id'), 'mid')
+				->from(self::JOBS)
+				->where($qb->expr()->in('file_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+				->groupBy('file_id');
+			$mids = [];
+			foreach ($qb->executeQuery()->fetchAll() as $row) {
+				$mids[] = (int) $row['mid'];
+			}
+			if ($mids === []) {
+				continue;
+			}
+			$qb2 = $this->db->getQueryBuilder();
+			$qb2->select('id', 'file_id', 'status', 'reason_code', 'engine')
+				->from(self::JOBS)
+				->where($qb2->expr()->in('id', $qb2->createNamedParameter($mids, IQueryBuilder::PARAM_INT_ARRAY)));
+			foreach ($qb2->executeQuery()->fetchAll() as $row) {
+				$out[(int) $row['file_id']] = [
+					'status' => $row['status'],
+					'reason_code' => $row['reason_code'],
+					'engine' => $row['engine'],
+				];
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Read files split by the engine and version that read them.
+	 *
+	 * The ledger is the durable answer (`engine`, `engine_version`, never
+	 * purged); a file whose ledger row has no engine falls back to the engine
+	 * its job row recorded, and a version that was never written is reported as
+	 * unknown rather than guessed.
+	 *
+	 * @param array<int, ?string> $readIds fileid => engine from the job row
+	 * @return list<array{engine: ?string, version: ?string, count: int}>
+	 */
+	private function engineSplitFor(array $readIds): array
+	{
+		$ledger = [];
+		foreach (array_chunk(array_keys($readIds), 2000) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('file_id', 'engine', 'engine_version')
+				->from(self::FILES)
+				->where($qb->expr()->in('file_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
+			foreach ($qb->executeQuery()->fetchAll() as $row) {
+				$ledger[(int) $row['file_id']] = [
+					'engine' => $row['engine'] === null || $row['engine'] === '' ? null : (string) $row['engine'],
+					'version' => $row['engine_version'] === null || $row['engine_version'] === '' ? null : (string) $row['engine_version'],
+				];
+			}
+		}
+		$counts = [];
+		foreach ($readIds as $fileId => $jobEngine) {
+			$engine = $ledger[$fileId]['engine'] ?? $jobEngine;
+			$version = $ledger[$fileId]['version'] ?? null;
+			$key = ($engine ?? '') . '|' . ($version ?? '');
+			$counts[$key] = ($counts[$key] ?? 0) + 1;
+		}
+		$out = [];
+		foreach ($counts as $key => $count) {
+			[$engine, $version] = explode('|', $key, 2);
+			$out[] = [
+				'engine' => $engine === '' ? null : $engine,
+				'version' => $version === '' ? null : $version,
+				'count' => $count,
+			];
+		}
+		usort($out, static fn (array $a, array $b): int => $b['count'] <=> $a['count']);
 		return $out;
 	}
 

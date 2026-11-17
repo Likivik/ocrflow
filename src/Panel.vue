@@ -137,25 +137,31 @@
 		<h3 class="ocrflow-panel__heading">
 			{{ t('Queue') }}
 		</h3>
-		<ul v-if="rows.length" class="ocrflow-panel__counts">
-			<template v-for="row in rows" :key="row.status">
-				<li :class="{ 'is-error': row.status === 'error' }">
-					<span class="ocrflow-panel__status">{{ row.status }}</span>
+		<!-- The report: six blocks, each with the rows that add up to it.
+		     Everything comes from the server as-is — the panel never decides what
+		     a number means. -->
+		<section v-for="block in blocks" :key="block.id" class="ocrflow-panel__block">
+			<h4 class="ocrflow-panel__block-heading">
+				{{ t(block.label) }}
+				<span class="ocrflow-panel__count">{{ block.count }}</span>
+			</h4>
+			<ul v-if="block.rows.length" class="ocrflow-panel__counts">
+				<li
+					v-for="row in block.rows"
+					:key="block.id + '-' + row.key"
+					:class="{ 'ocrflow-panel__counts-reason': block.id !== 'read', 'is-below-bar': row.below_bar }"
+					:title="row.key">
+					<span class="ocrflow-panel__status">{{ t(row.label) }}</span>
 					<span class="ocrflow-panel__count">{{ row.count }}</span>
 				</li>
-				<!-- Skipped is six decisions, not one: the reasons are the answer
-				     the reader actually wants, so they sit under the total. -->
-				<li
-					v-for="reason in row.reasons"
-					:key="row.status + '-' + reason.code"
-					class="ocrflow-panel__counts-reason"
-					:title="reason.code">
-					<span class="ocrflow-panel__status">{{ t(reason.label) }}</span>
-					<span class="ocrflow-panel__count">{{ reason.count }}</span>
-				</li>
-			</template>
-		</ul>
-		<p v-else class="ocrflow-panel__empty">
+			</ul>
+		</section>
+
+		<p v-if="footnote" class="ocrflow-panel__note">
+			{{ t('Outside the processable set: {empty} empty file(s), {unreadable} in a format we do not read.', { empty: footnote.empty, unreadable: footnote.unreadable_format }) }}
+		</p>
+
+		<p v-if="!blocks.length" class="ocrflow-panel__empty">
 			{{ t('Nothing has been queued yet.') }}
 		</p>
 
@@ -231,7 +237,8 @@ export default {
 	data() {
 		return {
 			counts: {},
-			skipReasons: [],
+			blocks: [],
+			footnote: null,
 			folder: '',
 			busy: false,
 			error: '',
@@ -264,16 +271,6 @@ export default {
 	computed: {
 		// Whatever the queue reports, rendered as-is: hardcoding the status list
 		// here would silently drop a new state ("claimed" was added that way).
-		rows() {
-			const reasons = this.skipReasons ?? []
-			return Object.entries(this.counts ?? {}).map(([status, count]) => ({
-				status,
-				count,
-				// Only the skipped total has a breakdown: done and error are what
-				// they say, and a second dimension there would be a second screen.
-				reasons: status === 'skipped' ? reasons : [],
-			}))
-		},
 		filterChips() {
 			return BUCKETS.map((bucket) => ({
 				...bucket,
@@ -570,7 +567,8 @@ export default {
 				// The reasons behind the Skipped total, each with the sentence
 				// the app already writes for its code. Server-side so the
 				// reader here stays dumb, and so a new reason needs no release.
-				this.skipReasons = data?.ocs?.data?.skip_reasons ?? []
+				this.blocks = data?.ocs?.data?.blocks ?? []
+				this.footnote = data?.ocs?.data?.footnote ?? null
 				this.updatedAt = new Date().toLocaleTimeString()
 			} catch (e) {
 				this.error = `Could not read the queue: ${e?.response?.status ?? e?.message ?? 'unknown error'}`
@@ -693,6 +691,26 @@ export default {
 
 /* A reason under the Skipped total: indented, quieter, no bottom rule of its
    own — it belongs to the row above it, not beside it. */
+.ocrflow-panel__note {
+	margin: calc(var(--default-grid-baseline, 4px) * 2) 0 0;
+	font-size: 0.85em;
+	color: var(--color-text-maxcontrast);
+}
+
+.ocrflow-panel__block-heading {
+	margin: calc(var(--default-grid-baseline, 4px) * 3) 0 calc(var(--default-grid-baseline, 4px) * 1);
+	font-size: 0.95em;
+	color: var(--color-text-maxcontrast);
+	font-weight: 600;
+}
+
+/* Read, but by an engine the operator no longer accepts: the one case worth
+   re-doing, so it is the one case that gets a colour. */
+.ocrflow-panel__counts li.is-below-bar .ocrflow-panel__count,
+.ocrflow-panel__counts li.is-below-bar .ocrflow-panel__status {
+	color: var(--color-warning-text, var(--color-text-maxcontrast));
+}
+
 .ocrflow-panel__counts-reason {
 	padding-inline-start: calc(var(--default-grid-baseline, 4px) * 4);
 	border-bottom: 0 !important;

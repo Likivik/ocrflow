@@ -177,3 +177,16 @@ def test_the_download_endpoint_reads_the_reason_from_a_422(tmp_path) -> None:
 
     assert caught.value.status_code == 422
     assert caught.value.app_reason_code == "error_source_file_zero_bytes"
+
+
+def test_both_spellings_of_tiff_are_readable() -> None:
+    """Two 26 MB certificates were skipped as "unsupported" over four letters.
+
+    Scanners write `.tif`; the list had only `.tiff`. The format is the same, so
+    refusing one spelling is a bug in the list, not a decision about the file.
+    """
+    from nc_ocr_flow.webhook_server import IMAGE_EXTS, PROCESSABLE_EXTS
+
+    assert ".tif" in IMAGE_EXTS
+    assert ".tiff" in IMAGE_EXTS
+    assert ".tif" in PROCESSABLE_EXTS
