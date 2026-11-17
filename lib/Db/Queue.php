@@ -1198,6 +1198,36 @@ class Queue extends QBMapper
 	 * @throws Exception
 	 */
 	/**
+	 * What read these files, and with which engine version.
+	 *
+	 * The per-file ledger keeps provenance (`engine`, `engine_version`) and is
+	 * never purged, so this is the durable answer to "is my archive read, and
+	 * by whom" — the question a person actually has. Job rows are runs; the
+	 * ledger is the state of the file.
+	 *
+	 * @return list<array{engine: ?string, version: ?string, count: int}>
+	 */
+	public function provenanceCounts(): array
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('engine', 'engine_version')
+			->selectAlias($qb->func()->count('*'), 'n')
+			->from(self::FILES)
+			->groupBy('engine')
+			->groupBy('engine_version')
+			->orderBy('n', 'DESC');
+		$out = [];
+		foreach ($qb->executeQuery()->fetchAll() as $row) {
+			$out[] = [
+				'engine' => isset($row['engine']) && $row['engine'] !== '' ? (string) $row['engine'] : null,
+				'version' => isset($row['engine_version']) && $row['engine_version'] !== '' ? (string) $row['engine_version'] : null,
+				'count' => (int) $row['n'],
+			];
+		}
+		return $out;
+	}
+
+	/**
 	 * Skipped rows by reason code, biggest first.
 	 *
 	 * One "Skipped" number hides six different decisions: a photo, a born-digital
@@ -1210,11 +1240,31 @@ class Queue extends QBMapper
 	 */
 	public function skippedByReason(): array
 	{
+		return $this->reasonsForStatus(self::STATUS_SKIPPED);
+	}
+
+	/**
+	 * Error rows by reason code, biggest first — the mirror of the skip split,
+	 * so the three blocks the panel shows (read / not read / needs you) each
+	 * answer with the sentence the app already writes for the code.
+	 *
+	 * @return array<string, int>
+	 */
+	public function errorReasons(): array
+	{
+		return $this->reasonsForStatus(self::STATUS_ERROR);
+	}
+
+	/**
+	 * @return array<string, int>
+	 */
+	private function reasonsForStatus(string $status): array
+	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('reason_code')
 			->selectAlias($qb->func()->count('*'), 'n')
 			->from(self::JOBS)
-			->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_SKIPPED)))
+			->where($qb->expr()->eq('status', $qb->createNamedParameter($status)))
 			->groupBy('reason_code');
 		$out = [];
 		foreach ($qb->executeQuery()->fetchAll() as $row) {

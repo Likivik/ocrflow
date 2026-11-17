@@ -105,4 +105,47 @@ class StatusSkipReasonsTest extends TestCase
 
 		$this->assertSame([], $this->controller($queue)->index()->getData()['skip_reasons']);
 	}
+
+	public function testReadByNamesTheEngineAndItsVersion(): void
+	{
+		// The question is "is my archive read, and by whom" — not "how many
+		// runs happened". The ledger is never purged, so this survives.
+		$queue = $this->createMock(Queue::class);
+		$queue->method('counts')->willReturn(['done' => 2036]);
+		$queue->method('skippedByReason')->willReturn([]);
+		$queue->method('errorReasons')->willReturn([]);
+		$queue->method('provenanceCounts')->willReturn([
+			['engine' => 'google', 'version' => '3.15.0', 'count' => 2036],
+			['engine' => 'tesseract', 'version' => '5.3.0', 'count' => 9],
+			['engine' => 'google', 'version' => null, 'count' => 605],
+			['engine' => null, 'version' => null, 'count' => 5470],
+		]);
+
+		$readBy = $this->controller($queue)->index()->getData()['read_by'];
+
+		$this->assertSame('google 3.15.0', $readBy[0]['label']);
+		$this->assertFalse($readBy[0]['below_bar'], 'the default bar is google 3.15.0 — this meets it');
+		$this->assertTrue($readBy[1]['below_bar'], 'tesseract is not in the accepted engines, so it is below the bar');
+		$this->assertSame('google (version not recorded)', $readBy[2]['label']);
+		$this->assertFalse($readBy[2]['below_bar'], 'an unrecorded version is unknown, not condemned');
+		$this->assertCount(3, $readBy, 'files with no engine are not "read by" anything and are filtered out');
+	}
+
+	public function testErrorReasonsCarryTheSameSentencesAsTheSkipSplit(): void
+	{
+		$queue = $this->createMock(Queue::class);
+		$queue->method('counts')->willReturn(['error' => 5]);
+		$queue->method('skippedByReason')->willReturn([]);
+		$queue->method('provenanceCounts')->willReturn([]);
+		$queue->method('errorReasons')->willReturn([
+			'error_source_file_zero_bytes' => 3,
+			'error_worker_file_gone' => 2,
+		]);
+
+		$reasons = $this->controller($queue)->index()->getData()['error_reasons'];
+
+		$this->assertSame('error_source_file_zero_bytes', $reasons[0]['code']);
+		$this->assertSame(3, $reasons[0]['count']);
+		$this->assertSame('This file is empty (0 bytes).', $reasons[0]['label']);
+	}
 }

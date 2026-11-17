@@ -137,25 +137,52 @@
 		<h3 class="ocrflow-panel__heading">
 			{{ t('Queue') }}
 		</h3>
-		<ul v-if="rows.length" class="ocrflow-panel__counts">
-			<template v-for="row in rows" :key="row.status">
-				<li :class="{ 'is-error': row.status === 'error' }">
-					<span class="ocrflow-panel__status">{{ row.status }}</span>
+		<!-- Three blocks, because the question is about files, not runs: what is
+		     read and by whom, what was deliberately not read and why, and what is
+		     waiting on a person. "Done 2673" answered none of them. -->
+		<section v-if="readBy.length" class="ocrflow-panel__block">
+			<h4 class="ocrflow-panel__block-heading">{{ t('Read') }}</h4>
+			<ul class="ocrflow-panel__counts">
+				<li
+					v-for="row in readBy"
+					:key="'read-' + row.label"
+					:class="{ 'is-below-bar': row.below_bar }"
+					:title="row.below_bar ? t('Read by an engine below your bar') : row.label">
+					<span class="ocrflow-panel__status">{{ row.label }}</span>
 					<span class="ocrflow-panel__count">{{ row.count }}</span>
 				</li>
-				<!-- Skipped is six decisions, not one: the reasons are the answer
-				     the reader actually wants, so they sit under the total. -->
+			</ul>
+		</section>
+
+		<section v-if="skipRows.length" class="ocrflow-panel__block">
+			<h4 class="ocrflow-panel__block-heading">{{ t('Not read') }}</h4>
+			<ul class="ocrflow-panel__counts">
 				<li
-					v-for="reason in row.reasons"
-					:key="row.status + '-' + reason.code"
+					v-for="reason in skipRows"
+					:key="'skip-' + reason.code"
 					class="ocrflow-panel__counts-reason"
 					:title="reason.code">
 					<span class="ocrflow-panel__status">{{ t(reason.label) }}</span>
 					<span class="ocrflow-panel__count">{{ reason.count }}</span>
 				</li>
-			</template>
-		</ul>
-		<p v-else class="ocrflow-panel__empty">
+			</ul>
+		</section>
+
+		<section v-if="errorRows.length" class="ocrflow-panel__block">
+			<h4 class="ocrflow-panel__block-heading">{{ t('Needs you') }}</h4>
+			<ul class="ocrflow-panel__counts">
+				<li
+					v-for="reason in errorRows"
+					:key="'error-' + reason.code"
+					class="ocrflow-panel__counts-reason is-error"
+					:title="reason.code">
+					<span class="ocrflow-panel__status">{{ t(reason.label) }}</span>
+					<span class="ocrflow-panel__count">{{ reason.count }}</span>
+				</li>
+			</ul>
+		</section>
+
+		<p v-if="!readBy.length && !skipRows.length && !errorRows.length" class="ocrflow-panel__empty">
 			{{ t('Nothing has been queued yet.') }}
 		</p>
 
@@ -231,6 +258,8 @@ export default {
 	data() {
 		return {
 			counts: {},
+			readBy: [],
+			errorReasons: [],
 			skipReasons: [],
 			folder: '',
 			busy: false,
@@ -264,15 +293,13 @@ export default {
 	computed: {
 		// Whatever the queue reports, rendered as-is: hardcoding the status list
 		// here would silently drop a new state ("claimed" was added that way).
-		rows() {
-			const reasons = this.skipReasons ?? []
-			return Object.entries(this.counts ?? {}).map(([status, count]) => ({
-				status,
-				count,
-				// Only the skipped total has a breakdown: done and error are what
-				// they say, and a second dimension there would be a second screen.
-				reasons: status === 'skipped' ? reasons : [],
-			}))
+		// The panel is a reader: every list it draws comes from the status
+		// answer as-is, so a new engine version or a new reason needs no release.
+		skipRows() {
+			return this.skipReasons ?? []
+		},
+		errorRows() {
+			return this.errorReasons ?? []
 		},
 		filterChips() {
 			return BUCKETS.map((bucket) => ({
@@ -571,6 +598,9 @@ export default {
 				// the app already writes for its code. Server-side so the
 				// reader here stays dumb, and so a new reason needs no release.
 				this.skipReasons = data?.ocs?.data?.skip_reasons ?? []
+				this.errorReasons = data?.ocs?.data?.error_reasons ?? []
+				// What read the files and with which version — the ledger, not a run.
+				this.readBy = data?.ocs?.data?.read_by ?? []
 				this.updatedAt = new Date().toLocaleTimeString()
 			} catch (e) {
 				this.error = `Could not read the queue: ${e?.response?.status ?? e?.message ?? 'unknown error'}`
@@ -693,6 +723,20 @@ export default {
 
 /* A reason under the Skipped total: indented, quieter, no bottom rule of its
    own — it belongs to the row above it, not beside it. */
+.ocrflow-panel__block-heading {
+	margin: calc(var(--default-grid-baseline, 4px) * 3) 0 calc(var(--default-grid-baseline, 4px) * 1);
+	font-size: 0.95em;
+	color: var(--color-text-maxcontrast);
+	font-weight: 600;
+}
+
+/* Read, but by an engine the operator no longer accepts: the one case worth
+   re-doing, so it is the one case that gets a colour. */
+.ocrflow-panel__counts li.is-below-bar .ocrflow-panel__count,
+.ocrflow-panel__counts li.is-below-bar .ocrflow-panel__status {
+	color: var(--color-warning-text, var(--color-text-maxcontrast));
+}
+
 .ocrflow-panel__counts-reason {
 	padding-inline-start: calc(var(--default-grid-baseline, 4px) * 4);
 	border-bottom: 0 !important;

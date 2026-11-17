@@ -53,7 +53,13 @@ class StatusController extends OCSController
 			// PDF, our own stamp, a foreign tesseract layer, an unsupported
 			// type. Split by the code the worker already records, with the
 			// sentence the app already writes for that code.
-			'skip_reasons' => $this->skipReasons(),
+			'skip_reasons' => $this->reasons($this->queue->skippedByReason()),
+			// The same shape for failures: "Needs you" without a reason is
+			// just a number to be afraid of.
+			'error_reasons' => $this->errorReasons(),
+			// What read the files, with the version and whether that version
+			// is still at your bar. This is the durable ledger, not a run.
+			'read_by' => $this->readBy(),
 			// Whether the instance will do OCR at all. The sidebar can say
 			// "not configured" instead of offering a button that queues nothing.
 			'engine' => $this->engine->current(),
@@ -64,11 +70,20 @@ class StatusController extends OCSController
 	/**
 	 * @return list<array{code: string, label: string, count: int}>
 	 */
-	private function skipReasons(): array
+	private function errorReasons(): array
+	{
+		return $this->reasons($this->queue->errorReasons());
+	}
+
+	/**
+	 * @param array<string, int> $byCode
+	 * @return list<array{code: string, label: string, count: int}>
+	 */
+	private function reasons(array $byCode): array
 	{
 		$policy = $this->retryPolicy ?? new RetryPolicy();
 		$out = [];
-		foreach ($this->queue->skippedByReason() as $code => $count) {
+		foreach ($byCode as $code => $count) {
 			// `entry()` answers a sentence even for a code it has never
 			// heard of — the "unknown code" one, which is about the worker,
 			// not about this skip. An unknown skip reason shows itself.
@@ -85,6 +100,37 @@ class StatusController extends OCSController
 				'code' => $code,
 				'label' => $entry['text'] ?? $code,
 				'count' => $count,
+			];
+		}
+		return $out;
+	}
+
+	/**
+	 * @return list<array{engine: ?string, version: ?string, label: string, count: int, below_bar: bool}>
+	 */
+	private function readBy(): array
+	{
+		$out = [];
+		foreach ($this->queue->provenanceCounts() as $row) {
+			$engine = $row['engine'];
+			$version = $row['version'];
+			if ($engine === null) {
+				// No engine means nothing read this file through us: it is
+				// already accounted for by "Not read" or "Needs you", and
+				// listing it here would answer a question it is not part of.
+				continue;
+			}
+			$out[] = [
+				'engine' => $engine,
+				'version' => $version,
+				// 605 live rows read by google carry no version (written before
+				// the version was recorded). Saying so is better than inventing
+				// a version or condemning them.
+				'label' => $version === null ? $engine . ' (version not recorded)' : $engine . ' ' . $version,
+				'count' => $row['count'],
+				// Only a known version can be below the bar: "read, but by an
+				// engine you no longer accept" is the one case worth re-doing.
+				'below_bar' => $version !== null && !$this->engine->meetsBar($engine, $version),
 			];
 		}
 		return $out;
