@@ -81,6 +81,22 @@ class StatusSkipReasonsTest extends TestCase
 		$this->assertSame('skip_made_up', $reasons[0]['label']);
 	}
 
+	public function testTheLegacyBucketIsShownSoThePartsAddUp(): void
+	{
+		// 5,453 production rows were skipped before reason codes existed.
+		// Hiding them would make the breakdown a smaller, wrong number.
+		$queue = $this->createMock(Queue::class);
+		$queue->method('counts')->willReturn(['skipped' => 5455]);
+		$queue->method('skippedByReason')->willReturn(['' => 5453, 'skip_text_native' => 2]);
+
+		$reasons = $this->controller($queue)->index()->getData()['skip_reasons'];
+
+		$this->assertSame('', $reasons[0]['code']);
+		$this->assertSame(5453, $reasons[0]['count']);
+		$this->assertStringContainsString('No reason recorded', $reasons[0]['label']);
+		$this->assertSame(5455, array_sum(array_column($reasons, 'count')));
+	}
+
 	public function testNoSkippedRowsMeansNoReasons(): void
 	{
 		$queue = $this->createMock(Queue::class);

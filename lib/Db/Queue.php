@@ -1218,11 +1218,10 @@ class Queue extends QBMapper
 			->groupBy('reason_code');
 		$out = [];
 		foreach ($qb->executeQuery()->fetchAll() as $row) {
-			$code = (string) ($row['reason_code'] ?? '');
-			if ($code === '') {
-				continue;
-			}
-			$out[$code] = (int) $row['n'];
+			// An empty code is a real bucket, not noise: the pre-worker rows
+			// were skipped before reason codes existed, and dropping them here
+			// would make the parts stop adding up to the total.
+			$out[(string) ($row['reason_code'] ?? '')] = (int) $row['n'];
 		}
 		arsort($out);
 		return $out;

@@ -110,3 +110,70 @@ def test_image_conversion_survives_the_bomb_guard(tmp_path) -> None:
         else:
             sys.modules["img2pdf"] = original
     assert before == Image.MAX_IMAGE_PIXELS, "the guard is restored even on refusal"
+
+
+def test_an_empty_source_is_not_a_malformed_request() -> None:
+    """The 422 body used to be read as file bytes.
+
+    The app answers 422 with `{"ocs":{"data":{"reason_code":
+    "error_source_file_zero_bytes"}}}`. `_download` returned that response, the
+    caller streamed the JSON as if it were the document, saw an empty stream and
+    the row said `error_worker_got_empty_file` — a transport story for a file
+    that is simply 0 bytes and will never be anything else.
+    """
+    from nc_ocr_flow.queue_client import QueueProtocolError
+    from nc_ocr_flow.runner import classify_failure
+    from nc_ocr_flow.stage_events import reason_code_for
+
+    exc = QueueProtocolError(
+        "job 7: the app refused the source (error_source_file_zero_bytes)",
+        status_code=422,
+        app_reason_code="error_source_file_zero_bytes",
+    )
+
+    word = classify_failure(exc)
+    assert word == "empty_source"
+    assert reason_code_for(word) == "error_source_file_zero_bytes"
+
+
+def test_a_422_without_a_named_reason_is_still_a_malformed_request() -> None:
+    from nc_ocr_flow.queue_client import QueueProtocolError
+    from nc_ocr_flow.runner import classify_failure
+
+    exc = QueueProtocolError("job 7: the app answered 422", status_code=422)
+
+    assert classify_failure(exc) == "app_4xx"
+
+
+def test_the_download_endpoint_reads_the_reason_from_a_422(tmp_path) -> None:
+    """Pinned at the client: the body is a reason, never the document."""
+    import pytest
+
+    from nc_ocr_flow.queue_client import QueueClient, QueueProtocolError
+
+    class _Response:
+        status_code = 422
+
+        @staticmethod
+        def json():
+            return {"ocs": {"data": {"reason_code": "error_source_file_zero_bytes"}}}
+
+    class _Session:
+        @staticmethod
+        def get(*_args, **_kwargs):
+            return _Response()
+
+    client = object.__new__(QueueClient)
+    client.session = _Session()
+    client.base_url = "https://example.invalid"
+    client.timeout = 5
+    client.secret = "s"
+    client.worker_id = 1
+    client.worker_name = "test:1:abcdef"
+    client.host = "test"
+
+    with pytest.raises(QueueProtocolError) as caught:
+        client.fetch_file(9, tmp_path / "job.bin", claim="t")
+
+    assert caught.value.status_code == 422
+    assert caught.value.app_reason_code == "error_source_file_zero_bytes"
