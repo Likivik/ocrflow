@@ -123,7 +123,9 @@ def verify_dav_credentials() -> None:
 LISTEN_HOST = env_str("NC_OCR_LISTEN_HOST", "127.0.0.1")
 LISTEN_PORT = env_int("NC_OCR_LISTEN_PORT", 8095)
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".heic"}
+# .tif is the extension Windows and most scanners actually write; .tiff is the
+# same format. Two 26 MB certificates were refused over the missing four letters.
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".heic"}
 PDF_EXTS = {".pdf"}
 PROCESSABLE_EXTS = IMAGE_EXTS | PDF_EXTS
 
