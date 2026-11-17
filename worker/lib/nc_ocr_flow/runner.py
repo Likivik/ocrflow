@@ -73,6 +73,17 @@ def _classify_by_text(exc: BaseException) -> str:
         return "empty_stream"
     if name == "ImageTooLarge" or "too large to analyse" in text:
         return "image_too_large"
+    if name == "ClassifierUnavailable" or "classifier unavailable" in text:
+        # The ONNX model is missing or broken. The pipeline fails closed (no
+        # conversion, no deletion), and the operator has to fix the model; the
+        # old path landed this on `unknown`, which reads as "the worker sent a
+        # code the app does not know" — the opposite of the truth.
+        return "classifier_unavailable"
+    if name == "FileGone":
+        # The file was deleted or moved between queueing and reading. Nothing
+        # about the worker's request was malformed, and no retry can help: the
+        # app_4xx bucket told the operator to fix a request that was fine.
+        return "file_gone"
     if "no such job" in text or "no longer exists" in text:
         return "app_4xx"
     if "credentials" in text or "defaultcredentials" in name.lower():

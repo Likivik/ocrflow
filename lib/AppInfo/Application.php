@@ -8,6 +8,7 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\AppInfo;
 
 use OCA\OcrFlow\BackgroundJob\ReconcileJob;
+use OCA\OcrFlow\Listener\DeletedFileListener;
 use OCA\OcrFlow\Listener\FileListener;
 use OCP\AppFramework\App;
 use OCP\AppFramework\Bootstrap\IBootContext;
@@ -15,6 +16,7 @@ use OCP\AppFramework\Bootstrap\IBootstrap;
 use OCP\AppFramework\Bootstrap\IRegistrationContext;
 use OCP\BackgroundJob\IJobList;
 use OCP\Files\Events\Node\NodeCreatedEvent;
+use OCP\Files\Events\Node\NodeDeletedEvent;
 use OCP\Files\Events\Node\NodeWrittenEvent;
 
 class Application extends App implements IBootstrap
@@ -58,6 +60,10 @@ class Application extends App implements IBootstrap
 		// request that uploaded the file.
 		$context->registerEventListener(NodeCreatedEvent::class, FileListener::class);
 		$context->registerEventListener(NodeWrittenEvent::class, FileListener::class);
+		// A deleted file is not work. The reconciler only walks files that
+		// exist, so its queued row would otherwise reach a worker that fetches
+		// nothing and writes an error about a file the owner deleted.
+		$context->registerEventListener(NodeDeletedEvent::class, DeletedFileListener::class);
 	}
 
 	public function boot(IBootContext $context): void

@@ -72,6 +72,8 @@ REASON_CODES: dict[str, str] = {
     "unsupported_ext": "skip_file_type_unsupported",
     # Failure words (runner.classify_failure), canonicalised at the wire.
     "empty_stream": "error_worker_got_empty_file",
+    "file_gone": "error_worker_file_gone",
+    "classifier_unavailable": "error_classifier_unavailable",
     "credentials_missing": "error_provider_credentials_missing",
     "app_4xx": "error_worker_request_malformed",
     "app_5xx": "error_app_answered_5xx",

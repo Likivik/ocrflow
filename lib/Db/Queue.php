@@ -674,6 +674,27 @@ class Queue extends QBMapper
 	}
 
 	/**
+	 * Drop the queued rows for a file that no longer exists.
+	 *
+	 * The reconciler only sees files; a file that is gone is invisible to it, so
+	 * its queued row would sit in the queue until a worker claimed it, fetched
+	 * nothing and wrote an error about a file the owner had already deleted.
+	 * Deleting the row at the source keeps the queue about files that exist.
+	 *
+	 * Only `queued` rows go: a `claimed` row belongs to a worker mid-fetch, and
+	 * that worker reports its own outcome (FileGone, which now reads as "the
+	 * file was deleted or moved"). History — done, skipped, error — stays.
+	 */
+	public function deleteQueuedForFile(int $fileId): int
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->delete(self::JOBS)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_QUEUED)));
+		return $qb->executeStatement();
+	}
+
+	/**
 	 * Ids of terminal rows whose reason code is $code, oldest first.
 	 *
 	 * The bulk door of `forceRequeue()`: an operator selects a population
@@ -1176,6 +1197,37 @@ class Queue extends QBMapper
 	 * @return array<string, int>
 	 * @throws Exception
 	 */
+	/**
+	 * Skipped rows by reason code, biggest first.
+	 *
+	 * One "Skipped" number hides six different decisions: a photo, a born-digital
+	 * PDF, our own stamp, a foreign tesseract layer, an unsupported type. They
+	 * mean opposite things to the person reading the panel, so the count is split
+	 * where the decision was made — on `reason_code`, which the worker already
+	 * records.
+	 *
+	 * @return array<string, int> code => count, biggest first
+	 */
+	public function skippedByReason(): array
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('reason_code')
+			->selectAlias($qb->func()->count('*'), 'n')
+			->from(self::JOBS)
+			->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_SKIPPED)))
+			->groupBy('reason_code');
+		$out = [];
+		foreach ($qb->executeQuery()->fetchAll() as $row) {
+			$code = (string) ($row['reason_code'] ?? '');
+			if ($code === '') {
+				continue;
+			}
+			$out[$code] = (int) $row['n'];
+		}
+		arsort($out);
+		return $out;
+	}
+
 	public function counts(): array
 	{
 		$qb = $this->db->getQueryBuilder();

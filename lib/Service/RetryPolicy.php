@@ -176,6 +176,16 @@ final class RetryPolicy
 			'actor' => 'worker',
 		],
 
+		// -- drop ------------------------------------------------------------
+		// The file was deleted or moved after it was queued. No retry can
+		// read a file that is not there, and nothing needs fixing: the work
+		// is moot, and saying so is the honest answer.
+		'error_worker_file_gone' => [
+			'verdict' => 'drop',
+			'text' => 'The file was deleted or moved after it was queued.',
+			'actor' => 'nobody',
+		],
+
 		// -- needs_fix ----------------------------------------------------------
 		'error_worker_secret_rejected' => [
 			'verdict' => 'needs_fix',
@@ -195,6 +205,11 @@ final class RetryPolicy
 		'error_worker_request_malformed' => [
 			'verdict' => 'needs_fix',
 			'text' => 'The app refused the worker request as malformed (4xx).',
+			'actor' => 'deployment',
+		],
+		'error_classifier_unavailable' => [
+			'verdict' => 'needs_fix',
+			'text' => 'The document classifier is not available, so images cannot be checked.',
 			'actor' => 'deployment',
 		],
 		'error_worker_unclassified' => [
@@ -272,6 +287,8 @@ final class RetryPolicy
 		'save_refused' => 'error_result_write_failed',
 		'parse_produced_nothing' => 'error_engine_output_unreadable',
 		'empty_stream' => 'error_worker_got_empty_file',
+		'file_gone' => 'error_worker_file_gone',
+		'classifier_unavailable' => 'error_classifier_unavailable',
 		'image_too_large' => 'error_image_too_large',
 		'credentials_missing' => 'error_provider_credentials_missing',
 		'app_4xx' => 'error_worker_request_malformed',
