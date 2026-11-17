@@ -124,8 +124,8 @@ class StatusController extends OCSController
 			}
 
 			if ($id === 'queue') {
-				$rows[] = ['key' => 'queued', 'label' => 'waiting to be read', 'count' => $report['queue']['queued']];
-				$rows[] = ['key' => 'claimed', 'label' => 'being read right now', 'count' => $report['queue']['claimed']];
+				$rows[] = ['key' => 'queued', 'label' => 'waiting to be processed', 'count' => $report['queue']['queued']];
+				$rows[] = ['key' => 'claimed', 'label' => 'being processed right now', 'count' => $report['queue']['claimed']];
 				$count = $report['queue']['queued'] + $report['queue']['claimed'];
 			}
 

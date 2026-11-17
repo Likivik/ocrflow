@@ -99,6 +99,18 @@ class StatusBlocksTest extends TestCase
 		$this->assertSame([], $blocks[0]['rows']);
 	}
 
+	public function testTheQueueRowsSayProcessedNotRead(): void
+	{
+		// The panel is about files being processed, so the queue speaks that
+		// language; "read" was left over from the first cut of this report.
+		$queue = $this->controller($this->liveReport())->index()->getData()['blocks'][1];
+
+		$this->assertSame(
+			['waiting to be processed', 'being processed right now'],
+			array_column($queue['rows'], 'label'),
+		);
+	}
+
 	public function testTheReadBlockCountsFilesAndItsRowsSumToIt(): void
 	{
 		$read = $this->controller($this->liveReport())->index()->getData()['blocks'][2];
