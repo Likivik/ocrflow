@@ -567,6 +567,10 @@ export default {
 			try {
 				const { data } = await axios.get(`${BASE}/status`, { headers: { 'OCS-APIRequest': 'true' } })
 				this.counts = data?.ocs?.data?.queue ?? {}
+				// The reasons behind the Skipped total, each with the sentence
+				// the app already writes for its code. Server-side so the
+				// reader here stays dumb, and so a new reason needs no release.
+				this.skipReasons = data?.ocs?.data?.skip_reasons ?? []
 				this.updatedAt = new Date().toLocaleTimeString()
 			} catch (e) {
 				this.error = `Could not read the queue: ${e?.response?.status ?? e?.message ?? 'unknown error'}`
