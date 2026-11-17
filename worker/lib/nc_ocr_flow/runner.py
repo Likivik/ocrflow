@@ -50,6 +50,13 @@ def classify_failure(exc: BaseException) -> str:
     text/name rules: transport corruption with no answer is still unknown work,
     and unknown must stay bounded-retryable.
     """
+    # The app may have named the reason itself. An empty source is a fact
+    # about the file, and "malformed request" told the operator to fix a
+    # request that was fine — the same lie FileGone told.
+    app_code = getattr(exc, "app_reason_code", None)
+    if app_code == "error_source_file_zero_bytes":
+        return "empty_source"
+
     status = getattr(exc, "status_code", None)
     if status is not None:
         if status in (401, 403):

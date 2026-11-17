@@ -72,6 +72,8 @@ REASON_CODES: dict[str, str] = {
     "unsupported_ext": "skip_file_type_unsupported",
     # Failure words (runner.classify_failure), canonicalised at the wire.
     "empty_stream": "error_worker_got_empty_file",
+    # The app refused the source before streaming anything: it is 0 bytes.
+    "empty_source": "error_source_file_zero_bytes",
     "file_gone": "error_worker_file_gone",
     "classifier_unavailable": "error_classifier_unavailable",
     "credentials_missing": "error_provider_credentials_missing",

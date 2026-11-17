@@ -66,9 +66,18 @@ class QueueProtocolError(RuntimeError):
     503 ("try later") both arrive here, and only one of them is work to redo.
     """
 
-    def __init__(self, message: str, status_code: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        status_code: int | None = None,
+        app_reason_code: str | None = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
+        #: The app's own code for this answer, when it named one in the body.
+        #: A 422 carrying `error_source_file_zero_bytes` is a fact about the
+        #: source, not a malformed request, and the classifier must see it.
+        self.app_reason_code = app_reason_code
 
 
 class FileGone(QueueProtocolError):
@@ -299,10 +308,30 @@ class QueueClient:
             )
         if response.status_code == 404:
             raise FileGone(f"job {job_id}: the app reports the file no longer exists")
+        if response.status_code == 422:
+            # The app answers 422 with a JSON body naming the reason. Reading
+            # that body as file bytes is what produced "the app streamed an
+            # empty file" for a file that was simply 0 bytes on disk.
+            code = ""
+            try:
+                ocs = response.json()
+                code = str((ocs.get("ocs") or {}).get("data", {}).get("reason_code", ""))
+            except Exception:
+                pass
+            raise QueueProtocolError(
+                f"job {job_id}: the app refused the source" + (f" ({code})" if code else ""),
+                status_code=422,
+                app_reason_code=code or None,
+            )
         if response.status_code == 409:
             raise ClaimStale(
                 f"job {job_id}: the app refused the claim reference on the file endpoint",
                 status_code=409,
+            )
+        if 400 <= response.status_code < 500:
+            raise QueueProtocolError(
+                f"job {job_id}: the app answered {response.status_code}",
+                status_code=response.status_code,
             )
         if response.status_code >= 500:
             raise QueueProtocolError(

@@ -72,6 +72,14 @@ class StatusController extends OCSController
 			// `entry()` answers a sentence even for a code it has never
 			// heard of — the "unknown code" one, which is about the worker,
 			// not about this skip. An unknown skip reason shows itself.
+			if ($code === '') {
+				$out[] = [
+					'code' => '',
+					'label' => 'No reason recorded (queued before reason codes)',
+					'count' => $count,
+				];
+				continue;
+			}
 			$entry = $policy->isKnown($code) ? $policy->entry($code) : null;
 			$out[] = [
 				'code' => $code,

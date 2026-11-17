@@ -98,7 +98,7 @@ class QueueController extends OCSController
 				fclose($opened['handle']);
 			}
 			return new DataResponse(
-				['message' => 'file is empty', 'reason_code' => 'empty_source'],
+				['message' => 'file is empty', 'reason_code' => 'error_source_file_zero_bytes'],
 				Http::STATUS_UNPROCESSABLE_ENTITY,
 			);
 		}
