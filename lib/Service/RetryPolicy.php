@@ -464,6 +464,56 @@ final class RetryPolicy
 	}
 
 	/**
+	 * The report blocks, in the order the panel shows them.
+	 *
+	 * A block is a statement about the FILE, not about a run: "OCRed by us" is
+	 * every file we read, whichever row did it and however many rows it took.
+	 *
+	 * @var array<string, string>
+	 */
+	public const BLOCKS = [
+		'not_processed' => 'Not processed yet',
+		'queue' => 'In the queue',
+		'read' => 'OCRed by us',
+		'born_digital' => 'Born digital',
+		'image' => 'Classified as image',
+		'error' => 'Can\'t read',
+	];
+
+	/**
+	 * Codes whose block cannot be read off the `error_` prefix.
+	 *
+	 * @var array<string, string>
+	 */
+	private const CODE_BLOCKS = [
+		'skip_text_native' => 'born_digital',
+		'skip_classifier_says_photo' => 'image',
+		'skip_ocred_by_ocrflow' => 'read',
+		'skip_ocred_by_ocrflow_found_nothing' => 'read',
+		'skip_file_type_unsupported' => 'error',
+	];
+
+	/**
+	 * Which block a code belongs to.
+	 *
+	 * No code means a `done` row: the file was read. An `error_` code means the
+	 * file was not read. Anything else unknown is `error` too — claiming "OCRed
+	 * by us" for a word the app does not understand would be a lie in the one
+	 * place that must not lie.
+	 */
+	public function blockOf(?string $code): string
+	{
+		if ($code === null || $code === '') {
+			return 'read';
+		}
+		$canonical = $this->canonical($code);
+		if (array_key_exists($canonical, self::CODE_BLOCKS)) {
+			return self::CODE_BLOCKS[$canonical];
+		}
+		return 'error';
+	}
+
+	/**
 	 * The whole entry: verdict, label, fix hint, actor.
 	 *
 	 * @return array{verdict: string, label: string, fix: string, actor: string}|null
