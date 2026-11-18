@@ -1455,6 +1455,43 @@ class Queue extends QBMapper
 	}
 
 	/**
+	 * The engine recorded on each file's last `done` row.
+	 *
+	 * @param list<int> $fileIds
+	 * @return array<int, string>
+	 */
+	private function lastDoneEngines(array $fileIds): array
+	{
+		$out = [];
+		foreach (array_chunk($fileIds, 2000) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('file_id')
+				->selectAlias($qb->func()->max('id'), 'mid')
+				->from(self::JOBS)
+				->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_DONE)))
+				->andWhere($qb->expr()->in('file_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+				->groupBy('file_id');
+			$mids = [];
+			foreach ($qb->executeQuery()->fetchAll() as $row) {
+				$mids[] = (int) $row['mid'];
+			}
+			if ($mids === []) {
+				continue;
+			}
+			$qb2 = $this->db->getQueryBuilder();
+			$qb2->select('file_id', 'engine')
+				->from(self::JOBS)
+				->where($qb2->expr()->in('id', $qb2->createNamedParameter($mids, IQueryBuilder::PARAM_INT_ARRAY)));
+			foreach ($qb2->executeQuery()->fetchAll() as $row) {
+				if ($row['engine'] !== null && $row['engine'] !== '') {
+					$out[(int) $row['file_id']] = (string) $row['engine'];
+				}
+			}
+		}
+		return $out;
+	}
+
+	/**
 	 * Read files split by the engine and version that read them.
 	 *
 	 * The ledger is the durable answer (`engine`, `engine_version`, never
@@ -1480,9 +1517,15 @@ class Queue extends QBMapper
 				];
 			}
 		}
+		// The newest row of a file we read is often the "already OCRed by us"
+		// skip, which carries no engine; the read itself is an older `done`
+		// row. 405 live files were labelled "engine not recorded" because the
+		// engine was taken from the newest row instead of from the read.
+		$lastRead = $this->lastDoneEngines(array_keys($readIds));
+
 		$counts = [];
 		foreach ($readIds as $fileId => $jobEngine) {
-			$engine = $ledger[$fileId]['engine'] ?? $jobEngine;
+			$engine = $ledger[$fileId]['engine'] ?? $jobEngine ?? $lastRead[$fileId] ?? null;
 			$version = $ledger[$fileId]['version'] ?? null;
 			$key = ($engine ?? '') . '|' . ($version ?? '');
 			$counts[$key] = ($counts[$key] ?? 0) + 1;
