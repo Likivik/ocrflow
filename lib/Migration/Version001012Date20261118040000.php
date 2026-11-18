@@ -50,19 +50,14 @@ class Version001012Date20261118040000 extends SimpleMigrationStep
 	{
 		// Portable form: `MAX(id)` per file, then join back for the columns.
 		// (Postgres has DISTINCT ON, MySQL and SQLite do not.)
+		// `ocrflow_jobs` records the engine, never the version — the version
+		// lives only on the ledger and in the file's stamp. So this fills the
+		// engine and leaves the version empty, which is exactly the honest
+		// label: "google, version not recorded".
 		$changed = $this->connection->executeStatement(
 			'UPDATE `*PREFIX*ocrflow_files` SET
 				`engine` = (
 					SELECT j.`engine` FROM `*PREFIX*ocrflow_jobs` j
-					WHERE j.`id` = (
-						SELECT MAX(j2.`id`) FROM `*PREFIX*ocrflow_jobs` j2
-						WHERE j2.`file_id` = `*PREFIX*ocrflow_files`.`file_id`
-							AND j2.`status` = \'done\'
-							AND j2.`engine` IS NOT NULL
-					)
-				),
-				`engine_version` = (
-					SELECT j.`engine_version` FROM `*PREFIX*ocrflow_jobs` j
 					WHERE j.`id` = (
 						SELECT MAX(j2.`id`) FROM `*PREFIX*ocrflow_jobs` j2
 						WHERE j2.`file_id` = `*PREFIX*ocrflow_files`.`file_id`
