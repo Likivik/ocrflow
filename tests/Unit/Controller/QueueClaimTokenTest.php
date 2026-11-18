@@ -182,8 +182,13 @@ class QueueClaimTokenTest extends TestCase
 		$this->assertSame(Http::STATUS_CONFLICT, $response->getStatus());
 	}
 
-	public function testATokenForAFinishedJobIsRefusedWith409(): void
+	public function testARetryOfAnAlreadySettledReportAnswersSuccess(): void
 	{
+		// The contract changed on purpose. A finished job used to answer 409,
+		// which made the worker's one defence against a lost answer — send it
+		// again — look like a stale claim. Three live rows stayed claimed for
+		// eleven hours because of that. The row is settled; the report changes
+		// nothing; the honest answer to "record this" is "it is recorded".
 		$this->queue->method('getById')->willReturn($this->claimedJob('tok-abc', Queue::STATUS_DONE));
 		$this->headers[Application::CLAIM_HEADER] = 'tok-abc';
 
@@ -191,8 +196,9 @@ class QueueClaimTokenTest extends TestCase
 
 		$response = $this->controller()->result(7);
 
-		$this->assertSame(Http::STATUS_CONFLICT, $response->getStatus());
-		$this->assertStaleRefusal($response);
+		$this->assertSame(Http::STATUS_OK, $response->getStatus());
+		$this->assertTrue($response->getData()['already_settled'] ?? false, 'the answer says the row was already settled');
+		$this->assertFalse($response->getData()['applied'] ?? true, 'and that this call wrote nothing');
 	}
 
 	public function testFailureWithAWrongTokenIsRefusedAndNothingIsWritten(): void

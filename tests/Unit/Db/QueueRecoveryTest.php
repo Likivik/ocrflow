@@ -163,26 +163,28 @@ class QueueRecoveryTest extends TestCase
 		}
 	}
 
-	public function testTheRuleIsTheHeartbeatNotAClockWindow(): void
+	public function testTheRuleIsTheLeaseNotTheHeartbeat(): void
 	{
 		$this->selectResult = [];
 
-		$this->queue()->requeueStale(180);
+		$this->queue()->requeueStale(90);
 
-		// The selection must join the worker registry and compare its
-		// last_seen_at — and must NOT carry the old blind `claimed_at < cutoff`
-		// window anywhere in the statement.
+		// The rule changed on purpose. A heartbeat proves the process lives,
+		// never that it still owns this job: three rows were held by healthy,
+		// beating workers whose report had been lost to a 502. Recovery reads
+		// the lease the holder renews, and the registry only as a second
+		// signal for a holder that vanished outright.
 		$joined = implode(' | ', $this->predicates);
-		$this->assertStringContainsString('lt:w.last_seen_at', $joined);
-		$this->assertStringContainsString('isnull:j.claimed_by_worker_id', $joined);
-		$this->assertStringNotContainsString('lt:j.claimed_at', $joined);
-		// The cutoff must be bound as a datetime, not as a string: without
-		// the type, Doctrine dies mid-bind and the reconcile tick crashes —
-		// the integration smoke caught this, no unit test did.
-		$this->assertNotEmpty($this->paramTypes, 'the cutoff must be a typed datetime parameter');
-		foreach ($this->paramTypes as $type) {
-			$this->assertNotNull($type, 'the DateTime cutoff was bound without a type');
-		}
+		$this->assertStringContainsString('lt:j.claim_expires_at', $joined, 'an expired lease is the primary rule');
+		$this->assertStringContainsString('isnull:j.claim_expires_at', $joined, 'a pre-lease claim never promised a renewal');
+		$this->assertStringContainsString('isnull:w.id', $joined, 'a vanished holder is still a reason');
+		$this->assertStringNotContainsString('lt:w.last_seen_at', $joined, 'a live heartbeat must not keep an unreported claim alive');
+		// The cutoff is bound as an integer epoch (now - 90): the lease is
+		// arithmetic, and a string-bound DateTime once crashed this tick.
+		$bound = $this->queryParams === [] ? [] : $this->queryParams[0];
+		$ints = array_values(array_filter($bound, static fn ($v) => is_int($v)));
+		$this->assertNotEmpty($ints, 'the lease cutoff must be bound as an integer epoch');
+		$this->assertEqualsWithDelta(time() - 90, $ints[0], 5, 'the cutoff is the lease window the caller passed');
 	}
 
 	public function testTheRequeueOnlyTouchesClaimedRows(): void

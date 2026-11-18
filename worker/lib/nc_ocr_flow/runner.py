@@ -25,7 +25,7 @@ from typing import Any
 from . import quota_gate
 from . import slots as slots_mod
 from .config import env_float, env_int, env_str
-from .queue_client import ClaimStale, Job, QueueClient
+from .queue_client import ClaimStale, Job, QueueClient, QueueProtocolError
 from .quota_gate import QuotaGate
 from .readiness import report_configured_engine
 from .stage_events import StageCollector, collector_scope, reason_code_for, verdict_code
@@ -183,6 +183,33 @@ def _report(
     )
 
 
+def start_lease_renewal(
+    client: QueueClient,
+    job_id: int,
+    claim: str | None,
+    seconds: float = 30.0,
+) -> threading.Event:
+    """Keep a claim's lease alive while the job is being worked on.
+
+    The lease, not the worker's heartbeat, is what recovery reads: a heartbeat
+    proves the process lives, never that it still owns this job. Renewal is
+    therefore per job, and it stops the moment the claim is gone.
+    """
+    stop = threading.Event()
+
+    def _renew() -> None:
+        while not stop.wait(seconds):
+            try:
+                if not client.renew(job_id, claim):
+                    log.warning("job %s: the lease is gone; stopping renewal", job_id)
+                    return
+            except Exception as exc:  # a failed renewal is retried next tick
+                log.warning("job %s: lease renewal failed: %s", job_id, exc)
+
+    threading.Thread(target=_renew, name=f"ocrflow-lease-{job_id}", daemon=True).start()
+    return stop
+
+
 def run_once(
     client: QueueClient,
     process: Callable[..., dict[str, Any]],
@@ -202,6 +229,14 @@ def run_once(
     if job is None:
         return False
 
+    lease = start_lease_renewal(client, job.id, job.claim_token)
+    try:
+        return _handle(client, job, process)
+    finally:
+        lease.set()
+
+
+def _handle(client: QueueClient, job: Job, process: Callable[..., dict[str, Any]]) -> bool:
     log.info(
         "claimed job %s for %s (attempt %s, engine=%s)",
         job.id,
@@ -257,14 +292,27 @@ def run_once(
         # failure code so the row says which stage failed, not just that
         # something did.
         collector.mark_last_reason(code)
-        client.failure(
-            job.id,
-            error=f"{type(exc).__name__}: {exc}",
-            reason="worker_error",
-            reason_code=code,
-            stage_events=collector.as_json(),
-            claim=job.claim_token,
-        )
+        try:
+            client.failure(
+                job.id,
+                error=f"{type(exc).__name__}: {exc}",
+                reason="worker_error",
+                reason_code=code,
+                stage_events=collector.as_json(),
+                claim=job.claim_token,
+            )
+        except ClaimStale as stale:
+            log.warning("job %s: the claim is gone; nothing to release: %s", job.id, stale)
+        except QueueProtocolError as report_exc:
+            # The app never recorded this outcome. Waiting out the lease would
+            # leave the slot idle on work nobody is doing, so hand the claim
+            # back now — the row is queueable again on the next poll.
+            log.error(
+                "job %s: could not report the failure (%s); releasing the claim",
+                job.id,
+                report_exc,
+            )
+            client.release(job.id, job.claim_token)
         return True
 
     outcome = outcome or {}
@@ -286,6 +334,11 @@ def run_once(
         log.warning(
             "job %s abandoned at report time: the claim reference is stale: %s", job.id, exc
         )
+    except QueueProtocolError as exc:
+        # The app never recorded the outcome. Hand the claim back now rather
+        # than making the row wait out its lease.
+        log.error("job %s: could not report the result (%s); releasing the claim", job.id, exc)
+        client.release(job.id, job.claim_token)
     return True
 
 

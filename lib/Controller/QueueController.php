@@ -415,6 +415,18 @@ class QueueController extends OCSController
 		if ($job === null) {
 			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
 		}
+		// Already settled: the worker's report arrived, the app wrote it, and
+		// the answer was lost in a 502 or a restart. Re-sending the same report
+		// must succeed — a retry is the worker's only defence against a lost
+		// answer, and the work is already recorded whichever worker reported it.
+		if (in_array($job->getStatus(), [Queue::STATUS_DONE, Queue::STATUS_SKIPPED, Queue::STATUS_ERROR], true)) {
+			return new DataResponse([
+				'id' => $id,
+				'status' => $job->getStatus(),
+				'applied' => false,
+				'already_settled' => true,
+			]);
+		}
 		if (
 			$job->getStatus() !== Queue::STATUS_CLAIMED
 			|| $job->getClaimToken() === null
@@ -764,6 +776,57 @@ class QueueController extends OCSController
 			'applied' => $applied,
 			'stashed' => $stashed,
 		]);
+	}
+
+	/**
+	 * Extend the lease on a job this worker is still working on.
+	 *
+	 * The lease is what recovery reads, so a worker on a long PDF keeps it by
+	 * renewing, and a worker that dies simply stops. A false answer means the
+	 * claim is no longer this worker's: stop, because the result would be
+	 * refused anyway.
+	 */
+	#[PublicPage]
+	public function renew(int $id): DataResponse
+	{
+		if (($denied = $this->denyIfNotWorker()) !== null) {
+			return $denied;
+		}
+		$job = $this->queue->getById($id);
+		if ($job === null) {
+			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
+		}
+		$token = (string) $this->request->getHeader(Application::CLAIM_HEADER);
+		$renewed = $this->queue->renewClaim($id, $token);
+		return new DataResponse(
+			['id' => $id, 'renewed' => $renewed],
+			$renewed ? Http::STATUS_OK : Http::STATUS_CONFLICT,
+		);
+	}
+
+	/**
+	 * Give a claim back without a verdict.
+	 *
+	 * The worker calls this when it cannot report an outcome: its report got a
+	 * 5xx and the retries ran out. Without it the row waits out the lease and
+	 * the slot sits idle on work nobody is doing.
+	 */
+	#[PublicPage]
+	public function release(int $id): DataResponse
+	{
+		if (($denied = $this->denyIfNotWorker()) !== null) {
+			return $denied;
+		}
+		$job = $this->queue->getById($id);
+		if ($job === null) {
+			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
+		}
+		$token = (string) $this->request->getHeader(Application::CLAIM_HEADER);
+		$released = $this->queue->release($id, $token);
+		return new DataResponse(
+			['id' => $id, 'released' => $released],
+			$released ? Http::STATUS_OK : Http::STATUS_CONFLICT,
+		);
 	}
 
 	#[PublicPage]

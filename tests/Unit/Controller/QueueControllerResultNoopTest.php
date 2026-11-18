@@ -102,13 +102,14 @@ class QueueControllerResultNoopTest extends TestCase
 		$this->assertTrue($payload['applied']);
 	}
 
-	public function testAResultForAJobWithoutAPendingRowRunsTheNormalPath(): void
+	public function testAResultForAnAlreadySettledJobIsIdempotent(): void
 	{
-		// Without a pending row the no-op does not swallow the call: the
-		// claim guard still answers a terminal job's stale claim reference
-		// with 409 (the queue mock has no finish/settleProduced stubs, so a
-		// swallowed path would fail the never() expectations instead).
+		// Without a pending row the no-op does not swallow the call, and the
+		// claim guard answers a terminal row with success: the report is a
+		// retry of one already recorded, not a stale claim. A swallowed path
+		// would fail the never() expectations instead.
 		$response = $this->controller(['status' => 'done'], false)->result(7);
-		$this->assertSame(Http::STATUS_CONFLICT, $response->getStatus());
+		$this->assertSame(Http::STATUS_OK, $response->getStatus());
+		$this->assertTrue($response->getData()['already_settled'] ?? false);
 	}
 }

@@ -74,12 +74,13 @@ class ReconcileJob extends TimedJob
 
 	protected function run($argument): void
 	{
-		// Evidence-based recovery: a claim goes back only when its holder's
-		// heartbeat is stale (or the holder is unknown), never on a timer —
-		// the old window requeued a live worker's long job from under it.
-		$requeued = $this->queue->requeueStale(Application::HEARTBEAT_STALE_SECONDS);
+		// Lease-based recovery: a claim goes back when the holder stopped
+		// renewing it. The worker's liveness is not evidence of ownership — a
+		// claim whose report was lost to a 502 belonged to a perfectly healthy
+		// worker and could never be recovered by a heartbeat rule.
+		$requeued = $this->queue->requeueStale(Queue::CLAIM_LEASE_SECONDS);
 		if ($requeued > 0) {
-			$this->logger->info('ocrflow: requeued ' . $requeued . ' claim(s) whose worker stopped heartbeating');
+			$this->logger->info('ocrflow: requeued ' . $requeued . ' claim(s) whose lease expired');
 		}
 
 		// Same tick, same job: prune the registry rows the claims above just
