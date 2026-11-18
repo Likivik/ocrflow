@@ -1307,16 +1307,23 @@ class Queue extends QBMapper
 	{
 		$ids = $this->diskFileIds($uid);
 		$ledger = $this->ledgerRowsFor(array_keys($ids));
+		// The queue is live state: a row is queued or claimed because a worker
+		// task exists right now. The ledger records what settled, so it cannot
+		// answer this — a file re-queued for re-OCR still reads "skipped" there
+		// until the worker finishes with it. Asking the ledger is how the panel
+		// came to say "In the queue 0" while 592 files sat in the queue.
+		$live = $this->liveQueueFor(array_keys($ids));
 
 		$byCode = [];
 		$queue = ['queued' => 0, 'claimed' => 0];
 		$readEngines = [];
+		$settled = 0;
 		foreach ($ledger as $fileId => $row) {
-			$status = (string) ($row['status'] ?? '');
-			if ($status === self::STATUS_QUEUED || $status === self::STATUS_CLAIMED) {
-				$queue[$status]++;
+			if (isset($live[$fileId])) {
+				$queue[$live[$fileId]]++;
 				continue;
 			}
+			$settled++;
 			$code = $row['reason'] === null ? '' : (string) $row['reason'];
 			$byCode[$code] = ($byCode[$code] ?? 0) + 1;
 			// "Read, no text found" is a subset marker: counted in `by_code`,
@@ -1326,17 +1333,52 @@ class Queue extends QBMapper
 				$readEngines[$key] = ($readEngines[$key] ?? 0) + 1;
 			}
 		}
+		foreach ($live as $fileId => $status) {
+			if (!isset($ledger[$fileId])) {
+				$queue[$status]++;
+			}
+		}
 
 		return [
 			'total' => count($ids),
-			// No ledger row at all: a file in our formats nobody has queued.
-			'never_processed' => count($ids) - count($ledger),
+			// No ledger row and no live row: a file in our formats nobody has
+			// queued yet.
+			'never_processed' => count($ids) - $settled - count($live),
 			'empty' => $this->emptyCount($uid),
 			'unreadable_format' => $this->unreadableFormatCount($uid),
 			'queue' => $queue,
 			'by_code' => $byCode,
 			'read_by_engine' => $this->engineSplit($readEngines),
 		];
+	}
+
+	/**
+	 * Files with a live worker task right now.
+	 *
+	 * @param list<int> $fileIds
+	 * @return array<int, string> file id => 'queued'|'claimed'
+	 */
+	private function liveQueueFor(array $fileIds): array
+	{
+		$out = [];
+		foreach (array_chunk($fileIds, 2000) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('file_id', 'status')
+				->from(self::JOBS)
+				->where($qb->expr()->in('status', $qb->createNamedParameter(
+					[self::STATUS_QUEUED, self::STATUS_CLAIMED],
+					IQueryBuilder::PARAM_STR_ARRAY,
+				)))
+				->andWhere($qb->expr()->in('file_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
+			foreach ($qb->executeQuery()->fetchAll() as $row) {
+				$fileId = (int) $row['file_id'];
+				// A claim outranks a queued row for the same file.
+				if (($out[$fileId] ?? '') !== self::STATUS_CLAIMED) {
+					$out[$fileId] = (string) $row['status'];
+				}
+			}
+		}
+		return $out;
 	}
 
 	/**
