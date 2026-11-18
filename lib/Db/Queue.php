@@ -1396,7 +1396,7 @@ class Queue extends QBMapper
 	 * path is supposed to write it; this finds the ones that did not. Read-only
 	 * by construction — it is an audit, not a repair.
 	 *
-	 * @return list<array{file_id: int, ledger_status: string, ledger_reason: ?string, job_status: string, job_reason: ?string}>
+	 * @return array{total: int, rows: list<array{file_id: int, ledger_status: string, ledger_reason: ?string, job_status: string, job_reason: ?string}>}
 	 */
 	public function ledgerDrift(int $limit = 500): array
 	{
@@ -1408,14 +1408,13 @@ class Queue extends QBMapper
 				[self::STATUS_DONE, self::STATUS_SKIPPED, self::STATUS_ERROR],
 				IQueryBuilder::PARAM_STR_ARRAY,
 			)))
-			->groupBy('file_id')
-			->setMaxResults($limit);
+			->groupBy('file_id');
 		$mids = [];
 		foreach ($qb->executeQuery()->fetchAll() as $row) {
 			$mids[(int) $row['mid']] = (int) $row['file_id'];
 		}
 		if ($mids === []) {
-			return [];
+			return ['total' => 0, 'rows' => []];
 		}
 
 		$jobs = [];
@@ -1442,31 +1441,29 @@ class Queue extends QBMapper
 			];
 		}
 
+		// `limit` caps what is printed, never what is examined — a truncated
+		// audit that reports "no drift" because it looked at 500 files is worse
+		// than no audit at all.
+		$total = 0;
 		$out = [];
 		foreach ($jobs as $fileId => $job) {
 			$row = $ledger[$fileId] ?? null;
-			if ($row === null) {
-				$out[] = [
-					'file_id' => $fileId,
-					'ledger_status' => '(no ledger row)',
-					'ledger_reason' => null,
-					'job_status' => $job['status'],
-					'job_reason' => $job['reason'],
-				];
+			if ($row !== null && $row['status'] === $job['status'] && $row['reason'] === $job['reason']) {
 				continue;
 			}
-			if ($row['status'] === $job['status'] && $row['reason'] === $job['reason']) {
+			$total++;
+			if (count($out) >= $limit) {
 				continue;
 			}
 			$out[] = [
 				'file_id' => $fileId,
-				'ledger_status' => $row['status'],
-				'ledger_reason' => $row['reason'],
+				'ledger_status' => $row === null ? '(no ledger row)' : $row['status'],
+				'ledger_reason' => $row === null ? null : $row['reason'],
 				'job_status' => $job['status'],
 				'job_reason' => $job['reason'],
 			];
 		}
-		return $out;
+		return ['total' => $total, 'rows' => $out];
 	}
 
 	/**
