@@ -59,11 +59,6 @@ class StatusController extends OCSController
 			// rows that add up to its total. This is the report; `queue` stays
 			// for the filter chips only.
 			'blocks' => $this->blocks(),
-			// Outside the processable set but still real files on disk.
-			'footnote' => [
-				'empty' => $report['empty'],
-				'unreadable_format' => $report['unreadable_format'],
-			],
 			// Whether the instance will do OCR at all. The sidebar can say
 			// "not configured" instead of offering a button that queues nothing.
 			'engine' => $this->engine->current(),
@@ -139,6 +134,21 @@ class StatusController extends OCSController
 						'label' => $policy->entry((string) $code)['text'] ?? (string) $code,
 						'count' => $n,
 					];
+				}
+				// Errors is every file we tried to read and could not — including
+				// the two kinds that never entered the pipeline, because they are
+				// errors of the same kind: the file cannot be read, and the user
+				// is the one who can fix it. Keeping them in a footnote below a
+				// total made them look like a rounding note.
+				if ($report['empty'] > 0) {
+					$rows[] = ['key' => 'empty', 'label' => 'an empty file (0 bytes)', 'count' => $report['empty']];
+				}
+				if ($report['unreadable_format'] > 0) {
+					$rows[] = ['key' => 'unreadable_format', 'label' => 'a format we do not read', 'count' => $report['unreadable_format']];
+				}
+				$count = 0;
+				foreach ($rows as $row) {
+					$count += (int) $row['count'];
 				}
 			}
 
