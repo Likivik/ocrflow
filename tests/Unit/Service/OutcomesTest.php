@@ -371,6 +371,37 @@ class OutcomesTest extends TestCase
 	}
 
 	/**
+	 * [unit] A known engine with NO version is Settled, never Decide.
+	 *
+	 * `meetsBar()` answers false when the version is missing, and the
+	 * stampVerdict that followed turned that false into `redo`. Live result:
+	 * 405 files whose row text read "already read and its result is at or
+	 * above the engine bar" sat in the To decide tab — one click from paying
+	 * to re-OCR documents that were fine. Missing evidence is not a verdict.
+	 */
+	public function testAKnownEngineWithNoVersionIsSettledNotDecide(): void
+	{
+		$store = new StoreOutcomes([]);
+		$store->ledger = [
+			$this->ledgerRow(31, 'skip_ocred_by_ocrflow', ['engine' => 'google', 'engine_version' => null]),
+			$this->ledgerRow(32, 'skip_ocred_by_ocrflow', ['engine' => 'google', 'engine_version' => '']),
+		];
+
+		$redoPaths = array_column($store->list('redo', 100)['rows'], 'path');
+		$this->assertNotContains('alice/files/file31.pdf', $redoPaths, 'no version, no verdict: never Decide');
+		$this->assertNotContains('alice/files/file32.pdf', $redoPaths);
+
+		$settled = $store->list('settled', 100)['rows'];
+		$byPath = array_column($settled, null, 'path');
+		foreach (['alice/files/file31.pdf', 'alice/files/file32.pdf'] as $path) {
+			$this->assertArrayHasKey($path, $byPath, $path . ' must be Settled');
+			$this->assertSame('version unknown: stamped before versions were recorded', $byPath[$path]['note']);
+		}
+
+		$this->assertSame(0, $store->estimate([31, 32], null)['files'], 'not a redo candidate, never estimated');
+	}
+
+	/**
 	 * [unit] Regression guards for the rule being kept: a KNOWN engine
 	 * below the bar IS a Decide row; a known engine at or above the bar is
 	 * Settled with no note. Only provenance we can compare goes to Decide.
