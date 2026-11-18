@@ -24,7 +24,7 @@ class LedgerCheckTest extends TestCase
 	private function tester(array $drift): CommandTester
 	{
 		$queue = $this->createMock(Queue::class);
-		$queue->method('ledgerDrift')->willReturn($drift);
+		$queue->method('ledgerDrift')->willReturn(['total' => count($drift), 'rows' => $drift]);
 
 		return new CommandTester(new LedgerCheck($queue));
 	}
@@ -56,6 +56,29 @@ class LedgerCheckTest extends TestCase
 		$this->assertStringContainsString('file 4242', $display);
 		$this->assertStringContainsString('ledger skipped (skip_text_native)', $display);
 		$this->assertStringContainsString('Nothing was changed', $display);
+	}
+
+	public function testTheCountIsTheDriftFoundNotTheRowsPrinted(): void
+	{
+		// A truncated audit that says "0 disagreements" because it only looked
+		// at the first page is the failure mode this guards against.
+		$queue = $this->createMock(Queue::class);
+		$queue->method('ledgerDrift')->willReturn([
+			'total' => 353,
+			'rows' => [[
+				'file_id' => 1,
+				'ledger_status' => 'skipped',
+				'ledger_reason' => 'mobilenet',
+				'job_status' => 'skipped',
+				'job_reason' => 'skip_classifier_says_photo',
+			]],
+		]);
+
+		$tester = new CommandTester(new LedgerCheck($queue));
+
+		$this->assertSame(Command::FAILURE, $tester->execute([]));
+		$this->assertStringContainsString('353 file(s)', $tester->getDisplay());
+		$this->assertStringContainsString('showing 1', $tester->getDisplay());
 	}
 
 	public function testAMissingLedgerRowIsItsOwnKindOfDrift(): void

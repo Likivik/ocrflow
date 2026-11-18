@@ -45,15 +45,18 @@ class LedgerCheck extends Command
 	protected function execute(InputInterface $input, OutputInterface $output): int
 	{
 		$limit = max(1, (int) $input->getOption('limit'));
-		$drift = $this->queue->ledgerDrift($limit);
+		$report = $this->queue->ledgerDrift($limit);
+		$total = (int) $report['total'];
+		$drift = $report['rows'];
 
-		if ($drift === []) {
+		if ($total === 0) {
 			$output->writeln('<info>ocrflow: the ledger agrees with the job rows.</info>');
 			return Command::SUCCESS;
 		}
 
 		$output->writeln(
-			'<comment>' . count($drift) . ' file(s) where the ledger and the last settled job row disagree:</comment>',
+			'<comment>' . $total . ' file(s) where the ledger and the last settled job row disagree'
+			. ($total > count($drift) ? ' (showing ' . count($drift) . ')' : '') . ':</comment>',
 		);
 		foreach ($drift as $row) {
 			$output->writeln(sprintf(
