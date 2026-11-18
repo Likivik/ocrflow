@@ -429,10 +429,24 @@ class Outcomes
 					note: 'engine unknown: stamped before provenance was recorded',
 				);
 			}
-			$verdict = $this->enginePolicy->stampVerdict(
-				$engine,
-				is_string($row['engine_version'] ?? null) && $row['engine_version'] !== '' ? $row['engine_version'] : null,
-			) === RetryPolicy::VERDICT_NOTHING_TO_DO
+			// The engine alone cannot clear the bar: `meetsBar` answers false
+			// for a missing version, and that false used to become `redo` —
+			// so 405 files read as "already read, at or above the bar" in the
+			// row text while sitting in Decide, one click from paying to
+			// re-OCR them. A missing version is missing evidence, not a
+			// verdict.
+			$version = is_string($row['engine_version'] ?? null) && $row['engine_version'] !== ''
+				? $row['engine_version']
+				: null;
+			if ($version === null) {
+				return $this->tabRow(
+					$row,
+					'settled',
+					done: false,
+					note: 'version unknown: stamped before versions were recorded',
+				);
+			}
+			$verdict = $this->enginePolicy->stampVerdict($engine, $version) === RetryPolicy::VERDICT_NOTHING_TO_DO
 				? 'settled'
 				: RetryPolicy::VERDICT_REDO;
 		}
