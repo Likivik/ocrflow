@@ -136,7 +136,6 @@ class StatusBlocksTest extends TestCase
 	{
 		$error = $this->controller($this->liveReport())->index()->getData()['blocks'][5];
 
-		$this->assertSame(5, $error['count']);
 		$this->assertSame('This file is damaged and cannot be read.', $error['rows'][0]['label']);
 	}
 
@@ -149,10 +148,25 @@ class StatusBlocksTest extends TestCase
 		$this->assertSame(1908, $blocks[4]['count']);
 	}
 
-	public function testTheFilesOutsideTheProcessableSetAreOnlyAFootnote(): void
+	public function testErrorsCountEverythingWeCannotReadIncludingWhatNeverEntered(): void
+	{
+		// The user's question was "Can't read 5 — and then two files outside the
+		// set in a footnote". All of it is the same sentence to them: these
+		// files cannot be read, and they are the ones who can fix it.
+		$error = $this->controller($this->liveReport())->index()->getData()['blocks'][5];
+
+		$this->assertSame(12, $error['count'], '5 damaged + 5 empty + 2 unsupported');
+		$this->assertSame(12, array_sum(array_column($error['rows'], 'count')), 'the rows add up to the block');
+		$this->assertSame(
+			['This file is damaged and cannot be read.', 'an empty file (0 bytes)', 'a format we do not read'],
+			array_column($error['rows'], 'label'),
+		);
+	}
+
+	public function testThereIsNoFootnoteLeftToExplainAwayTheMissingTwo(): void
 	{
 		$data = $this->controller($this->liveReport())->index()->getData();
 
-		$this->assertSame(['empty' => 5, 'unreadable_format' => 2], $data['footnote']);
+		$this->assertArrayNotHasKey('footnote', $data, 'the footnote moved into Errors');
 	}
 }

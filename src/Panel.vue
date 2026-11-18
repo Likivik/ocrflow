@@ -160,9 +160,6 @@
 			</ul>
 		</section>
 
-		<p v-if="footnote" class="ocrflow-panel__note">
-			{{ t('Outside the processable set: {empty} empty file(s), {unreadable} in a format we do not read.', { empty: footnote.empty, unreadable: footnote.unreadable_format }) }}
-		</p>
 
 		<p v-if="!blocks.length" class="ocrflow-panel__empty">
 			{{ t('Nothing has been queued yet.') }}
@@ -241,7 +238,6 @@ export default {
 		return {
 			counts: {},
 			blocks: [],
-			footnote: null,
 			folder: '',
 			busy: false,
 			error: '',
@@ -571,7 +567,6 @@ export default {
 				// the app already writes for its code. Server-side so the
 				// reader here stays dumb, and so a new reason needs no release.
 				this.blocks = data?.ocs?.data?.blocks ?? []
-				this.footnote = data?.ocs?.data?.footnote ?? null
 				this.updatedAt = new Date().toLocaleTimeString()
 			} catch (e) {
 				this.error = `Could not read the queue: ${e?.response?.status ?? e?.message ?? 'unknown error'}`
