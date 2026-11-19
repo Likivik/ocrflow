@@ -97,6 +97,12 @@ written.
 
 ### Fixed
 
+- **Fixed: the panel answered 500 on every load.** Two faults, both invisible to
+  unit tests: Nextcloud's function builder has no `AVG()` (the page estimate now
+  uses `SUM`/`COUNT` and divides in PHP), and its query builder refuses any
+  `IN (...)` wider than 1000 expressions on *every* driver, not just Oracle — the
+  7 000-file report, `occ ocrflow:ledger:check` and `requeueStale()` now walk
+  their ids in chunks of 900.
 - The panel's labels are labels now: engines are proper nouns (`Google`,
   `MiniMax`, `Tesseract`, `Engine not recorded`), every block row is a short
   noun phrase with the sentence moved to a tooltip, and `VOCAB` carries a

@@ -65,6 +65,13 @@ class Queue extends QBMapper
 	 * short enough that an orphaned claim (worker killed, report lost to a 502)
 	 * is back in the queue while the person is still looking at the panel.
 	 */
+
+	/**
+	 * How many ids one `IN (...)` may carry. Nextcloud's query builder refuses
+	 * more than 1000 expressions for Oracle's sake — and it refuses them on every
+	 * driver, so a 2 000-wide chunk is a 500, not a wide query.
+	 */
+	private const IN_CHUNK = 900;
 	public const CLAIM_LEASE_SECONDS = 90;
 
 	/**
@@ -1255,16 +1262,20 @@ class Queue extends QBMapper
 			return 0;
 		}
 
-		$qb = $this->db->getQueryBuilder();
-		$qb->update(self::JOBS)
-			->set('status', $qb->createNamedParameter(self::STATUS_QUEUED))
-			->set('claim_token', $qb->createNamedParameter(null))
-			->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
-			->set('claimed_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
-			->set('claim_expires_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
-			->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
-			->andWhere($qb->expr()->in('id', $qb->createNamedParameter($ids, IQueryBuilder::PARAM_INT_ARRAY)));
-		return $qb->executeStatement();
+		$released = 0;
+		foreach (array_chunk($ids, self::IN_CHUNK) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->update(self::JOBS)
+				->set('status', $qb->createNamedParameter(self::STATUS_QUEUED))
+				->set('claim_token', $qb->createNamedParameter(null))
+				->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
+				->set('claimed_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
+				->set('claim_expires_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
+				->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
+				->andWhere($qb->expr()->in('id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
+			$released += $qb->executeStatement();
+		}
+		return $released;
 	}
 
 	/**
@@ -1552,8 +1563,11 @@ class Queue extends QBMapper
 		$prefix = $uid . '/files/%';
 
 		$qb = $this->db->getQueryBuilder();
+		// No AVG in Nextcloud's function builder, and no reason to add one:
+		// SUM over COUNT is the same number and both are portable.
 		$qb->selectAlias($qb->func()->count('*'), 'n')
-			->selectAlias($qb->func()->avg('pages'), 'avg_pages')
+			->selectAlias($qb->func()->count('pages'), 'n_pages')
+			->selectAlias($qb->func()->sum('pages'), 'sum_pages')
 			->from(self::JOBS)
 			->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_DONE)))
 			->andWhere($qb->expr()->isNotNull('pages'))
@@ -1561,7 +1575,8 @@ class Queue extends QBMapper
 			->andWhere($qb->expr()->gt('finished_at', $qb->createNamedParameter(time() - $days * 86400, IQueryBuilder::PARAM_INT)));
 		$row = $qb->executeQuery()->fetch();
 		$samples = (int) ($row['n'] ?? 0);
-		$avg = $row['avg_pages'] ?? null;
+		$paged = (int) ($row['n_pages'] ?? 0);
+		$avg = $paged > 0 ? (float) $row['sum_pages'] / $paged : null;
 
 		$qb2 = $this->db->getQueryBuilder();
 		$qb2->selectAlias($qb2->func()->count('*'), 'n')
@@ -1634,7 +1649,7 @@ class Queue extends QBMapper
 	protected function fileRowsFor(array $fileIds): array
 	{
 		$out = [];
-		foreach (array_chunk($fileIds, 2000) as $chunk) {
+		foreach (array_chunk($fileIds, self::IN_CHUNK) as $chunk) {
 			$qb = $this->db->getQueryBuilder();
 			$qb->select('fileid', 'path', 'size', 'etag', 'mtime')
 				->from('filecache')
@@ -1661,7 +1676,7 @@ class Queue extends QBMapper
 	protected function terminalJobIdsFor(array $fileIds): array
 	{
 		$out = [];
-		foreach (array_chunk($fileIds, 2000) as $chunk) {
+		foreach (array_chunk($fileIds, self::IN_CHUNK) as $chunk) {
 			$qb = $this->db->getQueryBuilder();
 			$qb->select('file_id')
 				->selectAlias($qb->func()->max('id'), 'job_id')
@@ -1703,7 +1718,7 @@ class Queue extends QBMapper
 	protected function liveQueueFor(array $fileIds): array
 	{
 		$out = [];
-		foreach (array_chunk($fileIds, 2000) as $chunk) {
+		foreach (array_chunk($fileIds, self::IN_CHUNK) as $chunk) {
 			$qb = $this->db->getQueryBuilder();
 			$qb->select('file_id', 'status')
 				->from(self::JOBS)
@@ -1737,7 +1752,7 @@ class Queue extends QBMapper
 	protected function ledgerRowsFor(array $fileIds): array
 	{
 		$out = [];
-		foreach (array_chunk($fileIds, 2000) as $chunk) {
+		foreach (array_chunk($fileIds, self::IN_CHUNK) as $chunk) {
 			$qb = $this->db->getQueryBuilder();
 			$qb->select('file_id', 'status', 'reason', 'engine', 'engine_version')
 				->from(self::FILES)
