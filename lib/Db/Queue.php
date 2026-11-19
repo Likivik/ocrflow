@@ -57,6 +57,25 @@ class Queue extends QBMapper
 
 	private const MAX_CLAIM_TRIES = 8;
 
+	/**
+	 * How long a claim is valid without a renewal.
+	 *
+	 * Long enough that a slow page does not lose its job between renewals,
+	 * short enough that an orphaned claim (worker killed, report lost to a 502)
+	 * is back in the queue while the person is still looking at the panel.
+	 */
+	public const CLAIM_LEASE_SECONDS = 90;
+
+	/**
+	 * Absolute ceiling for one claim, renewals included.
+	 *
+	 * A worker that renews forever on a job that will never finish is
+	 * indistinguishable from one making progress, so the lease alone cannot
+	 * catch it. This cap can — and it is the only rule allowed to interrupt a
+	 * legitimately slow file.
+	 */
+	public const CLAIM_HARD_CAP_SECONDS = 7200;
+
 	/** Ids per chunked retention DELETE; small enough to keep locks short. */
 	private const DELETE_CHUNK = 500;
 
@@ -797,6 +816,9 @@ class Queue extends QBMapper
 				->set('claim_token', $up->createNamedParameter($token))
 				->set('claimed_by_worker_id', $up->createNamedParameter($workerId, IQueryBuilder::PARAM_INT))
 				->set('claimed_at', $up->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
+				// The lease starts now and is renewed while the worker works;
+				// recovery reads this, never the holder's heartbeat.
+				->set('claim_expires_at', $up->createNamedParameter(time() + self::CLAIM_LEASE_SECONDS, IQueryBuilder::PARAM_INT))
 				->set('attempts', $up->createFunction('attempts + 1'))
 				->where($up->expr()->eq('id', $up->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
 				->andWhere($up->expr()->eq('status', $up->createNamedParameter(self::STATUS_QUEUED)));
@@ -806,6 +828,50 @@ class Queue extends QBMapper
 			// Someone else claimed it between our SELECT and UPDATE: try again.
 		}
 		return null;
+	}
+
+	/**
+	 * Extend the lease on a claim this worker still holds.
+	 *
+	 * False means the lease is gone — requeued by recovery, settled elsewhere,
+	 * or the token is not the holder's. The worker's only correct answer is to
+	 * stop working on that job: its result would be refused anyway.
+	 * @throws Exception
+	 */
+	public function renewClaim(int $id, string $claimToken): bool
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->update(self::JOBS)
+			->set('claim_expires_at', $qb->createNamedParameter(time() + self::CLAIM_LEASE_SECONDS, IQueryBuilder::PARAM_INT))
+			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
+			->andWhere($qb->expr()->eq('claim_token', $qb->createNamedParameter($claimToken)));
+		return $qb->executeStatement() === 1;
+	}
+
+	/**
+	 * Hand a claim back without a verdict.
+	 *
+	 * The worker calls this when it cannot report an outcome — its report got a
+	 * 5xx and the retries ran out. The alternative is waiting out the lease,
+	 * which is minutes of a slot sitting on a job that nobody is doing. The
+	 * attempt already counted at claim time stays counted: a release is not a
+	 * free retry.
+	 * @throws Exception
+	 */
+	public function release(int $id, string $claimToken): bool
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->update(self::JOBS)
+			->set('status', $qb->createNamedParameter(self::STATUS_QUEUED))
+			->set('claim_token', $qb->createNamedParameter(null))
+			->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
+			->set('claimed_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
+			->set('claim_expires_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
+			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
+			->andWhere($qb->expr()->eq('claim_token', $qb->createNamedParameter($claimToken)));
+		return $qb->executeStatement() === 1;
 	}
 
 	/**
@@ -855,6 +921,7 @@ class Queue extends QBMapper
 			->set('finished_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
 			->set('claim_token', $qb->createNamedParameter(null))
 			->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
+			->set('claim_expires_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
 			// The operator's one-off decision ends with the job it was taken
 			// for: a force bit left on the row would make the NEXT ordinary
 			// scan of this file bypass the skip bar too, which nobody asked for.
@@ -1156,23 +1223,27 @@ class Queue extends QBMapper
 	 * @param int $heartbeatStaleSeconds how stale a worker's heartbeat may be
 	 * @throws Exception
 	 */
-	public function requeueStale(int $heartbeatStaleSeconds): int
+	public function requeueStale(int $heartbeatStaleSeconds = self::CLAIM_LEASE_SECONDS): int
 	{
-		$cutoff = new \DateTime('@' . (time() - $heartbeatStaleSeconds));
+		$now = time();
+		$leaseCutoff = $now - max(1, $heartbeatStaleSeconds);
+		$hardCutoff = $now - self::CLAIM_HARD_CAP_SECONDS;
 		$select = $this->db->getQueryBuilder();
 		$select->select('j.id')
 			->from(self::JOBS, 'j')
 			->leftJoin('j', 'ocrflow_workers', 'w', $select->expr()->eq('w.id', 'j.claimed_by_worker_id'))
 			->where($select->expr()->eq('j.status', $select->createNamedParameter(self::STATUS_CLAIMED)))
 			->andWhere($select->expr()->orX(
+				// The lease is the primary rule. A pre-lease row (NULL) never
+				// promised a renewal, so it counts as expired — that is what
+				// recovers the claims written before this column existed.
+				$select->expr()->isNull('j.claim_expires_at'),
+				$select->expr()->lt('j.claim_expires_at', $select->createNamedParameter($leaseCutoff, IQueryBuilder::PARAM_INT)),
+				// The holder vanished: its registry row is gone.
 				$select->expr()->isNull('j.claimed_by_worker_id'),
 				$select->expr()->isNull('w.id'),
-				// The type parameter is not decoration: without it Doctrine
-				// binds the DateTime as a string and the whole reconcile
-				// tick dies with "Object of class DateTime could not be
-				// converted to string" — caught by the integration smoke,
-				// not by any unit test.
-				$select->expr()->lt('w.last_seen_at', $select->createNamedParameter($cutoff, IQueryBuilder::PARAM_DATETIME_MUTABLE))
+				// A worker that renews forever on a hung job.
+				$select->expr()->lt('j.claimed_at', $select->createNamedParameter($hardCutoff, IQueryBuilder::PARAM_INT)),
 			));
 		$ids = [];
 		foreach ($select->executeQuery()->fetchAll() as $row) {
@@ -1188,6 +1259,7 @@ class Queue extends QBMapper
 			->set('claim_token', $qb->createNamedParameter(null))
 			->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
 			->set('claimed_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
+			->set('claim_expires_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
 			->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
 			->andWhere($qb->expr()->in('id', $qb->createNamedParameter($ids, IQueryBuilder::PARAM_INT_ARRAY)));
 		return $qb->executeStatement();

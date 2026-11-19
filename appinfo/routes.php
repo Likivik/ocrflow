@@ -21,6 +21,8 @@ return [
         ['name' => 'queue#resultFile', 'url' => '/api/v1/queue/{id}/result-file', 'verb' => 'POST'],
         ['name' => 'queue#result', 'url' => '/api/v1/queue/{id}/result', 'verb' => 'POST'],
         ['name' => 'queue#failure', 'url' => '/api/v1/queue/{id}/failure', 'verb' => 'POST'],
+        ['name' => 'queue#renew', 'url' => '/api/v1/queue/{id}/renew', 'verb' => 'POST'],
+        ['name' => 'queue#release', 'url' => '/api/v1/queue/{id}/release', 'verb' => 'POST'],
 
         // Worker registry: one registration at startup, then heartbeats.
         // The row id is the identity a claim points at; the heartbeat is the

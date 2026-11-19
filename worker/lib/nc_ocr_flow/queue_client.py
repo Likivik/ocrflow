@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -255,7 +256,7 @@ class QueueClient:
         nothing rather than claiming an empty run.
         """
         payload = {k: v for k, v in fields.items() if v is not None}
-        self._post(f"queue/{job_id}/result", data=payload, claim=claim)
+        self._post_settling(f"queue/{job_id}/result", data=payload, claim=claim)
 
     def failure(
         self,
@@ -279,7 +280,66 @@ class QueueClient:
             # A JSON string, because this payload is typed as strings: the
             # stage events travel as one opaque blob the app decodes.
             payload["stage_events"] = stage_events
-        self._post(f"queue/{job_id}/failure", data=payload, claim=claim)
+        self._post_settling(f"queue/{job_id}/failure", data=payload, claim=claim)
+
+    def renew(self, job_id: int, claim: str | None = None) -> bool:
+        """Extend the lease on a job we still hold.
+
+        ``False`` means the claim is gone: recovery requeued it, or another
+        worker settled it. The correct answer is to stop — a result reported
+        under a dead claim is refused anyway.
+        """
+        try:
+            response = self._post(f"queue/{job_id}/renew", claim=claim)
+        except ClaimStale:
+            return False
+        return response.status_code == 200
+
+    def release(self, job_id: int, claim: str | None = None) -> bool:
+        """Give the claim back without a verdict, when reporting failed."""
+        try:
+            response = self._post(f"queue/{job_id}/release", claim=claim)
+        except ClaimStale:
+            return False
+        return response.status_code == 200
+
+    def _post_settling(
+        self,
+        path: str,
+        data: dict[str, Any] | None = None,
+        claim: str | None = None,
+    ) -> None:
+        """POST an outcome, retrying the answers that are not about the outcome.
+
+        A 5xx or a dropped connection says nothing about the job: the app was
+        restarting, or the answer was lost on the way back. One attempt — what
+        this used to do — turns that into a claim nobody ever reported, and on
+        a real instance three rows sat claimed for eleven hours because of it.
+        A 409 is the opposite: the claim is gone, so retrying is wrong and the
+        caller must stop.
+        """
+        delays = (0, 1, 4, 16)
+        last: Exception | None = None
+        for attempt, delay in enumerate(delays):
+            if delay:
+                time.sleep(delay)
+            try:
+                self._post(path, data=data, claim=claim)
+                return
+            except ClaimStale:
+                # Not a transport failure: the claim is gone. Retrying would
+                # only repeat the refusal, and the caller must stop working.
+                raise
+            except (QueueProtocolError, requests.RequestException) as exc:
+                last = exc
+                log.warning(
+                    "settle %s: attempt %d/%d failed: %s",
+                    path,
+                    attempt + 1,
+                    len(delays),
+                    exc,
+                )
+        raise QueueProtocolError(f"could not report {path} after {len(delays)} attempts: {last}")
 
     def fetch_file(self, job_id: int, dest: Path, claim: str | None = None) -> Path:
         """Download a job's bytes into ``dest``.
