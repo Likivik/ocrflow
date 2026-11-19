@@ -97,6 +97,17 @@ written.
 
 ### Fixed
 
+- The settings panel's worklist is collapsed by default and its rows scroll
+  inside a bounded box while the filters and "Select all shown" stay put; the
+  heading count is the server's total, not the length of the page the panel
+  happens to hold.
+- A file deleted or moved before we read it is no longer listed as an error:
+  `error_worker_file_gone` is counted apart and shown nowhere. A stale job
+  reference still shows — the file is still there, and that is a different fact.
+- The read block names its reader: "by google, no text to transcribe" instead of
+  "read it, no text to transcribe", and "OCRed by OcrFlow" instead of "OCRed by
+  us". No-text rows split by engine only, so two versions of one reader do not
+  become two rows with one label.
 - Permanent OCR failures stay failed: `enqueue()` refuses to re-queue a file
   whose per-file ledger row records a permanent failure (`broken_pdf`,
   `bad_format`, `empty_source`, `no_text_detected`, `parse_produced_nothing`,

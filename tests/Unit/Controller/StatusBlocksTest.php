@@ -77,6 +77,10 @@ class StatusBlocksTest extends TestCase
 				['engine' => 'google', 'version' => '3.16.0', 'count' => 1630],
 				['engine' => 'google', 'version' => null, 'count' => 1012],
 			],
+			'no_text_by_engine' => [
+				['engine' => 'google', 'version' => null, 'count' => 15],
+			],
+			'gone' => 0,
 		];
 	}
 
@@ -121,7 +125,7 @@ class StatusBlocksTest extends TestCase
 		$this->assertSame(2657, array_sum(array_column($read['rows'], 'count')));
 		$this->assertSame('by google 3.16.0', $read['rows'][0]['label']);
 		$this->assertSame('by google, version not recorded', $read['rows'][1]['label']);
-		$this->assertSame('read it, no text to transcribe', $read['rows'][2]['label']);
+		$this->assertSame('by google, no text to transcribe', $read['rows'][2]['label'], 'the row names the reader, not us');
 	}
 
 	public function testAnUnknownVersionIsNotFlaggedAsBelowBar(): void
@@ -168,5 +172,14 @@ class StatusBlocksTest extends TestCase
 		$data = $this->controller($this->liveReport())->index()->getData();
 
 		$this->assertArrayNotHasKey('footnote', $data, 'the footnote moved into Errors');
+	}
+
+	public function testTheReadBlockSaysWhoReadTheFiles(): void
+	{
+		// "OCRed by us" named the app; the owner's question is which engine
+		// read their document.
+		$blocks = $this->controller($this->liveReport())->index()->getData()['blocks'];
+
+		$this->assertSame('OCRed by OcrFlow', $blocks[2]['label']);
 	}
 }

@@ -466,7 +466,7 @@ final class RetryPolicy
 	/**
 	 * The report blocks, in the order the panel shows them.
 	 *
-	 * A block is a statement about the FILE, not about a run: "OCRed by us" is
+	 * A block is a statement about the FILE, not about a run: "OCRed by OcrFlow" is
 	 * every file we read, whichever row did it and however many rows it took.
 	 *
 	 * @var array<string, string>
@@ -474,7 +474,7 @@ final class RetryPolicy
 	public const BLOCKS = [
 		'not_processed' => 'Not processed yet',
 		'queue' => 'In the queue',
-		'read' => 'OCRed by us',
+		'read' => 'OCRed by OcrFlow',
 		'born_digital' => 'Born digital',
 		'image' => 'Classified as image',
 		'error' => 'Can\'t read',
