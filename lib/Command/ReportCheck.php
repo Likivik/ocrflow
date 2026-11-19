@@ -240,7 +240,13 @@ class ReportCheck extends Command
 			[$engine, $version] = explode('|', $key, 2);
 			$out[] = ['engine' => $engine === '' ? null : $engine, 'version' => $version === '' ? null : $version, 'count' => $count];
 		}
-		usort($out, static fn (array $a, array $b): int => $b['count'] <=> $a['count']);
+		usort($out, static function (array $a, array $b): int {
+			// Count first, then the name: a tie broken by row order is a
+			// difference that shows up on one database and not another.
+			return ($b['count'] <=> $a['count'])
+				?: ((string) ($a['engine'] ?? '') <=> (string) ($b['engine'] ?? ''))
+				?: ((string) ($a['version'] ?? '') <=> (string) ($b['version'] ?? ''));
+		});
 		return $out;
 	}
 
@@ -253,7 +259,15 @@ class ReportCheck extends Command
 	 */
 	private function normalise(array $report): array
 	{
+		// `===` on arrays is order-sensitive, and the two implementations build
+		// their maps in different orders: the legacy one inserts `queued` first
+		// because that is how the loop meets it, the aggregate one lists
+		// `claimed` first because that is the precedence rule. Same numbers, and
+		// that is what this command exists to say.
 		ksort($report['by_code']);
+		if (is_array($report['queue'] ?? null)) {
+			ksort($report['queue']);
+		}
 		return $report;
 	}
 

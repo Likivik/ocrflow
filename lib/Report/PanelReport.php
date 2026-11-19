@@ -35,6 +35,9 @@ class PanelReport
 	private const STATUS_CLAIMED = 'claimed';
 
 	private const FILES = 'ocrflow_files';
+
+	/** Ids per `IN (`. Nextcloud refuses more than 1 000 on every driver. */
+	private const IN_CHUNK = 900;
 	private const JOBS = 'ocrflow_jobs';
 
 	public function __construct(
@@ -61,13 +64,13 @@ class PanelReport
 			$this->disk->processableCount($uid),
 			$this->disk->emptyCount($uid),
 			$this->disk->unreadableCount($uid),
+			// A claim outranks a queued row for the same file: one file, one
+			// bucket. Without this a re-queued file could be counted twice.
 			[
-				'claimed' => $this->liveFiles($uid, self::STATUS_CLAIMED, false),
-				// A claim outranks a queued row for the same file: one file, one
-				// bucket. Without this the queue total could exceed the disk.
-				'queued' => $this->liveFiles($uid, self::STATUS_QUEUED, true),
+				'claimed' => count($claimedIds = $this->liveFileIds($uid, self::STATUS_CLAIMED)),
+				'queued' => count($queuedIds = array_values(array_diff($this->liveFileIds($uid, self::STATUS_QUEUED), $claimedIds))),
 			],
-			$this->settledGroups($uid),
+			$this->settledGroups($uid, array_merge($claimedIds, $queuedIds)),
 		);
 	}
 
@@ -125,71 +128,77 @@ class PanelReport
 	}
 
 	/**
-	 * Files with a live worker row: queued, or claimed (excluding claimed ones
-	 * when counting queued, so each file lands in exactly one bucket).
+	 * The files with a live worker row, one status at a time.
+	 *
+	 * Live rows are the queue's depth, not the library's size: a few hundred at
+	 * most, usually zero. Asking for ids keeps the set arithmetic in PHP and the
+	 * SQL free of `NOT EXISTS` — which Nextcloud's expression builder does not
+	 * have, a fact that cost a 500 on every panel load in 0.1.46. `claimed` and
+	 * `queued` are made disjoint in `forUser()`, so one file is never counted
+	 * twice.
+	 *
+	 * @return list<int>
 	 */
-	private function liveFiles(string $uid, string $status, bool $excludeClaimed): int
+	private function liveFileIds(string $uid, string $status): array
 	{
 		$qb = $this->db->getQueryBuilder();
-		$qb->selectAlias($qb->createFunction('COUNT(DISTINCT j.file_id)'), 'n')
+		$qb->selectDistinct('j.file_id')
 			->from(self::JOBS, 'j')
 			->innerJoin('j', 'filecache', 'f', $qb->expr()->eq('f.fileid', 'j.file_id'));
 		$this->disk->constrain($qb, $uid);
 		$this->disk->processableOnly($qb);
 		$qb->andWhere($qb->expr()->eq('j.status', $qb->createNamedParameter($status)));
 
-		if ($excludeClaimed) {
-			$sub = $this->db->getQueryBuilder();
-			$sub->select('1')
-				->from(self::JOBS, 'jc')
-				->where($sub->expr()->eq('jc.file_id', 'j.file_id'))
-				->andWhere($sub->expr()->eq('jc.status', $sub->createNamedParameter(self::STATUS_CLAIMED)));
-			$qb->andWhere($qb->expr()->not($qb->expr()->exists($sub->getSQL())));
+		$out = [];
+		foreach ($qb->executeQuery()->fetchAll() as $row) {
+			$out[] = (int) $row['file_id'];
 		}
-
-		return (int) $qb->executeQuery()->fetchOne();
+		return $out;
 	}
 
 	/**
 	 * Ledger rows, grouped by what they say — the only per-file table involved.
 	 *
 	 * `ocrflow_files` is `UNIQUE (file_id)`, so a group counts files, not rows.
-	 * Files with a live job row are excluded here and counted in the queue
-	 * instead, matching the panel's arithmetic exactly.
+	 * Files with a live job row are excluded here (they are counted in the queue
+	 * instead); the exclusion list is chunked so a deep queue cannot produce an
+	 * over-wide `IN (`, and group counts add up across chunks because the keys
+	 * are identical.
 	 *
+	 * @param list<int> $liveIds
 	 * @return list<array{reason: ?string, engine: ?string, version: ?string, count: int}>
 	 */
-	private function settledGroups(string $uid): array
+	private function settledGroups(string $uid, array $liveIds): array
 	{
-		$qb = $this->db->getQueryBuilder();
-		$qb->select('l.reason', 'l.engine', 'l.engine_version')
-			->selectAlias($qb->func()->count('*'), 'n')
-			->from(self::FILES, 'l')
-			->innerJoin('l', 'filecache', 'f', $qb->expr()->eq('f.fileid', 'l.file_id'));
-		$this->disk->constrain($qb, $uid);
-		$this->disk->processableOnly($qb);
-		$qb->groupBy('l.reason', 'l.engine', 'l.engine_version');
+		$groups = [];
+		$chunks = $liveIds === [] ? [[]] : array_chunk($liveIds, self::IN_CHUNK);
 
-		$sub = $this->db->getQueryBuilder();
-		$sub->select('1')
-			->from(self::JOBS, 'j')
-			->where($sub->expr()->eq('j.file_id', 'l.file_id'))
-			->andWhere($sub->expr()->in('j.status', $sub->createNamedParameter(
-				[self::STATUS_QUEUED, self::STATUS_CLAIMED],
-				IQueryBuilder::PARAM_STR_ARRAY,
-			)));
-		$qb->andWhere($qb->expr()->not($qb->expr()->exists($sub->getSQL())));
+		foreach ($chunks as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('l.reason', 'l.engine', 'l.engine_version')
+				->selectAlias($qb->func()->count('*'), 'n')
+				->from(self::FILES, 'l')
+				->innerJoin('l', 'filecache', 'f', $qb->expr()->eq('f.fileid', 'l.file_id'));
+			$this->disk->constrain($qb, $uid);
+			$this->disk->processableOnly($qb);
+			if ($chunk !== []) {
+				$qb->andWhere($qb->expr()->notIn('l.file_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
+			}
+			$qb->groupBy('l.reason', 'l.engine', 'l.engine_version');
 
-		$out = [];
-		foreach ($qb->executeQuery()->fetchAll() as $row) {
-			$out[] = [
-				'reason' => $row['reason'] === null ? null : (string) $row['reason'],
-				'engine' => $row['engine'] === null ? null : (string) $row['engine'],
-				'version' => $row['engine_version'] === null ? null : (string) $row['engine_version'],
-				'count' => (int) $row['n'],
-			];
+			foreach ($qb->executeQuery()->fetchAll() as $row) {
+				$key = ($row['reason'] ?? '') . "\x1f" . ($row['engine'] ?? '') . "\x1f" . ($row['engine_version'] ?? '');
+				$groups[$key] ??= [
+					'reason' => $row['reason'] === null ? null : (string) $row['reason'],
+					'engine' => $row['engine'] === null ? null : (string) $row['engine'],
+					'version' => $row['engine_version'] === null ? null : (string) $row['engine_version'],
+					'count' => 0,
+				];
+				$groups[$key]['count'] += (int) $row['n'];
+			}
 		}
-		return $out;
+
+		return array_values($groups);
 	}
 
 	/**
@@ -207,7 +216,13 @@ class PanelReport
 				'count' => $count,
 			];
 		}
-		usort($out, static fn (array $a, array $b): int => $b['count'] <=> $a['count']);
+		usort($out, static function (array $a, array $b): int {
+			// Count first, then the name: a tie broken by row order is a
+			// difference that shows up on one database and not another.
+			return ($b['count'] <=> $a['count'])
+				?: ((string) ($a['engine'] ?? '') <=> (string) ($b['engine'] ?? ''))
+				?: ((string) ($a['version'] ?? '') <=> (string) ($b['version'] ?? ''));
+		});
 		return $out;
 	}
 }
