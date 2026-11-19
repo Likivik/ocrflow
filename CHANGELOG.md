@@ -97,6 +97,19 @@ written.
 
 ### Fixed
 
+- The panel's labels are labels now: engines are proper nouns (`Google`,
+  `MiniMax`, `Tesseract`, `Engine not recorded`), every block row is a short
+  noun phrase with the sentence moved to a tooltip, and `VOCAB` carries a
+  `short` for all 35 codes (a test enforces capital, no full stop, no
+  parentheses). Russian covers every panel string (it covered 11 of 66).
+- **Process N files** under "Not processed yet": a number field, clamped to 1…200
+  and to a daily allowance, remembered per user, with the button stating the
+  effective count and a page/time estimate taken from this account's own
+  history. It queues only the user's own unprocessed files, quiescence-aware,
+  ordinary enqueue first and `forceRequeue` only for a file whose job row still
+  exists.
+- `error_worker_file_gone` is no longer a counter of its own: a file that
+  vanished mid-run and came back is "not processed", because that is what it is.
 - The settings panel's worklist is collapsed by default and its rows scroll
   inside a bounded box while the filters and "Select all shown" stay put; the
   heading count is the server's total, not the length of the page the panel

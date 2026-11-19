@@ -37,6 +37,11 @@ return [
         ['name' => 'status#index', 'url' => '/api/v1/status', 'verb' => 'GET'],
         ['name' => 'status#job', 'url' => '/api/v1/jobs/{id}', 'verb' => 'GET'],
         ['name' => 'status#scan', 'url' => '/api/v1/scan', 'verb' => 'POST'],
+        // The button under "Not processed yet": queue this user's own files,
+        // N at a time. POST because it enqueues work, CSRF-checked because it
+        // spends money, and clamped server-side because a field is not a promise.
+        ['name' => 'status#process', 'url' => '/api/v1/process', 'verb' => 'POST'],
+        ['name' => 'status#batchSize', 'url' => '/api/v1/process/limit', 'verb' => 'POST'],
         ['name' => 'status#file', 'url' => '/api/v1/file', 'verb' => 'GET'],
 
         // --- settings: instance policy (admin) and the user's own opt-out ---

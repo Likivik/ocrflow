@@ -115,22 +115,21 @@ class NeverProcessedTest extends TestCase
 		$this->assertSame(3, $report['never_processed'], 'files 10-12');
 	}
 
-	public function testAGoneFileIsShownNowhereAndDoesNotBecomeNeverProcessed(): void
+	public function testAGoneFileThatIsBackOnDiskIsNotProcessed(): void
 	{
-		// `error_worker_file_gone` means the subject stopped existing before we
-		// could read it. The owner cannot act on it, so it is not an outcome —
-		// but it must not fall through into "not processed yet" either, which
-		// would ask them to process a file that is not there.
-		$disk = [1, 2, 3];
+		// `error_worker_file_gone` means the file was not there when the worker
+		// fetched it. This report is built from filecache, so a row like that
+		// describes a file that is back on disk and has never been read: it is
+		// unprocessed, not an error, and it must not hide in a counter of its own.
 		$ledger = [
-			1 => ['status' => 'skipped', 'reason' => 'skip_text_native', 'engine' => null, 'engine_version' => null],
-			2 => ['status' => 'error', 'reason' => 'error_worker_file_gone', 'engine' => null, 'engine_version' => null],
+			1 => ['status' => 'error', 'reason' => 'error_worker_file_gone', 'engine' => null, 'engine_version' => null],
 		];
 
-		$report = $this->queue([1 => 1, 2 => 1, 3 => 1], $ledger, [])->fileReport('alice');
+		$report = $this->queue([1 => 1, 2 => 1], $ledger, [])->fileReport('alice');
 
-		$this->assertArrayNotHasKey('error_worker_file_gone', $report['by_code'], 'a gone file has no row');
-		$this->assertSame(1, $report['never_processed'], 'file 3 is the only untouched file');
+		$this->assertArrayNotHasKey('error_worker_file_gone', $report['by_code'], 'a gone file has no error row');
+		$this->assertArrayNotHasKey('gone', $report, 'the counter is gone with it');
+		$this->assertSame(2, $report['never_processed'], 'both files are unprocessed — one of them just failed to be fetched');
 	}
 
 	public function testAStaleJobReferenceStaysVisible(): void
@@ -145,7 +144,6 @@ class NeverProcessedTest extends TestCase
 		$report = $this->queue([1 => 1], $ledger, [])->fileReport('alice');
 
 		$this->assertSame(1, $report['by_code']['error_worker_job_reference_stale'] ?? 0, 'the row is still reported');
-		$this->assertSame(0, $report['gone'], 'and it is not counted as a vanished file');
 	}
 
 	public function testNoTextRowsNameTheReaderNotTheVersion(): void
@@ -178,7 +176,7 @@ class NeverProcessedTest extends TestCase
 
 		$this->assertSame(
 			$report['total'],
-			array_sum($report['by_code']) + $report['queue']['queued'] + $report['queue']['claimed'] + $report['never_processed'] + $report['gone'],
+			array_sum($report['by_code']) + $report['queue']['queued'] + $report['queue']['claimed'] + $report['never_processed'],
 		);
 	}
 }
