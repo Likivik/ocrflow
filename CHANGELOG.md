@@ -7,6 +7,16 @@ written.
 
 ### Added
 
+- **The panel report is computed from aggregates.** Six `COUNT`/`GROUP BY`
+  queries replace "load every file id, then four chunked `IN` readers" — and the
+  report is now computed once per load instead of twice (`StatusController::index()`
+  and `blocks()` each called `Queue::fileReport()`).
+- `occ ocrflow:report:check --compare [--user uid]` compares the aggregate report
+  against an independent id-list implementation that carries its own SQL, run
+  three times (legacy, aggregate, legacy) so a queue that changes mid-comparison
+  is reported as UNSTABLE rather than as a mismatch.
+- New `DiskFiles` holds the one copy of the disk predicate (four scopes:
+  processable, empty, unreadable, base) instead of three near-copies.
 - The write-time ladder (Parts A + C): `putFile` and `resultFile` now run a
   three-rung guard before writing — (1) the enqueue etag still matches, or
   (1b) the etag is the one our own earlier write left behind

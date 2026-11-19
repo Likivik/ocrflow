@@ -10,6 +10,7 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 use OCA\OcrFlow\Controller\StatusController;
 use OCA\OcrFlow\Db\Job;
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Report\PanelReport;
 use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\EnginePolicy;
 use OCP\AppFramework\Http;
@@ -63,7 +64,22 @@ class StatusControllerTest extends TestCase
             $session,
             new AccessGate($config, $groups),
             new EnginePolicy($config),
+            $this->panelReport(),
         );
+    }
+
+    /**
+     * A report that counts nothing: these tests are about the other endpoints.
+     */
+    private function panelReport(): PanelReport
+    {
+        $report = $this->createMock(PanelReport::class);
+        $report->method('forUser')->willReturn([
+			'total' => 0, 'never_processed' => 0, 'empty' => 0, 'unreadable_format' => 0,
+			'queue' => ['queued' => 0, 'claimed' => 0], 'by_code' => [],
+			'read_by_engine' => [], 'no_text_by_engine' => [],
+		]);
+        return $report;
     }
 
     private function user(string $uid): IUser

@@ -31,3 +31,6 @@ js/*.LICENSE.txt
 # The PDF corpus canary: 63 MB of real damaged PDFs, fetched on demand and
 # pinned by sha256 in tests/corpora/manifest.json. Never committed.
 tests/corpora/cache/
+
+# Local working notes: plans, reviews, scratch — never part of the app.
+.hermes/
