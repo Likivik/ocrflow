@@ -110,7 +110,7 @@ class StatusBlocksTest extends TestCase
 		$queue = $this->controller($this->liveReport())->index()->getData()['blocks'][1];
 
 		$this->assertSame(
-			['waiting to be processed', 'being processed right now'],
+			['Waiting to be processed', 'Being processed right now'],
 			array_column($queue['rows'], 'label'),
 		);
 	}
@@ -123,9 +123,9 @@ class StatusBlocksTest extends TestCase
 		// stamp is ours + 15 read with no text = 2,657 files, each counted once.
 		$this->assertSame(2657, $read['count']);
 		$this->assertSame(2657, array_sum(array_column($read['rows'], 'count')));
-		$this->assertSame('by google 3.16.0', $read['rows'][0]['label']);
-		$this->assertSame('by google, version not recorded', $read['rows'][1]['label']);
-		$this->assertSame('by google, no text to transcribe', $read['rows'][2]['label'], 'the row names the reader, not us');
+		$this->assertSame('Google 3.16.0', $read['rows'][0]['label']);
+		$this->assertSame('Google, version not recorded', $read['rows'][1]['label']);
+		$this->assertSame('Google, no text to transcribe', $read['rows'][2]['label'], 'the row names the reader, not us');
 	}
 
 	public function testAnUnknownVersionIsNotFlaggedAsBelowBar(): void
@@ -140,7 +140,7 @@ class StatusBlocksTest extends TestCase
 	{
 		$error = $this->controller($this->liveReport())->index()->getData()['blocks'][5];
 
-		$this->assertSame('This file is damaged and cannot be read.', $error['rows'][0]['label']);
+		$this->assertSame('Damaged file', $error['rows'][0]['label']);
 	}
 
 	public function testBornDigitalAndImageAreCountedButHaveNoRows(): void
@@ -162,7 +162,7 @@ class StatusBlocksTest extends TestCase
 		$this->assertSame(12, $error['count'], '5 damaged + 5 empty + 2 unsupported');
 		$this->assertSame(12, array_sum(array_column($error['rows'], 'count')), 'the rows add up to the block');
 		$this->assertSame(
-			['This file is damaged and cannot be read.', 'an empty file (0 bytes)', 'a format we do not read'],
+			['Damaged file', 'Empty file', 'Format we do not read'],
 			array_column($error['rows'], 'label'),
 		);
 	}

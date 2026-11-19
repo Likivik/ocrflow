@@ -14,6 +14,7 @@ use OCP\AppFramework\Db\QBMapper;
 use OCP\DB\Exception;
 use OCP\DB\QueryBuilder\ICompositeExpression;
 use OCP\DB\QueryBuilder\IQueryBuilder;
+use OCP\IConfig;
 use OCP\IDBConnection;
 use Psr\Log\LoggerInterface;
 
@@ -91,6 +92,7 @@ class Queue extends QBMapper
 		private ?LoggerInterface $logger = null,
 		?RetryPolicy $retryPolicy = null,
 		?EnginePolicy $enginePolicy = null,
+		private ?IConfig $config = null,
 	) {
 		$this->stageEvents = $stageEvents;
 		// The retry table already exists and has one owner; enqueue only asks
@@ -1371,7 +1373,6 @@ class Queue extends QBMapper
 	 * @return array{
 	 *   total: int, never_processed: int, empty: int, unreadable_format: int,
 	 *   queue: array{queued: int, claimed: int},
-	 *   gone: int,
 	 *   by_code: array<string, int>,
 	 *   read_by_engine: list<array{engine: ?string, version: ?string, count: int}>,
 	 *   no_text_by_engine: list<array{engine: ?string, version: ?string, count: int}>
@@ -1393,21 +1394,19 @@ class Queue extends QBMapper
 		$readEngines = [];
 		$noTextEngines = [];
 		$settled = 0;
-		$gone = 0;
 		foreach ($ledger as $fileId => $row) {
 			if (isset($live[$fileId])) {
 				$queue[$live[$fileId]]++;
 				continue;
 			}
 			$code = $row['reason'] === null ? '' : (string) $row['reason'];
-			// The one code the owner cannot act on: the file was deleted or
-			// moved before we could read it. It is counted apart so the
-			// arithmetic still closes, and shown in no block. Deliberately a
-			// single code, not the whole `drop` verdict: a stale job reference
-			// says something about a file that still exists, and hiding it
-			// would be a different decision than hiding this one.
+			// The file vanished between enqueue and fetch, so it was never read
+			// for these bytes. This report is built from filecache, so a row
+			// still in it describes a file that is back on disk: an unprocessed
+			// file, not an error. It gets no error row and does not count as
+			// settled — the `never_processed` subtraction below already covers
+			// it, because it never entered `$settled`.
 			if ($code === 'error_worker_file_gone') {
-				$gone++;
 				continue;
 			}
 			$settled++;
@@ -1437,17 +1436,262 @@ class Queue extends QBMapper
 			'total' => count($ids),
 			// No ledger row and no live row: a file in our formats nobody has
 			// queued yet.
-			'never_processed' => count($ids) - $settled - count($live) - $gone,
+			'never_processed' => count($ids) - $settled - count($live),
 			'empty' => $this->emptyCount($uid),
 			'unreadable_format' => $this->unreadableFormatCount($uid),
 			'queue' => $queue,
-			// Files whose subject vanished mid-run: counted, shown nowhere, and
-			// subtracted from `never_processed` so they are not called unread.
-			'gone' => $gone,
 			'by_code' => $byCode,
 			'read_by_engine' => $this->engineSplit($readEngines),
 			'no_text_by_engine' => $this->engineSplit($noTextEngines),
 		];
+	}
+
+
+	/**
+	 * The files a "process them" click would work on, and the ones it must not
+	 * touch yet.
+	 *
+	 * Candidates are the panel's own definition of "not processed": in our
+	 * readable extensions, not empty, owned by this user, no live row, and
+	 * either no ledger row at all or a `error_worker_file_gone` one (the file
+	 * came back — D13). `ready` excludes files modified inside the quiescence
+	 * window, the same rule a folder scan applies, so a file still being
+	 * uploaded is not queued twice with two different etags.
+	 *
+	 * `jobId` is the terminal job row for that file when one survived retention:
+	 * it is the only handle `forceRequeue()` accepts, and the only way back into
+	 * the queue for a file whose etag already has a row.
+	 *
+	 * @return array{ready: list<array{fileId: int, jobId: ?int, path: string, size: int, etag: string}>, readyTotal: int, young: int}
+	 */
+	public function neverProcessedFor(string $uid, int $limit): array
+	{
+		$limit = max(1, $limit);
+		$ids = array_keys($this->diskFileIds($uid));
+		if ($ids === []) {
+			return ['ready' => [], 'readyTotal' => 0, 'young' => 0];
+		}
+
+		$ledger = $this->ledgerRowsFor($ids);
+		$live = $this->liveQueueFor($ids);
+
+		$ghosts = [];
+		$plain = [];
+		foreach ($ids as $fileId) {
+			if (isset($live[$fileId])) {
+				continue;
+			}
+			if (!isset($ledger[$fileId])) {
+				$plain[$fileId] = true;
+				continue;
+			}
+			// A ledger row means settled — except `file_gone`, which means the
+			// file was not there to read and is here now.
+			if (($ledger[$fileId]['reason'] ?? '') === 'error_worker_file_gone') {
+				$ghosts[$fileId] = true;
+			}
+		}
+
+		$candidates = array_keys($plain + $ghosts);
+		if ($candidates === []) {
+			return ['ready' => [], 'readyTotal' => 0, 'young' => 0];
+		}
+
+		$rows = $this->fileRowsFor($candidates);
+		$cutoff = time() - $this->scanMinAgeSeconds();
+
+		$ready = [];
+		$young = 0;
+		foreach ($rows as $row) {
+			if ((int) $row['mtime'] > $cutoff) {
+				$young++;
+				continue;
+			}
+			$ready[] = $row;
+		}
+		usort($ready, static fn (array $a, array $b): int => strcmp((string) $a['path'], (string) $b['path']));
+
+		$readyTotal = count($ready);
+		$ready = array_slice($ready, 0, $limit);
+
+		$jobIds = [];
+		$ghostIds = array_values(array_intersect(array_column($ready, 'fileId'), array_keys($ghosts)));
+		if ($ghostIds !== []) {
+			$jobIds = $this->terminalJobIdsFor($ghostIds);
+		}
+
+		$out = [];
+		foreach ($ready as $row) {
+			$fileId = (int) $row['fileId'];
+			$out[] = [
+				'fileId' => $fileId,
+				'jobId' => $jobIds[$fileId] ?? null,
+				'path' => (string) $row['path'],
+				'size' => (int) $row['size'],
+				'etag' => (string) $row['etag'],
+			];
+		}
+
+		return ['ready' => $out, 'readyTotal' => $readyTotal, 'young' => $young];
+	}
+
+
+
+	/**
+	 * What this user's own history says about the cost of another batch.
+	 *
+	 * Pages are the only unit the provider bills, so an estimate built on this
+	 * account's own rows beats a constant. Both figures are omitted when there
+	 * is too little to average: a made-up number next to a paid button is worse
+	 * than an honest blank.
+	 *
+	 * @return array{avg_pages: ?float, samples: int, per_minute: ?float}
+	 */
+	public function pageStatsFor(string $uid, int $days = 30): array
+	{
+		$prefix = $uid . '/files/%';
+
+		$qb = $this->db->getQueryBuilder();
+		$qb->selectAlias($qb->func()->count('*'), 'n')
+			->selectAlias($qb->func()->avg('pages'), 'avg_pages')
+			->from(self::JOBS)
+			->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_DONE)))
+			->andWhere($qb->expr()->isNotNull('pages'))
+			->andWhere($qb->expr()->like('path', $qb->createNamedParameter($prefix)))
+			->andWhere($qb->expr()->gt('finished_at', $qb->createNamedParameter(time() - $days * 86400, IQueryBuilder::PARAM_INT)));
+		$row = $qb->executeQuery()->fetch();
+		$samples = (int) ($row['n'] ?? 0);
+		$avg = $row['avg_pages'] ?? null;
+
+		$qb2 = $this->db->getQueryBuilder();
+		$qb2->selectAlias($qb2->func()->count('*'), 'n')
+			->from(self::JOBS)
+			->where($qb2->expr()->eq('status', $qb2->createNamedParameter(self::STATUS_DONE)))
+			->andWhere($qb2->expr()->like('path', $qb2->createNamedParameter($prefix)))
+			->andWhere($qb2->expr()->gt('finished_at', $qb2->createNamedParameter(time() - 3600, IQueryBuilder::PARAM_INT)));
+		$recent = (int) ($qb2->executeQuery()->fetchOne() ?? 0);
+
+		return [
+			'avg_pages' => $samples >= 20 && $avg !== null ? round((float) $avg, 1) : null,
+			'samples' => $samples,
+			'per_minute' => $recent >= 3 ? round($recent / 60, 1) : null,
+		];
+	}
+
+	/**
+	 * Queue the user's own unprocessed files, up to `$limit`.
+	 *
+	 * `enqueue()` first: it is the door that honours the zero-byte guard, the
+	 * permanent-verdict guard and the `(file_id, etag)` unique index. Only when
+	 * it refuses a file that still has a terminal job row — the file that
+	 * vanished mid-run and came back — does the force door open, because that
+	 * row is what `forceRequeue()` needs and the only thing blocking the retry.
+	 *
+	 * @return array{queued: int, refused: int, remaining: int, young: int}
+	 */
+	public function enqueueNeverProcessed(string $uid, int $limit, ?string $engine): array
+	{
+		$candidates = $this->neverProcessedFor($uid, $limit);
+		$queued = 0;
+		$refused = 0;
+		$force = [];
+
+		foreach ($candidates['ready'] as $row) {
+			$id = $this->enqueue($row['path'], $row['fileId'], $row['size'], $row['etag'], $engine);
+			if ($id !== null) {
+				$queued++;
+				continue;
+			}
+			if ($row['jobId'] !== null) {
+				$force[] = $row['jobId'];
+				continue;
+			}
+			$refused++;
+		}
+
+		if ($force !== []) {
+			$result = $this->forceRequeue($force);
+			$queued += count($result['requeued']);
+			$refused += count($result['refused']);
+		}
+
+		return [
+			'queued' => $queued,
+			'refused' => $refused,
+			// Exact for this run: the files just queued now hold a live row and
+			// are no longer candidates.
+			'remaining' => max(0, $candidates['readyTotal'] - $queued),
+			'young' => $candidates['young'],
+		];
+	}
+
+	/**
+	 * Path, size, etag and mtime for a set of file ids, in one read.
+	 *
+	 * @param list<int> $fileIds
+	 * @return list<array{fileId: int, path: string, size: int, etag: string, mtime: int}>
+	 */
+	protected function fileRowsFor(array $fileIds): array
+	{
+		$out = [];
+		foreach (array_chunk($fileIds, 2000) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('fileid', 'path', 'size', 'etag', 'mtime')
+				->from('filecache')
+				->where($qb->expr()->in('fileid', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
+			foreach ($qb->executeQuery()->fetchAll() as $row) {
+				$out[] = [
+					'fileId' => (int) $row['fileid'],
+					'path' => (string) $row['path'],
+					'size' => (int) $row['size'],
+					'etag' => (string) $row['etag'],
+					'mtime' => (int) $row['mtime'],
+				];
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * The newest terminal job row per file — the id `forceRequeue()` needs.
+	 *
+	 * @param list<int> $fileIds
+	 * @return array<int, int> file id => job id
+	 */
+	protected function terminalJobIdsFor(array $fileIds): array
+	{
+		$out = [];
+		foreach (array_chunk($fileIds, 2000) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('file_id')
+				->selectAlias($qb->func()->max('id'), 'job_id')
+				->from(self::JOBS)
+				->where($qb->expr()->in('file_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+				->andWhere($qb->expr()->in('status', $qb->createNamedParameter(
+					[self::STATUS_DONE, self::STATUS_SKIPPED, self::STATUS_ERROR],
+					IQueryBuilder::PARAM_STR_ARRAY,
+				)))
+				->groupBy('file_id');
+			foreach ($qb->executeQuery()->fetchAll() as $row) {
+				$out[(int) $row['file_id']] = (int) $row['job_id'];
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * How long a file must sit untouched before a scan may queue it.
+	 *
+	 * Same setting `ScanJob` reads, and the same fallback: a value that is not a
+	 * positive integer means "unset", never "zero".
+	 */
+	protected function scanMinAgeSeconds(): int
+	{
+		if ($this->config === null) {
+			return 120;
+		}
+		$raw = trim((string) $this->config->getAppValue('ocrflow', 'scan_min_age_seconds', '120'));
+		return ctype_digit($raw) && (int) $raw > 0 ? (int) $raw : 120;
 	}
 
 	/**

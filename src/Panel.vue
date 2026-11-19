@@ -173,11 +173,42 @@
 					v-for="row in block.rows"
 					:key="block.id + '-' + row.key"
 					:class="{ 'is-below-bar': row.below_bar }"
-					:title="row.key">
+					:title="row.title || row.key">
 					<span class="ocrflow-panel__status">{{ t(row.label) }}</span>
 					<span class="ocrflow-panel__count">{{ row.count }}</span>
 				</li>
 			</ul>
+			<!-- The one block a person can act on in bulk. Everything else is
+			     either already done or needs a single file's attention. -->
+			<template v-if="block.id === 'not_processed'">
+				<p v-if="block.count === 0" class="ocrflow-panel__hint">
+					{{ t('Nothing left to process.') }}
+				</p>
+				<form v-else class="ocrflow-panel__process" @submit.prevent="processAll">
+					<NcTextField
+						v-model="batchSize"
+						class="ocrflow-panel__batch"
+						type="number"
+						:label="t('Files to process')"
+						:min="1"
+						:max="processInfo.max_files"
+						:disabled="processing"
+						@update:model-value="rememberBatchSize" />
+					<NcButton
+						type="primary"
+						:disabled="processDisabled"
+						:title="processReason"
+						@click="processAll">
+						{{ processing ? t('Queueing…') : processLabel }}
+					</NcButton>
+				</form>
+				<p v-if="block.count > 0" class="ocrflow-panel__hint">
+					{{ processEstimate }}
+				</p>
+				<p v-if="processMessage" class="ocrflow-panel__hint">
+					{{ processMessage }}
+				</p>
+			</template>
 		</section>
 
 
@@ -269,6 +300,20 @@ export default {
 			// The caller's own rows — separate state from the instance-wide
 			// counts above, because "3 errors on this instance" and "2 of them
 			// are mine" are different answers and must not be confused.
+			// The button's numbers, straight from the report: what it may take,
+			// what is left of the day, and what this account's history says.
+			processInfo: {
+				batch_size: 25,
+				max_files: 200,
+				daily_used: 0,
+				daily_cap: 200,
+				estimate: { avg_pages: null, samples: 0, per_minute: null },
+			},
+			batchSize: 25,
+			processing: false,
+			processMessage: '',
+			batchSaveTimer: null,
+			batchLoaded: false,
 			mineRows: [],
 			// The server's total, because mineRows is one capped page.
 			mineTotal: 0,
@@ -583,6 +628,111 @@ export default {
 				this.mineBusy = false
 			}
 		},
+		processCount() {
+			const block = this.blocks.find((b) => b.id === 'not_processed')
+			return block ? Number(block.count) : 0
+		},
+		// The effective number: a field that says 25 when three are left is a
+		// label that lies about what the click will do.
+		processEffective() {
+			return Math.max(0, Math.min(Number(this.batchSize) || 0, this.processCount))
+		},
+		processLabel() {
+			const n = this.processEffective
+			return n === 1 ? this.t('Process 1 file') : this.t('Process {count} files', { count: n })
+		},
+		processDisabled() {
+			return this.processing
+				|| !this.engineConfigured
+				|| this.processEffective < 1
+				|| this.processInfo.daily_used >= this.processInfo.daily_cap
+		},
+		processReason() {
+			if (!this.engineConfigured) {
+				return this.t('No OCR engine is configured')
+			}
+			if (this.processInfo.daily_used >= this.processInfo.daily_cap) {
+				return this.t('Daily limit reached: {count} files.', { count: this.processInfo.daily_cap })
+			}
+			return ''
+		},
+		processEstimate() {
+			const estimate = this.processInfo.estimate || {}
+			const n = this.processEffective
+			if (estimate.avg_pages === null || estimate.avg_pages === undefined) {
+				return this.t('No page estimate yet.')
+			}
+			const pages = Math.max(1, Math.round(estimate.avg_pages * n))
+			let text = this.t('About {pages} pages', { pages })
+			if (estimate.per_minute) {
+				const minutes = Math.max(1, Math.round(n / estimate.per_minute))
+				text += ' · ' + this.t('about {minutes} min', { minutes })
+			}
+			return text
+		},
+		async processAll() {
+			const limit = this.processEffective
+			if (limit < 1 || this.processing) {
+				return
+			}
+			this.processing = true
+			this.processMessage = ''
+			try {
+				const { data } = await axios.post(
+					`${BASE}/process`,
+					{ limit },
+					{ headers: { 'OCS-APIRequest': 'true' } },
+				)
+				const result = data?.ocs?.data ?? {}
+				this.processMessage = this.t(
+					'{queued} queued, {remaining} left to process.',
+					{ queued: result.queued ?? 0, remaining: result.remaining ?? 0 },
+				)
+				if ((result.refused ?? 0) > 0) {
+					this.processMessage += ' ' + this.t('{count} could not be queued.', { count: result.refused })
+				}
+				if ((result.skipped_young ?? 0) > 0) {
+					this.processMessage += ' ' + this.t('{count} still settling.', { count: result.skipped_young })
+				}
+				await this.refresh()
+			} catch (e) {
+				const status = e?.response?.status
+				if (status === 409) {
+					this.processMessage = this.t('No OCR engine is configured')
+				} else if (status === 429) {
+					this.processMessage = this.t('Daily limit reached: {count} files.', {
+						count: e?.response?.data?.ocs?.data?.message ?? this.processInfo.daily_cap,
+					})
+				} else if (status === 403) {
+					this.processMessage = this.t('OCR is not enabled for your account.')
+				} else {
+					this.processMessage = this.t('Could not queue: {reason}', {
+						reason: status ?? e?.message ?? 'unknown error',
+					})
+				}
+			} finally {
+				this.processing = false
+			}
+		},
+		/**
+		 * Save the field on change, debounced. Blur would lose the value: the
+		 * field is disabled while a run is in flight, and a disabled input
+		 * fires no blur.
+		 */
+		rememberBatchSize() {
+			clearTimeout(this.batchSaveTimer)
+			this.batchSaveTimer = setTimeout(async () => {
+				try {
+					await axios.post(
+						`${BASE}/process/limit`,
+						{ size: Number(this.batchSize) },
+						{ headers: { 'OCS-APIRequest': 'true' } },
+					)
+				} catch (e) {
+					// A preference that did not save is not worth an error banner.
+				}
+			}, 600)
+		},
 		async refresh() {
 			this.busy = true
 			this.error = ''
@@ -593,6 +743,16 @@ export default {
 				// the app already writes for its code. Server-side so the
 				// reader here stays dumb, and so a new reason needs no release.
 				this.blocks = data?.ocs?.data?.blocks ?? []
+				const process = data?.ocs?.data?.process
+				if (process) {
+					this.processInfo = { ...this.processInfo, ...process }
+					// Only adopt the stored preference on the first read: a
+					// reload while someone is typing must not undo the typing.
+					if (!this.batchLoaded) {
+						this.batchSize = process.batch_size
+						this.batchLoaded = true
+					}
+				}
 				this.updatedAt = new Date().toLocaleTimeString()
 			} catch (e) {
 				this.error = `Could not read the queue: ${e?.response?.status ?? e?.message ?? 'unknown error'}`
@@ -994,6 +1154,24 @@ export default {
 }
 
 /* The one block whose numbers are a problem, not just a count. */
+.ocrflow-panel__process {
+	display: flex;
+	align-items: flex-end;
+	gap: calc(var(--default-grid-baseline, 4px) * 2);
+	margin-top: calc(var(--default-grid-baseline, 4px) * 2);
+}
+
+.ocrflow-panel__batch {
+	width: 9rem;
+}
+
+/* Hint lines sit under a control that spends money: quiet, not shouting. */
+.ocrflow-panel__hint {
+	margin: calc(var(--default-grid-baseline, 4px) * 1) 0 0;
+	color: var(--color-text-maxcontrast);
+	font-size: 0.9em;
+}
+
 .ocrflow-panel__block--error .ocrflow-panel__count {
 	color: var(--color-error-text, var(--color-error));
 }

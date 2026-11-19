@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Controller;
 
+use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\BackgroundJob\ScanJob;
 use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\AccessGate;
@@ -18,6 +19,7 @@ use OCP\AppFramework\Http\DataResponse;
 use OCP\AppFramework\OCS\OCSForbiddenException;
 use OCP\AppFramework\OCSController;
 use OCP\BackgroundJob\IJobList;
+use OCP\IConfig;
 use OCP\IRequest;
 use OCP\IUser;
 use OCP\IUserSession;
@@ -31,6 +33,11 @@ use OCP\IUserSession;
  */
 class StatusController extends OCSController
 {
+	/** Files one click takes when the panel says nothing. */
+	private const DEFAULT_PROCESS_LIMIT = 25;
+
+	/** The most one click may take, whatever the admin set. */
+	private const MAX_PROCESS_FILES = 200;
 	public function __construct(
 		string $appName,
 		IRequest $request,
@@ -40,6 +47,7 @@ class StatusController extends OCSController
 		private AccessGate $access,
 		private EnginePolicy $engine,
 		private ?RetryPolicy $retryPolicy = null,
+		private ?IConfig $config = null,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -59,6 +67,16 @@ class StatusController extends OCSController
 			// rows that add up to its total. This is the report; `queue` stays
 			// for the filter chips only.
 			'blocks' => $this->blocks(),
+			// The button's own numbers, next to the counts they belong to:
+			// how many it takes, what is left of the day, and what the last
+			// month says a file costs.
+			'process' => [
+				'batch_size' => $this->batchSizePreference(),
+				'max_files' => $this->processMaxFiles(),
+				'daily_used' => $this->dailyUsed($this->uid()),
+				'daily_cap' => $this->dailyCap(),
+				'estimate' => $this->queue->pageStatsFor($this->uid()),
+			],
 			// Whether the instance will do OCR at all. The sidebar can say
 			// "not configured" instead of offering a button that queues nothing.
 			'engine' => $this->engine->current(),
@@ -119,8 +137,8 @@ class StatusController extends OCSController
 			}
 
 			if ($id === 'queue') {
-				$rows[] = ['key' => 'queued', 'label' => 'waiting to be processed', 'count' => $report['queue']['queued']];
-				$rows[] = ['key' => 'claimed', 'label' => 'being processed right now', 'count' => $report['queue']['claimed']];
+				$rows[] = ['key' => 'queued', 'label' => 'Waiting to be processed', 'count' => $report['queue']['queued']];
+				$rows[] = ['key' => 'claimed', 'label' => 'Being processed right now', 'count' => $report['queue']['claimed']];
 				$count = $report['queue']['queued'] + $report['queue']['claimed'];
 			}
 
@@ -129,9 +147,14 @@ class StatusController extends OCSController
 					if ($policy->blockOf((string) $code) !== 'error') {
 						continue;
 					}
+					$entry = $policy->entry((string) $code);
 					$rows[] = [
 						'key' => (string) $code,
-						'label' => $policy->entry((string) $code)['text'] ?? (string) $code,
+						// A label, not the sentence: the rows sit in a column of
+						// counts, and the sentence explains the code. It rides
+						// along as `title` so a pointer can still ask.
+						'label' => $entry['short'] ?? (string) $code,
+						'title' => $entry['text'] ?? '',
 						'count' => $n,
 					];
 				}
@@ -141,10 +164,20 @@ class StatusController extends OCSController
 				// is the one who can fix it. Keeping them in a footnote below a
 				// total made them look like a rounding note.
 				if ($report['empty'] > 0) {
-					$rows[] = ['key' => 'empty', 'label' => 'an empty file (0 bytes)', 'count' => $report['empty']];
+					$rows[] = [
+						'key' => 'empty',
+						'label' => 'Empty file',
+						'title' => 'This file has no content (0 bytes).',
+						'count' => $report['empty'],
+					];
 				}
 				if ($report['unreadable_format'] > 0) {
-					$rows[] = ['key' => 'unreadable_format', 'label' => 'a format we do not read', 'count' => $report['unreadable_format']];
+					$rows[] = [
+						'key' => 'unreadable_format',
+						'label' => 'Format we do not read',
+						'title' => 'This file type is not one the pipeline can read.',
+						'count' => $report['unreadable_format'],
+					];
 				}
 				$count = 0;
 				foreach ($rows as $row) {
@@ -222,6 +255,137 @@ class StatusController extends OCSController
 		return new DataResponse(['queued' => true, 'path' => $path]);
 	}
 
+
+
+	/**
+	 * How many files the panel's field shows. A preference only; the run clamps
+	 * it again against the admin's ceiling.
+	 */
+	private function batchSizePreference(): int
+	{
+		if ($this->config === null) {
+			return self::DEFAULT_PROCESS_LIMIT;
+		}
+		$raw = trim((string) $this->config->getUserValue($this->uid(), Application::APP_ID, 'process_batch_size', (string) self::DEFAULT_PROCESS_LIMIT));
+		return ctype_digit($raw) && (int) $raw > 0 ? min((int) $raw, $this->processMaxFiles()) : self::DEFAULT_PROCESS_LIMIT;
+	}
+
+	/**
+	 * Queue this user's own unprocessed files — the button under
+	 * "Not processed yet".
+	 *
+	 * The number is tunable in the panel and clamped here as well: a client is
+	 * not trusted to respect its own field, and the daily counter is the only
+	 * thing standing between a trial budget and a stuck finger.
+	 */
+	#[NoAdminRequired]
+	public function process(): DataResponse
+	{
+		$user = $this->userSession->getUser();
+		if ($user === null) {
+			throw new OCSForbiddenException('no session');
+		}
+		if (!$this->request->passesCSRFCheck()) {
+			return new DataResponse(['message' => 'CSRF check failed'], Http::STATUS_PRECONDITION_FAILED);
+		}
+		if (!$this->access->canProcess($user)) {
+			throw new OCSForbiddenException('OCR is not enabled for your account');
+		}
+		if (!$this->engine->isConfigured()) {
+			return new DataResponse([
+				'message' => 'No OCR engine is configured',
+				'engine' => EnginePolicy::NONE,
+			], Http::STATUS_CONFLICT);
+		}
+
+		$cap = $this->processMaxFiles();
+		$raw = $this->request->getParam('limit');
+		$limit = $raw === null ? min(self::DEFAULT_PROCESS_LIMIT, $cap) : (int) $raw;
+		$limit = max(1, min($limit, $cap));
+
+		$uid = $user->getUID();
+		$dailyCap = $this->dailyCap();
+		$used = $this->dailyUsed($uid);
+		if ($used >= $dailyCap) {
+			return new DataResponse([
+				'message' => sprintf('Daily limit reached: %d files.', $dailyCap),
+			], Http::STATUS_TOO_MANY_REQUESTS);
+		}
+
+		$result = $this->queue->enqueueNeverProcessed($uid, $limit, $this->engine->engineForJob());
+		if ($result['queued'] > 0) {
+			$this->setDailyUsed($uid, $used + $result['queued']);
+		}
+
+		return new DataResponse([
+			'queued' => $result['queued'],
+			'refused' => $result['refused'],
+			'skipped_young' => $result['young'],
+			'remaining' => $result['remaining'],
+			'limit' => $limit,
+			'daily_used' => $used + $result['queued'],
+			'daily_cap' => $dailyCap,
+		]);
+	}
+
+	/**
+	 * Remember how many files the button should take. A preference, not a
+	 * permission: the clamp is applied again on every run.
+	 */
+	#[NoAdminRequired]
+	public function batchSize(): DataResponse
+	{
+		if ($this->userSession->getUser() === null) {
+			throw new OCSForbiddenException('no session');
+		}
+		if (!$this->request->passesCSRFCheck()) {
+			return new DataResponse(['message' => 'CSRF check failed'], Http::STATUS_PRECONDITION_FAILED);
+		}
+
+		$size = max(1, min((int) ($this->request->getParam('size') ?? self::DEFAULT_PROCESS_LIMIT), $this->processMaxFiles()));
+		$this->config?->setUserValue($this->uid(), Application::APP_ID, 'process_batch_size', (string) $size);
+
+		return new DataResponse(['size' => $size]);
+	}
+
+	/**
+	 * How many files one click may take: the admin's ceiling, then ours.
+	 */
+	private function processMaxFiles(): int
+	{
+		$raw = trim((string) $this->config?->getAppValue(Application::APP_ID, 'process_max_files', (string) self::MAX_PROCESS_FILES));
+		return ctype_digit($raw) && (int) $raw > 0 ? min((int) $raw, self::MAX_PROCESS_FILES) : self::MAX_PROCESS_FILES;
+	}
+
+	/**
+	 * Files per user per day. A trial budget is finite; a button is easy to press.
+	 */
+	private function dailyCap(): int
+	{
+		$raw = trim((string) $this->config?->getAppValue(Application::APP_ID, 'process_daily_cap', (string) self::MAX_PROCESS_FILES));
+		return ctype_digit($raw) && (int) $raw > 0 ? (int) $raw : self::MAX_PROCESS_FILES;
+	}
+
+	private function dailyUsed(string $uid): int
+	{
+		if ($this->config === null) {
+			return 0;
+		}
+		// A counter without a date is a counter from some other day. Comparing
+		// the day is what makes "today" mean today across restarts.
+		if ($this->config->getUserValue($uid, Application::APP_ID, 'process_daily_date', '') !== gmdate('Y-m-d')) {
+			return 0;
+		}
+		$raw = trim((string) $this->config->getUserValue($uid, Application::APP_ID, 'process_daily_used', '0'));
+		return ctype_digit($raw) ? (int) $raw : 0;
+	}
+
+	private function setDailyUsed(string $uid, int $used): void
+	{
+		$this->config?->setUserValue($uid, Application::APP_ID, 'process_daily_used', (string) max(0, $used));
+		$this->config?->setUserValue($uid, Application::APP_ID, 'process_daily_date', gmdate('Y-m-d'));
+	}
+
 	/**
 	 * Whether this path belongs to this user.
 	 *
@@ -287,6 +451,24 @@ class StatusController extends OCSController
 	 */
 	private function readerLabel(?string $engine): string
 	{
-		return $engine === null ? 'by an engine we did not record' : 'by ' . $engine;
+		if ($engine === null) {
+			return 'Engine not recorded';
+		}
+
+		return $this->engineDisplayName($engine);
+	}
+
+	/**
+	 * The engine's own spelling. They are proper nouns and the panel prints them
+	 * in a column next to counts, where a lowercase `google` reads like a code.
+	 */
+	private function engineDisplayName(string $engine): string
+	{
+		return match (strtolower($engine)) {
+			'google' => 'Google',
+			'minimax' => 'MiniMax',
+			'tesseract' => 'Tesseract',
+			default => mb_strtoupper(mb_substr($engine, 0, 1)) . mb_substr($engine, 1),
+		};
 	}
 }

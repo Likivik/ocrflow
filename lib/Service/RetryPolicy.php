@@ -70,13 +70,14 @@ final class RetryPolicy
 	 * second person, no owner, no administrator, no verbs — the UI owns the
 	 * actions. `tests/Unit/Service/RetryPolicyWordingTest.php` enforces it.
 	 *
-	 * @var array<string, array{verdict: string, label: string, fix: string, actor: string}>
+	 * @var array<string, array{verdict: string, text: string, short: string, actor: string, fix?: string}>
 	 */
 	private const VOCAB = [
 		// -- work ------------------------------------------------------------
 		'needs_ocr' => [
 			'verdict' => 'work',
 			'text' => 'The file has no text layer yet.',
+			'short' => 'Needs OCR',
 			'actor' => 'worker',
 		],
 
@@ -84,31 +85,37 @@ final class RetryPolicy
 		'skip_text_native' => [
 			'verdict' => 'nothing_to_do',
 			'text' => 'The PDF already carries typed text of its own.',
+			'short' => 'Has its own text layer',
 			'actor' => 'nobody',
 		],
 		'skip_ocred_by_ocrflow' => [
 			'verdict' => 'nothing_to_do',
 			'text' => 'This file was already read and its result is at or above the engine bar.',
+			'short' => 'Read by OcrFlow',
 			'actor' => 'nobody',
 		],
 		'skip_classifier_says_photo' => [
 			'verdict' => 'nothing_to_do',
 			'text' => 'The classifier decided this image is a photo of a scene, not a document.',
+			'short' => 'Photo, not a document',
 			'actor' => 'nobody',
 		],
 		'skip_file_type_unsupported' => [
 			'verdict' => 'nothing_to_do',
 			'text' => 'This file type is not one the pipeline can read.',
+			'short' => 'Format not read',
 			'actor' => 'nobody',
 		],
 		'skip_ocred_by_ocrflow_found_nothing' => [
 			'verdict' => 'nothing_to_do',
 			'text' => 'The file was read and genuinely contains no text.',
+			'short' => 'No text found',
 			'actor' => 'nobody',
 		],
 		'error_provider_unsupported_file' => [
 			'verdict' => 'nothing_to_do',
 			'text' => 'This file type is not supported.',
+			'short' => 'Format not supported',
 			'actor' => 'nobody',
 		],
 
@@ -116,6 +123,7 @@ final class RetryPolicy
 		'skip_ocred_by_suspected_foreign' => [
 			'verdict' => 'redo',
 			'text' => 'The text layer on this file was written by another tool and is not trusted.',
+			'short' => 'Text by another tool',
 			'actor' => 'owner',
 		],
 
@@ -123,56 +131,67 @@ final class RetryPolicy
 		'error_app_answered_5xx' => [
 			'verdict' => 'wait',
 			'text' => 'The Nextcloud app failed with a server error while the worker was talking to it.',
+			'short' => 'App server error',
 			'actor' => 'worker',
 		],
 		'error_app_did_not_answer' => [
 			'verdict' => 'wait',
 			'text' => 'The request to the Nextcloud app got no answer at all.',
+			'short' => 'App did not answer',
 			'actor' => 'worker',
 		],
 		'error_provider_unavailable' => [
 			'verdict' => 'wait',
 			'text' => 'The OCR service answered 5xx.',
+			'short' => 'Engine unavailable',
 			'actor' => 'worker',
 		],
 		'error_provider_timed_out' => [
 			'verdict' => 'wait',
 			'text' => 'The OCR service took too long to answer.',
+			'short' => 'Engine timed out',
 			'actor' => 'worker',
 		],
 		'error_provider_rate_limited' => [
 			'verdict' => 'wait',
 			'text' => 'The OCR service rate-limited the request.',
+			'short' => 'Engine rate-limited',
 			'actor' => 'worker',
 		],
 		'error_provider_quota_exhausted' => [
 			'verdict' => 'wait',
 			'text' => 'The OCR service is out of quota, and the file itself is fine.',
+			'short' => 'Engine quota spent',
 			'actor' => 'deployment',
 		],
 		'error_provider_budget_exhausted' => [
 			'verdict' => 'wait',
 			'text' => 'The OCR budget for this engine is spent.',
+			'short' => 'Engine budget spent',
 			'actor' => 'deployment',
 		],
 		'error_provider_local_quota_exhausted' => [
 			'verdict' => 'wait',
 			'text' => 'The local engine is out of quota.',
+			'short' => 'Local engine quota spent',
 			'actor' => 'deployment',
 		],
 		'error_provider_local_budget_exhausted' => [
 			'verdict' => 'wait',
 			'text' => 'The local engine\'s budget is spent.',
+			'short' => 'Local engine budget spent',
 			'actor' => 'deployment',
 		],
 		'error_worker_storage_failed' => [
 			'verdict' => 'wait',
 			'text' => 'A storage fault interrupted the worker before it could read the file.',
+			'short' => 'Storage fault',
 			'actor' => 'worker',
 		],
 		'error_worker_got_empty_file' => [
 			'verdict' => 'wait',
 			'text' => 'The file arrived at the worker with no bytes.',
+			'short' => 'No bytes received',
 			'actor' => 'worker',
 		],
 
@@ -183,6 +202,7 @@ final class RetryPolicy
 		'error_worker_file_gone' => [
 			'verdict' => 'drop',
 			'text' => 'The file was deleted or moved after it was queued.',
+			'short' => 'File moved or deleted',
 			'actor' => 'nobody',
 		],
 
@@ -190,66 +210,79 @@ final class RetryPolicy
 		'error_worker_secret_rejected' => [
 			'verdict' => 'needs_fix',
 			'text' => 'The app does not accept the secret the worker presents.',
+			'short' => 'Worker secret rejected',
 			'actor' => 'deployment',
 		],
 		'error_provider_permission_denied' => [
 			'verdict' => 'needs_fix',
 			'text' => 'The engine account lacks the permission the request needed.',
+			'short' => 'Engine permission denied',
 			'actor' => 'deployment',
 		],
 		'error_provider_credentials_missing' => [
 			'verdict' => 'needs_fix',
 			'text' => 'The engine has no credentials.',
+			'short' => 'Engine credentials missing',
 			'actor' => 'deployment',
 		],
 		'error_worker_request_malformed' => [
 			'verdict' => 'needs_fix',
 			'text' => 'The app refused the worker request as malformed (4xx).',
+			'short' => 'Malformed worker request',
 			'actor' => 'deployment',
 		],
 		'error_classifier_unavailable' => [
 			'verdict' => 'needs_fix',
 			'text' => 'The document classifier is not available, so images cannot be checked.',
+			'short' => 'Classifier unavailable',
 			'actor' => 'deployment',
 		],
 		'error_worker_unclassified' => [
 			'verdict' => 'needs_fix',
 			'text' => 'OCR failed without saying why.',
+			'short' => 'OCR failed',
 			'actor' => 'deployment',
 		],
 		'error_worker_sent_unknown_code' => [
 			'verdict' => 'needs_fix',
 			'text' => 'The worker reported a code this version of the app does not know.',
+			'short' => 'Unknown worker code',
 			'actor' => 'deployment',
 		],
 		'error_source_file_zero_bytes' => [
 			'verdict' => 'needs_fix',
 			'text' => 'This file is empty (0 bytes).',
+			'short' => 'Empty file',
 			'actor' => 'owner',
 		],
 		'error_result_write_failed' => [
 			'verdict' => 'needs_fix',
 			'text' => 'The result could not be saved back over the file.',
+			'short' => 'Result not saved',
 			'actor' => 'deployment',
 		],
 		'error_engine_output_unreadable' => [
 			'verdict' => 'needs_fix',
 			'text' => 'The parser could not make sense of what the engine returned.',
+			'short' => 'Engine output unreadable',
 			'actor' => 'deployment',
 		],
 		'error_file_broken' => [
 			'verdict' => 'needs_fix',
 			'text' => 'This file is damaged and cannot be read.',
+			'short' => 'Damaged file',
 			'actor' => 'owner',
 		],
 		'error_image_too_large' => [
 			'verdict' => 'needs_fix',
 			'text' => 'This image is too large to analyse.',
+			'short' => 'Image too large',
 			'actor' => 'owner',
 		],
 		'error_queued_twice_for_same_bytes' => [
 			'verdict' => 'needs_fix',
 			'text' => 'The scan met this exact file version a second time, and the first job left no verdict.',
+			'short' => 'Queued twice for the same bytes',
 			'actor' => 'deployment',
 		],
 
@@ -257,6 +290,7 @@ final class RetryPolicy
 		'skip_source_changed_result_saved' => [
 			'verdict' => 'redo',
 			'text' => 'The source changed while OCR ran, so the result was kept aside.',
+			'short' => 'Source changed mid-run',
 			'actor' => 'owner',
 		],
 
@@ -264,9 +298,24 @@ final class RetryPolicy
 		'error_worker_job_reference_stale' => [
 			'verdict' => 'drop',
 			'text' => 'A result arrived for a job that no longer exists.',
+			'short' => 'Result for a missing job',
 			'actor' => 'worker',
 		],
 	];
+
+	/**
+	 * Every code this version knows, in declaration order.
+	 *
+	 * `VOCAB` stays private: the codes are a public vocabulary, the table is
+	 * not. A test that promises "every code has a short form" needs the list,
+	 * and this is the smallest door that gives it one.
+	 *
+	 * @return list<string>
+	 */
+	public static function codes(): array
+	{
+		return array_keys(self::VOCAB);
+	}
 
 	/**
 	 * Old name → new name, for reading rows written before 0.1.5. The ledger
@@ -516,7 +565,7 @@ final class RetryPolicy
 	/**
 	 * The whole entry: verdict, label, fix hint, actor.
 	 *
-	 * @return array{verdict: string, label: string, fix: string, actor: string}|null
+	 * @return array{verdict: string, text: string, short: string, actor: string, fix?: string}|null
 	 */
 	public function entry(?string $code): ?array
 	{
