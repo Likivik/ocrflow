@@ -1430,7 +1430,7 @@ class Queue extends QBMapper
 	 * @param list<int> $fileIds
 	 * @return array<int, string> file id => 'queued'|'claimed'
 	 */
-	private function liveQueueFor(array $fileIds): array
+	protected function liveQueueFor(array $fileIds): array
 	{
 		$out = [];
 		foreach (array_chunk($fileIds, 2000) as $chunk) {
@@ -1464,7 +1464,7 @@ class Queue extends QBMapper
 	 * @param list<int> $fileIds
 	 * @return array<int, array{status: mixed, reason: mixed, engine: mixed, engine_version: mixed}>
 	 */
-	private function ledgerRowsFor(array $fileIds): array
+	protected function ledgerRowsFor(array $fileIds): array
 	{
 		$out = [];
 		foreach (array_chunk($fileIds, 2000) as $chunk) {
@@ -1585,7 +1585,7 @@ class Queue extends QBMapper
 	 *
 	 * @return array<int, int>
 	 */
-	private function diskFileIds(string $uid): array
+	protected function diskFileIds(string $uid): array
 	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('f.fileid')
@@ -1605,7 +1605,7 @@ class Queue extends QBMapper
 	/**
 	 * @return array<string, mixed>
 	 */
-	private function emptyCount(string $uid): int
+	protected function emptyCount(string $uid): int
 	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->selectAlias($qb->func()->count('*'), 'n')
@@ -1621,7 +1621,7 @@ class Queue extends QBMapper
 	/**
 	 * Files on disk in a format the pipeline does not read (TIFF today).
 	 */
-	private function unreadableFormatCount(string $uid): int
+	protected function unreadableFormatCount(string $uid): int
 	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->selectAlias($qb->func()->count('*'), 'n')
