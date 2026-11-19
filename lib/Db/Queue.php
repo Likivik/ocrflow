@@ -1371,8 +1371,10 @@ class Queue extends QBMapper
 	 * @return array{
 	 *   total: int, never_processed: int, empty: int, unreadable_format: int,
 	 *   queue: array{queued: int, claimed: int},
+	 *   gone: int,
 	 *   by_code: array<string, int>,
-	 *   read_by_engine: list<array{engine: ?string, version: ?string, count: int}>
+	 *   read_by_engine: list<array{engine: ?string, version: ?string, count: int}>,
+	 *   no_text_by_engine: list<array{engine: ?string, version: ?string, count: int}>
 	 * }
 	 */
 	public function fileReport(string $uid): array
@@ -1389,20 +1391,40 @@ class Queue extends QBMapper
 		$byCode = [];
 		$queue = ['queued' => 0, 'claimed' => 0];
 		$readEngines = [];
+		$noTextEngines = [];
 		$settled = 0;
+		$gone = 0;
 		foreach ($ledger as $fileId => $row) {
 			if (isset($live[$fileId])) {
 				$queue[$live[$fileId]]++;
 				continue;
 			}
-			$settled++;
 			$code = $row['reason'] === null ? '' : (string) $row['reason'];
+			// The one code the owner cannot act on: the file was deleted or
+			// moved before we could read it. It is counted apart so the
+			// arithmetic still closes, and shown in no block. Deliberately a
+			// single code, not the whole `drop` verdict: a stale job reference
+			// says something about a file that still exists, and hiding it
+			// would be a different decision than hiding this one.
+			if ($code === 'error_worker_file_gone') {
+				$gone++;
+				continue;
+			}
+			$settled++;
 			$byCode[$code] = ($byCode[$code] ?? 0) + 1;
-			// "Read, no text found" is a subset marker: counted in `by_code`,
-			// kept out of the engine split so the rows still sum to the block.
+			$engineKey = ($row['engine'] ?? '') . '|' . ($row['engine_version'] ?? '');
+			// "Read, nothing to transcribe" is still a read, and the reader is
+			// the fact the owner cares about: it is split by engine like every
+			// other read.
 			if ($code === '' || $code === 'skip_ocred_by_ocrflow') {
-				$key = ($row['engine'] ?? '') . '|' . ($row['engine_version'] ?? '');
-				$readEngines[$key] = ($readEngines[$key] ?? 0) + 1;
+				$readEngines[$engineKey] = ($readEngines[$engineKey] ?? 0) + 1;
+			}
+			// Split by engine only: the row reads "by google, no text to
+			// transcribe", so two versions of one engine must not become two
+			// rows with one label.
+			if ($code === 'skip_ocred_by_ocrflow_found_nothing') {
+				$reader = $row['engine'] ?? '';
+				$noTextEngines[$reader . '|'] = ($noTextEngines[$reader . '|'] ?? 0) + 1;
 			}
 		}
 		foreach ($live as $fileId => $status) {
@@ -1415,12 +1437,16 @@ class Queue extends QBMapper
 			'total' => count($ids),
 			// No ledger row and no live row: a file in our formats nobody has
 			// queued yet.
-			'never_processed' => count($ids) - $settled - count($live),
+			'never_processed' => count($ids) - $settled - count($live) - $gone,
 			'empty' => $this->emptyCount($uid),
 			'unreadable_format' => $this->unreadableFormatCount($uid),
 			'queue' => $queue,
+			// Files whose subject vanished mid-run: counted, shown nowhere, and
+			// subtracted from `never_processed` so they are not called unread.
+			'gone' => $gone,
 			'by_code' => $byCode,
 			'read_by_engine' => $this->engineSplit($readEngines),
+			'no_text_by_engine' => $this->engineSplit($noTextEngines),
 		];
 	}
 

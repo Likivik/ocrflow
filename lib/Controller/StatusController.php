@@ -96,9 +96,7 @@ class StatusController extends OCSController
 				foreach ($report['read_by_engine'] as $engineRow) {
 					$engine = $engineRow['engine'];
 					$version = $engineRow['version'];
-					$label2 = $engine === null
-						? 'by an engine we did not record'
-						: ($version === null ? 'by ' . $engine . ', version not recorded' : 'by ' . $engine . ' ' . $version);
+					$label2 = $this->engineLabel($engine, $version);
 					$rows[] = [
 						'key' => ($engine ?? '') . '|' . ($version ?? ''),
 						'label' => $label2,
@@ -108,12 +106,14 @@ class StatusController extends OCSController
 						'below_bar' => $engine !== null && $version !== null && !$this->engine->meetsBar($engine, $version),
 					];
 				}
-				$noText = $report['by_code']['skip_ocred_by_ocrflow_found_nothing'] ?? 0;
-				if ($noText > 0) {
+				// "Nothing to transcribe" is a read: the reader is the fact the
+				// owner cares about, so this row is named by the engine that
+				// looked and found nothing — not by us in the abstract.
+				foreach ($report['no_text_by_engine'] as $noText) {
 					$rows[] = [
-						'key' => 'no_text_found',
-						'label' => 'read it, no text to transcribe',
-						'count' => $noText,
+						'key' => 'no_text|' . ($noText['engine'] ?? ''),
+						'label' => $this->readerLabel($noText['engine']) . ', no text to transcribe',
+						'count' => $noText['count'],
 					];
 				}
 			}
@@ -265,5 +265,28 @@ class StatusController extends OCSController
 			'pages' => $job->getPages(),
 			'chars' => $job->getChars(),
 		]);
+	}
+
+	/**
+	 * "by google 3.16.0" / "by google, version not recorded" / "by an engine we
+	 * did not record" — one place, so the read rows and the no-text rows cannot
+	 * drift apart in wording.
+	 */
+	private function engineLabel(?string $engine, ?string $version): string
+	{
+		if ($version === null) {
+			return $this->readerLabel($engine) . ', version not recorded';
+		}
+
+		return $this->readerLabel($engine) . ' ' . $version;
+	}
+
+	/**
+	 * Who read the file, with no claim about the version — the no-text rows say
+	 * this and stop there, because the version is not what they answer.
+	 */
+	private function readerLabel(?string $engine): string
+	{
+		return $engine === null ? 'by an engine we did not record' : 'by ' . $engine;
 	}
 }

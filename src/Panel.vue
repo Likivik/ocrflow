@@ -13,116 +13,136 @@
 			</NcNoteCard>
 		</div>
 
+				<!-- Collapsed by default: the worklist can be hundreds of rows, and a
+		     person opening their settings is usually here for the queue
+		     numbers, not to scroll past every file. The count is the server's
+		     own total, not the length of the page we happen to hold. -->
 		<h3 class="ocrflow-panel__heading">
-			{{ t('Your files that need attention') }}
+			<button
+				type="button"
+				class="ocrflow-panel__heading--toggle"
+				aria-controls="ocrflow-panel-attention"
+				:aria-expanded="attentionOpen ? 'true' : 'false'"
+				@click="attentionOpen = !attentionOpen">
+				<span class="ocrflow-panel__heading-text">{{ t('Your files that need attention') }}</span>
+				<span v-if="mineLoaded" class="ocrflow-panel__heading-count">{{ mineTotal }}</span>
+				<span class="ocrflow-panel__chevron" :class="{ 'is-open': attentionOpen }" aria-hidden="true" />
+			</button>
 		</h3>
+		<!-- A failed load is not something to hide behind a collapsed section. -->
 		<NcNoteCard v-if="mineError" type="error">
 			{{ t('Could not read your files: {reason}', { reason: mineError }) }}
 		</NcNoteCard>
-		<p v-else-if="!mineLoaded" class="ocrflow-panel__empty">
-			{{ t('Reading your files…') }}
-		</p>
-		<!-- Two different nothings: an empty worklist is good news, an empty
-		     filter is not the same answer and must not be dressed as one. -->
-		<p v-else-if="!mineRows.length" class="ocrflow-panel__empty">
-			{{ t('Nothing of yours needs attention.') }}
-		</p>
-		<template v-else>
-			<div class="ocrflow-panel__filters">
-				<div class="ocrflow-panel__chips" role="group" :aria-label="t('Filter by problem')">
-					<NcButton
-						v-for="chip in filterChips"
-						:key="chip.id"
-						:pressed="activeFilter === chip.id"
-						variant="tertiary"
-						@click="activeFilter = chip.id">
-						{{ chip.label }} ({{ chip.count }})
-					</NcButton>
-				</div>
-				<NcTextField
-					v-model="pathQuery"
-					class="ocrflow-panel__search"
-					:label="t('Search by path')"
-					placeholder="Scans/2026" />
-			</div>
-
-			<div class="ocrflow-panel__list-head">
-				<NcCheckboxRadioSwitch
-					type="checkbox"
-					:checked="allVisibleSelected"
-					@update:checked="toggleAllVisible">
-					{{ t('Select all shown ({count})', { count: visibleRows.length }) }}
-				</NcCheckboxRadioSwitch>
-				<span class="ocrflow-panel__list-count">
-					{{ t('{shown} of {total} shown', { shown: visibleRows.length, total: mineRows.length }) }}
-				</span>
-			</div>
-
-			<p v-if="!visibleRows.length" class="ocrflow-panel__empty">
-				{{ t('No files match this filter.') }}
-				<NcButton variant="tertiary" @click="clearFilters">
-					{{ t('Show all') }}
-				</NcButton>
+		<div v-if="attentionOpen" id="ocrflow-panel-attention" class="ocrflow-panel__attention">
+			<p v-if="!mineLoaded" class="ocrflow-panel__empty">
+				{{ t('Reading your files…') }}
 			</p>
-			<ul v-else class="ocrflow-panel__mine">
-				<li
-					v-for="row in visibleRows"
-					:key="rowKey(row)"
-					class="ocrflow-panel__mine-row"
-					:class="{ 'is-selected': isSelected(row) }">
+			<!-- Two different nothings: an empty worklist is good news, an empty
+			     filter is not the same answer and must not be dressed as one. -->
+			<p v-else-if="!mineRows.length" class="ocrflow-panel__empty">
+				{{ t('Nothing of yours needs attention.') }}
+			</p>
+			<template v-else>
+				<div class="ocrflow-panel__filters">
+					<div class="ocrflow-panel__chips" role="group" :aria-label="t('Filter by problem')">
+						<NcButton
+							v-for="chip in filterChips"
+							:key="chip.id"
+							:pressed="activeFilter === chip.id"
+							variant="tertiary"
+							@click="activeFilter = chip.id">
+							{{ chip.label }} ({{ chip.count }})
+						</NcButton>
+					</div>
+					<NcTextField
+						v-model="pathQuery"
+						class="ocrflow-panel__search"
+						:label="t('Search by path')"
+						placeholder="Scans/2026" />
+				</div>
+
+				<div class="ocrflow-panel__list-head">
 					<NcCheckboxRadioSwitch
 						type="checkbox"
-						:checked="isSelected(row)"
-						:aria-label="t('Select {path}', { path: shortPath(row.path) })"
-						@update:checked="(checked) => setSelected(row, checked)" />
-					<div class="ocrflow-panel__mine-text">
-						<span class="ocrflow-panel__mine-dir">{{ pathParts(row.path).dir }}</span>
-						<span class="ocrflow-panel__mine-name" :title="row.path">{{ pathParts(row.path).name }}</span>
-						<span class="ocrflow-panel__mine-text">{{ row.text }}</span>
-						<span v-if="row.error" class="ocrflow-panel__mine-error">{{ row.error }}</span>
-						<span class="ocrflow-panel__mine-meta">
-							<template v-if="row.age !== null">{{ age(row.age) }}</template><template v-if="row.attempts !== null"> · {{ t('{count} attempts', { count: row.attempts }) }}</template>
-						</span>
-					</div>
-					<div class="ocrflow-panel__mine-actions">
-						<!-- Open is a plain link: the file is Nextcloud's, not
-						     ours, and the viewer is the right place to look at it. -->
-						<NcButton
-							v-if="row.file_id"
-							:href="fileUrl(row)"
-							target="_blank"
-							rel="noopener">
-							{{ t('Open') }}
-						</NcButton>
-						<!-- Retry only where a second attempt can change the
-						     answer; a stamp needs a decision, not another run. -->
-						<NcButton v-if="row.retryable" :disabled="mineBusy" @click="retry(row)">
-							{{ retrying === rowKey(row) ? t('Retrying…') : t('Retry') }}
-						</NcButton>
-						<NcButton variant="error" :disabled="mineBusy" @click="askDeleteRow(row)">
-							{{ t('Delete') }}
-						</NcButton>
-					</div>
-				</li>
-			</ul>
+						:checked="allVisibleSelected"
+						@update:checked="toggleAllVisible">
+						{{ t('Select all shown ({count})', { count: visibleRows.length }) }}
+					</NcCheckboxRadioSwitch>
+					<span class="ocrflow-panel__list-count">
+						{{ t('{shown} of {total} shown', { shown: visibleRows.length, total: mineRows.length }) }}
+					</span>
+				</div>
 
-			<!-- Sticky, because the selection is about rows that may have
-			     scrolled away: the bar says how many and what will happen. -->
-			<div v-if="selectedCount" class="ocrflow-panel__bulk">
-				<span class="ocrflow-panel__bulk-count">
-					{{ t('{count} selected', { count: selectedCount }) }}
-				</span>
-				<NcButton
-					v-if="selectedRetryableCount"
-					:disabled="mineBusy"
-					@click="bulkRetry">
-					{{ t('Retry {count}', { count: selectedRetryableCount }) }}
-				</NcButton>
-				<NcButton variant="error" :disabled="mineBusy" @click="askDeleteSelected">
-					{{ t('Delete {count}', { count: selectedCount }) }}
-				</NcButton>
-			</div>
-		</template>
+				<!-- The tabs and the select-all bar are the controls for the list,
+				     so they stay put; the rows scroll under them. -->
+				<div class="ocrflow-panel__mine-scroll">
+				<p v-if="!visibleRows.length" class="ocrflow-panel__empty">
+					{{ t('No files match this filter.') }}
+					<NcButton variant="tertiary" @click="clearFilters">
+						{{ t('Show all') }}
+					</NcButton>
+				</p>
+				<ul v-else class="ocrflow-panel__mine">
+					<li
+						v-for="row in visibleRows"
+						:key="rowKey(row)"
+						class="ocrflow-panel__mine-row"
+						:class="{ 'is-selected': isSelected(row) }">
+						<NcCheckboxRadioSwitch
+							type="checkbox"
+							:checked="isSelected(row)"
+							:aria-label="t('Select {path}', { path: shortPath(row.path) })"
+							@update:checked="(checked) => setSelected(row, checked)" />
+						<div class="ocrflow-panel__mine-text">
+							<span class="ocrflow-panel__mine-dir">{{ pathParts(row.path).dir }}</span>
+							<span class="ocrflow-panel__mine-name" :title="row.path">{{ pathParts(row.path).name }}</span>
+							<span class="ocrflow-panel__mine-text">{{ row.text }}</span>
+							<span v-if="row.error" class="ocrflow-panel__mine-error">{{ row.error }}</span>
+							<span class="ocrflow-panel__mine-meta">
+								<template v-if="row.age !== null">{{ age(row.age) }}</template><template v-if="row.attempts !== null"> · {{ t('{count} attempts', { count: row.attempts }) }}</template>
+							</span>
+						</div>
+						<div class="ocrflow-panel__mine-actions">
+							<!-- Open is a plain link: the file is Nextcloud's, not
+							     ours, and the viewer is the right place to look at it. -->
+							<NcButton
+								v-if="row.file_id"
+								:href="fileUrl(row)"
+								target="_blank"
+								rel="noopener">
+								{{ t('Open') }}
+							</NcButton>
+							<!-- Retry only where a second attempt can change the
+							     answer; a stamp needs a decision, not another run. -->
+							<NcButton v-if="row.retryable" :disabled="mineBusy" @click="retry(row)">
+								{{ retrying === rowKey(row) ? t('Retrying…') : t('Retry') }}
+							</NcButton>
+							<NcButton variant="error" :disabled="mineBusy" @click="askDeleteRow(row)">
+								{{ t('Delete') }}
+							</NcButton>
+						</div>
+					</li>
+				</ul>
+				</div>
+
+				<!-- Sticky, because the selection is about rows that may have
+				     scrolled away: the bar says how many and what will happen. -->
+				<div v-if="selectedCount" class="ocrflow-panel__bulk">
+					<span class="ocrflow-panel__bulk-count">
+						{{ t('{count} selected', { count: selectedCount }) }}
+					</span>
+					<NcButton
+						v-if="selectedRetryableCount"
+						:disabled="mineBusy"
+						@click="bulkRetry">
+						{{ t('Retry {count}', { count: selectedRetryableCount }) }}
+					</NcButton>
+					<NcButton variant="error" :disabled="mineBusy" @click="askDeleteSelected">
+						{{ t('Delete {count}', { count: selectedCount }) }}
+					</NcButton>
+				</div>
+			</template>
+		</div>
 		<p v-if="mineMessage" class="ocrflow-panel__result">
 			{{ mineMessage }}
 		</p>
@@ -250,6 +270,8 @@ export default {
 			// counts above, because "3 errors on this instance" and "2 of them
 			// are mine" are different answers and must not be confused.
 			mineRows: [],
+			// The server's total, because mineRows is one capped page.
+			mineTotal: 0,
 			mineLoaded: false,
 			mineError: '',
 			mineBusy: false,
@@ -258,6 +280,8 @@ export default {
 			// Filters are client-side over the loaded rows: the endpoint is a
 			// worklist, not a query engine, and a chip that re-queries would
 			// make a 200-row page feel like a search box.
+			// Collapsed by default; the heading still shows the count.
+			attentionOpen: false,
 			activeFilter: 'all',
 			pathQuery: '',
 			// Selection is by row key (origin + id), because a job id and a
@@ -440,7 +464,9 @@ export default {
 				if (!Array.isArray(rows)) {
 					throw new Error('unexpected answer')
 				}
+				const total = Number(data?.ocs?.data?.total)
 				this.mineRows = rows
+				this.mineTotal = Number.isFinite(total) ? total : rows.length
 				// A selection that survived a reload would point at rows the
 				// user can no longer see.
 				const keys = new Set(rows.map((row) => this.rowKey(row)))
@@ -656,6 +682,66 @@ export default {
 
 .ocrflow-panel__heading {
 	margin-top: calc(var(--default-grid-baseline, 4px) * 6);
+}
+
+/* The heading is a button now: the section is collapsed by default, and this is
+   the only thing to click. It must look like a heading, not like a control. */
+.ocrflow-panel__heading--toggle {
+	display: flex;
+	align-items: center;
+	gap: calc(var(--default-grid-baseline, 4px) * 2);
+	width: 100%;
+	padding: calc(var(--default-grid-baseline, 4px) * 2) 0;
+	background: none;
+	border: 0;
+	border-bottom: 1px solid var(--color-border);
+	color: inherit;
+	font: inherit;
+	font-weight: bold;
+	text-align: start;
+	cursor: pointer;
+}
+
+.ocrflow-panel__heading--toggle:hover,
+.ocrflow-panel__heading--toggle:focus-visible {
+	color: var(--color-primary-element);
+}
+
+.ocrflow-panel__heading--toggle:focus-visible {
+	outline: 2px solid var(--color-primary-element);
+	outline-offset: 2px;
+}
+
+.ocrflow-panel__heading-count {
+	font-weight: normal;
+	color: var(--color-text-maxcontrast);
+}
+
+.ocrflow-panel__chevron {
+	margin-inline-start: auto;
+	width: 8px;
+	height: 8px;
+	border-right: 2px solid currentColor;
+	border-bottom: 2px solid currentColor;
+	transform: rotate(45deg);
+	transition: transform 120ms ease-in-out;
+}
+
+.ocrflow-panel__chevron.is-open {
+	transform: rotate(-135deg);
+}
+
+.ocrflow-panel__attention {
+	margin-top: calc(var(--default-grid-baseline, 4px) * 2);
+}
+
+/* The rows scroll, the controls above them do not: tabs and "select all shown"
+   are how the list is read, so they stay where the eye already is. */
+.ocrflow-panel__mine-scroll {
+	max-height: 22rem;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding-inline-end: calc(var(--default-grid-baseline, 4px) * 1);
 }
 
 .ocrflow-panel__form {
