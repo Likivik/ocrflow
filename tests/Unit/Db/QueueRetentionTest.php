@@ -8,6 +8,7 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
 use OCP\DB\IResult;
@@ -277,10 +278,7 @@ class QueueRetentionTest extends TestCase
 		$db = $this->createMock(IDBConnection::class);
 		$db->method('getQueryBuilder')->willReturn($qb);
 
-		$queue = new Queue(
-			$db,
-			new StageEvents(new RetryPolicy(), $this->createMock(LoggerInterface::class)),
-		);
+		$queue = new JobStore($db, new RetryPolicy());
 
 		$queue->purgeTerminal(self::NOW, 100);
 
@@ -330,10 +328,7 @@ class QueueRetentionTest extends TestCase
 		$db = $this->createMock(IDBConnection::class);
 		$db->method('getQueryBuilder')->willReturn($qb);
 
-		$queue = new Queue(
-			$db,
-			new StageEvents(new RetryPolicy(), $this->createMock(LoggerInterface::class)),
-		);
+		$queue = new JobStore($db, new RetryPolicy());
 
 		$queue->purgeTerminal(self::NOW, 100);
 
@@ -391,10 +386,7 @@ class QueueRetentionTest extends TestCase
 		$db = $this->createMock(IDBConnection::class);
 		$db->method('getQueryBuilder')->willReturn($qb);
 
-		$queue = new Queue(
-			$db,
-			new StageEvents(new RetryPolicy(), $this->createMock(LoggerInterface::class)),
-		);
+		$queue = new JobStore($db, new RetryPolicy());
 
 		$queue->purgeTerminal(self::NOW, 100);
 
@@ -424,7 +416,7 @@ class QueueRetentionTest extends TestCase
  * the loop, the cap, the deletion order and the orphan rule stay production
  * code — only the row I/O is faked.
  */
-class StoreQueue extends Queue
+class StoreQueue extends JobStore
 {
 	/** @var array<int, array<string, mixed>> */
 	public array $jobs = [];
@@ -438,38 +430,7 @@ class StoreQueue extends Queue
 
 	public function __construct(IDBConnection $db)
 	{
-		parent::__construct(
-			$db,
-			new StageEvents(new RetryPolicy(), new class implements LoggerInterface {
-				public function emergency($message, array $context = []): void
-				{
-				}
-				public function alert($message, array $context = []): void
-				{
-				}
-				public function critical($message, array $context = []): void
-				{
-				}
-				public function error($message, array $context = []): void
-				{
-				}
-				public function warning($message, array $context = []): void
-				{
-				}
-				public function notice($message, array $context = []): void
-				{
-				}
-				public function info($message, array $context = []): void
-				{
-				}
-				public function debug($message, array $context = []): void
-				{
-				}
-				public function log($level, $message, array $context = []): void
-				{
-				}
-			}),
-		);
+		parent::__construct($db, new RetryPolicy());
 		$this->policy = new RetryPolicy();
 	}
 

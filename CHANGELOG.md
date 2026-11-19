@@ -7,12 +7,14 @@ written.
 
 ### Added
 
+- **Phase 2b: the job log is a class.** Twenty-two `ocrflow_jobs` operations
+  (`claim`, `renewClaim`, `release`, `requeueStale`, `forceRequeue`, retention
+  and the scan loop breaker among them) now live in
+  `OCA\OcrFlow\Storage\JobStore`; `Queue`'s same-named methods delegate, and
+  the claim constants have one definition that both classes name. `Queue.php`
+  1923 → 1446 lines. The retention tests now subclass `JobStore`, because
+  retention is a fact about the job log, not about the queue facade.
 - **Phase 2a of the storage split: the ledger is a class.** Eleven reads and
-  audits of `ocrflow_files` (`settledForVersion`, `permanentFailureForVersion`,
-  `findFileByPath`, `clearPermanentVerdict`, `ledgerRowsFor`, `ledgerDrift`,
-  `provenanceCounts`, `skippedByReason`, `errorReasons`, `reasonsForStatus`) now
-  live in `OCA\OcrFlow\Storage\Ledger`; `Queue`'s methods of the same name
-  delegate. `Queue.php` 2158 → 1923 lines, behaviour unchanged.
 - **The panel report is computed from aggregates.** Six `COUNT`/`GROUP BY`
   queries replace "load every file id, then four chunked `IN` readers" — and the
   report is now computed once per load instead of twice (`StatusController::index()`
