@@ -107,6 +107,13 @@ written.
 
 ### Fixed
 
+- **Fixed: the aggregate report called `expr()->not()`, which Nextcloud's
+  expression builder does not have** — so `status` answered 500 for every user
+  in 0.1.46. Live files are now selected as ids (the queue's depth, not the
+  library's size) and the two statuses are made disjoint in PHP; the ledger
+  exclusion uses chunked `NOT IN`. The real-Nextcloud integration smoke now runs
+  `occ ocrflow:report:check --compare --all`, because this is the second time a
+  builder method that does not exist passed unit tests and PHPStan.
 - **Fixed: the panel answered 500 on every load.** Two faults, both invisible to
   unit tests: Nextcloud's function builder has no `AVG()` (the page estimate now
   uses `SUM`/`COUNT` and divides in PHP), and its query builder refuses any

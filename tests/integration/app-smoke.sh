@@ -1297,6 +1297,16 @@ case "$(occ ocrflow:errors --code=error_file_broken)" in
 esac
 ok "corrupted xref -> queued like any PDF, not broken (the reader repairs it)"
 
+echo "== report: the aggregate report equals the id-list arithmetic, on a real database"
+# Twice now a report change passed unit tests and PHPStan and died on the real
+# query builder: `func()->avg()` does not exist, and neither does `expr()->not()`.
+# Neither is visible without a database, so the oracle runs here.
+occ ocrflow:report:check --compare --all > /tmp/ocrflow-report-check.log 2>&1 \
+  || { tail -25 /tmp/ocrflow-report-check.log; fail "ocrflow:report:check --compare disagreed or crashed"; }
+grep -q 'agree' /tmp/ocrflow-report-check.log \
+  || { tail -10 /tmp/ocrflow-report-check.log; fail "report:check printed no agreement"; }
+ok "aggregate report == legacy id-list arithmetic"
+
 sql "DELETE FROM ${JOBS}" >/dev/null   # the fixtures' rows are evidence, not state
 rm -rf "$FIXTURES"
 
