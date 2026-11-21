@@ -10,6 +10,7 @@ namespace OCA\OcrFlow\Controller;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\BackgroundJob\ScanJob;
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Report\PanelReport;
 use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\EnginePolicy;
 use OCA\OcrFlow\Service\RetryPolicy;
@@ -46,6 +47,7 @@ class StatusController extends OCSController
 		private IUserSession $userSession,
 		private AccessGate $access,
 		private EnginePolicy $engine,
+		private PanelReport $panelReport,
 		private ?RetryPolicy $retryPolicy = null,
 		private ?IConfig $config = null,
 	) {
@@ -55,7 +57,10 @@ class StatusController extends OCSController
 	#[NoAdminRequired]
 	public function index(): DataResponse
 	{
-		$report = $this->queue->fileReport($this->uid());
+		// One report per request, from aggregates. It used to be computed twice
+		// per load — once here and once inside blocks() — each time over every
+		// file id the user owns.
+		$report = $this->panelReport->forUser($this->uid());
 
 		return new DataResponse([
 			'queue' => $this->queue->counts(),
@@ -66,7 +71,7 @@ class StatusController extends OCSController
 			// What happened to the files, per file: six blocks, each with the
 			// rows that add up to its total. This is the report; `queue` stays
 			// for the filter chips only.
-			'blocks' => $this->blocks(),
+			'blocks' => $this->blocks($report),
 			// The button's own numbers, next to the counts they belong to:
 			// how many it takes, what is left of the day, and what the last
 			// month says a file costs.
@@ -94,9 +99,8 @@ class StatusController extends OCSController
 	 *
 	 * @return list<array{id: string, label: string, count: int, rows: list<array<string, mixed>>}>
 	 */
-	private function blocks(): array
+	private function blocks(array $report): array
 	{
-		$report = $this->queue->fileReport($this->uid());
 		$policy = $this->retryPolicy ?? new RetryPolicy();
 
 		// Files, by the block their latest outcome belongs to.

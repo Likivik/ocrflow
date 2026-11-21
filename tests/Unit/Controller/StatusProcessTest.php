@@ -10,6 +10,7 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\StatusController;
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Report\PanelReport;
 use OCA\OcrFlow\Service\AccessGate;
 use OCP\IGroupManager;
 use OCA\OcrFlow\Service\EnginePolicy;
@@ -69,7 +70,14 @@ class StatusProcessTest extends TestCase
 			fn (string $uid, int $limit, ?string $eng) => $queued + ['uid' => $uid, 'limit' => $limit, 'engine' => $eng]
 		);
 
-		return new StatusController('ocrflow', $request, $queue, $this->createMock(IJobList::class), $session, $access, $engine, null, $config);
+		$panelReport = $this->createMock(PanelReport::class);
+		$panelReport->method('forUser')->willReturn([
+			'total' => 0, 'never_processed' => 0, 'empty' => 0, 'unreadable_format' => 0,
+			'queue' => ['queued' => 0, 'claimed' => 0], 'by_code' => [],
+			'read_by_engine' => [], 'no_text_by_engine' => [],
+		]);
+
+		return new StatusController('ocrflow', $request, $queue, $this->createMock(IJobList::class), $session, $access, $engine, $panelReport, null, $config);
 	}
 
 	public function testARequestWithoutACSRFTokenNeverSpends(): void
@@ -109,6 +117,7 @@ class StatusProcessTest extends TestCase
 		$controller = new StatusController(
 			'ocrflow', $request, $this->createMock(Queue::class), $this->createMock(IJobList::class),
 			$session, new AccessGate($config, $groupManager), new EnginePolicy($config),
+			$this->createMock(PanelReport::class),
 		);
 
 		$this->expectException(OCSForbiddenException::class);

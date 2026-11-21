@@ -9,6 +9,7 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 
 use OCA\OcrFlow\Controller\StatusController;
 use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Report\PanelReport;
 use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\EnginePolicy;
 use OCA\OcrFlow\Service\RetryPolicy;
@@ -34,7 +35,8 @@ class StatusBlocksTest extends TestCase
 		$config->method('getAppValue')->willReturn('');
 
 		$queue = $this->createMock(Queue::class);
-		$queue->method('fileReport')->willReturn($report);
+		$panelReport = $this->createMock(PanelReport::class);
+		$panelReport->method('forUser')->willReturn($report);
 		$queue->method('counts')->willReturn(['done' => 2657, 'skipped' => 1]);
 
 		$user = $this->createMock(IUser::class);
@@ -50,6 +52,7 @@ class StatusBlocksTest extends TestCase
 			$session,
 			new AccessGate($config, $this->createMock(IGroupManager::class)),
 			new EnginePolicy($config),
+			$panelReport,
 			new RetryPolicy(),
 		);
 	}
