@@ -8,7 +8,7 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Tests\Unit\BackgroundJob;
 
 use OCA\OcrFlow\BackgroundJob\ScanJob;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
 use OCA\OcrFlow\Service\Candidate;
 use OCA\OcrFlow\Service\EnginePolicy;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -43,7 +43,7 @@ class ScanJobTest extends TestCase
 
     private ITimeFactory&MockObject $time;
     private IRootFolder&MockObject $rootFolder;
-    private Queue&MockObject $queue;
+    private EnqueueService&MockObject $queue;
     private LoggerInterface&MockObject $logger;
     private IConfig&MockObject $config;
     /** @var list<string> */
@@ -57,7 +57,7 @@ class ScanJobTest extends TestCase
     {
         $this->time = $this->createMock(ITimeFactory::class);
         $this->rootFolder = $this->createMock(IRootFolder::class);
-        $this->queue = $this->createMock(Queue::class);
+        $this->queue = $this->createMock(EnqueueService::class);
         $this->logger = $this->createMock(LoggerInterface::class);
         $this->config = $this->createMock(IConfig::class);
 

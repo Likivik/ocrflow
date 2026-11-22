@@ -7,7 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Listener;
 
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Listener\DeletedFileListener;
 use OCP\Files\Events\Node\NodeDeletedEvent;
 use OCP\Files\Events\Node\NodeWrittenEvent;
@@ -36,7 +36,7 @@ class DeletedFileListenerTest extends TestCase
 	/** @var list<string> */
 	private array $warnings = [];
 
-	private function listener(?Queue $queue = null): DeletedFileListener
+	private function listener(?JobStore $queue = null): DeletedFileListener
 	{
 		$logger = $this->createMock(LoggerInterface::class);
 		$logger->method('warning')->willReturnCallback(function (string $message): void {
@@ -45,7 +45,7 @@ class DeletedFileListenerTest extends TestCase
 		$logger->method('info');
 
 		if ($queue === null) {
-			$queue = $this->createMock(Queue::class);
+			$queue = $this->createMock(JobStore::class);
 			$queue->method('deleteQueuedForFile')->willReturnCallback(function (int $fileId): int {
 				$this->dropped[] = $fileId;
 
@@ -91,7 +91,7 @@ class DeletedFileListenerTest extends TestCase
 
 	public function testAFailureIsLoggedAndNotThrown(): void
 	{
-		$queue = $this->createMock(Queue::class);
+		$queue = $this->createMock(JobStore::class);
 		$queue->method('deleteQueuedForFile')->willThrowException(new \RuntimeException('db down'));
 
 		$this->listener($queue)->handle(new NodeDeletedEvent($this->file()));

@@ -9,7 +9,7 @@ namespace OCA\OcrFlow\Tests\Unit\BackgroundJob;
 
 use OCA\OcrFlow\BackgroundJob\ReconcileJob;
 use OCA\OcrFlow\AppInfo\Application;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\PendingResults;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -38,7 +38,7 @@ class RetentionSweepTest extends TestCase
 	private const NOW = 1700000000;
 
 	private ITimeFactory&MockObject $time;
-	private Queue&MockObject $queue;
+	private JobStore&MockObject $queue;
 	private LoggerInterface&MockObject $logger;
 	private IConfig&MockObject $config;
 	private ILockingProvider&MockObject $locks;
@@ -55,7 +55,7 @@ class RetentionSweepTest extends TestCase
 	protected function setUp(): void
 	{
 		$this->time = $this->createMock(ITimeFactory::class);
-		$this->queue = $this->createMock(Queue::class);
+		$this->queue = $this->createMock(JobStore::class);
 		$this->logger = $this->createMock(LoggerInterface::class);
 		$this->config = $this->createMock(IConfig::class);
 		$this->locks = $this->createMock(ILockingProvider::class);

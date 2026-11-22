@@ -7,7 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Listener;
 
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
 use OCP\EventDispatcher\Event;
 use OCP\EventDispatcher\IEventListener;
 use OCP\Files\Events\Node\NodeDeletedEvent;
@@ -36,7 +36,7 @@ use Psr\Log\LoggerInterface;
 class DeletedFileListener implements IEventListener
 {
 	public function __construct(
-		private Queue $queue,
+		private JobStore $jobs,
 		private LoggerInterface $logger,
 	) {
 	}
@@ -51,7 +51,7 @@ class DeletedFileListener implements IEventListener
 			return;
 		}
 		try {
-			$dropped = $this->queue->deleteQueuedForFile($node->getId());
+			$dropped = $this->jobs->deleteQueuedForFile($node->getId());
 			if ($dropped > 0) {
 				$this->logger->info(
 					'ocrflow: dropped ' . $dropped . ' queued job(s) for deleted file ' . $node->getPath(),

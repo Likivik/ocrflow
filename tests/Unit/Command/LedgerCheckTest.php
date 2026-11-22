@@ -8,7 +8,7 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Tests\Unit\Command;
 
 use OCA\OcrFlow\Command\LedgerCheck;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\Ledger;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Tester\CommandTester;
@@ -23,7 +23,7 @@ class LedgerCheckTest extends TestCase
 {
 	private function tester(array $drift): CommandTester
 	{
-		$queue = $this->createMock(Queue::class);
+		$queue = $this->createMock(Ledger::class);
 		$queue->method('ledgerDrift')->willReturn(['total' => count($drift), 'rows' => $drift]);
 
 		return new CommandTester(new LedgerCheck($queue));
@@ -62,7 +62,7 @@ class LedgerCheckTest extends TestCase
 	{
 		// A truncated audit that says "0 disagreements" because it only looked
 		// at the first page is the failure mode this guards against.
-		$queue = $this->createMock(Queue::class);
+		$queue = $this->createMock(Ledger::class);
 		$queue->method('ledgerDrift')->willReturn([
 			'total' => 353,
 			'rows' => [[
