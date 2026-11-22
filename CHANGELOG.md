@@ -16,6 +16,10 @@ written.
 
 ### Added
 
+- **Phase 2f: the enqueue policy is its own class.** `EnqueueService` owns
+  `enqueue` — the six refusals and the engine decision — and
+  `enqueueNeverProcessed`, the two-door batch. `Queue` delegates; `Queue.php`
+  923 → 825 lines.
 - **Phase 2e: candidate selection and the cost estimate are their own classes.**
   `Batch` owns `neverProcessedFor` (who the process button may take, and in
   what order) and the scan-age gate; `PanelReport` owns `pageStatsFor` (what
