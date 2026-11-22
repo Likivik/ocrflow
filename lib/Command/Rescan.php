@@ -7,7 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Command;
 
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Service\RetryPolicy;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
@@ -36,7 +36,7 @@ use Symfony\Component\Console\Output\OutputInterface;
 class Rescan extends Command
 {
 	public function __construct(
-		private Queue $queue,
+		private JobStore $jobs,
 		private RetryPolicy $retryPolicy,
 	) {
 		parent::__construct();
@@ -69,7 +69,7 @@ class Rescan extends Command
 		}
 
 		if ($ids === []) {
-			$ids = $this->queue->idsWithReasonCode($code, $limit);
+			$ids = $this->jobs->idsWithReasonCode($code, $limit);
 			if ($ids === []) {
 				$output->writeln('<comment>nothing to rescan for ' . $code . '</comment>');
 				return Command::SUCCESS;
@@ -83,7 +83,7 @@ class Rescan extends Command
 			return Command::SUCCESS;
 		}
 
-		$result = $this->queue->forceRequeue($ids);
+		$result = $this->jobs->forceRequeue($ids);
 		$output->writeln('requeued ' . count($result['requeued'])
 			. ', refused ' . count($result['refused']));
 		if ($result['refused'] !== []) {

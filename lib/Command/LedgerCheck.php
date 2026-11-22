@@ -7,7 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Command;
 
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\Ledger;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
@@ -29,7 +29,7 @@ use Symfony\Component\Console\Output\OutputInterface;
 class LedgerCheck extends Command
 {
 	public function __construct(
-		private Queue $queue,
+		private Ledger $ledger,
 	) {
 		parent::__construct();
 	}
@@ -45,7 +45,7 @@ class LedgerCheck extends Command
 	protected function execute(InputInterface $input, OutputInterface $output): int
 	{
 		$limit = max(1, (int) $input->getOption('limit'));
-		$report = $this->queue->ledgerDrift($limit);
+		$report = $this->ledger->ledgerDrift($limit);
 		$total = (int) $report['total'];
 		$drift = $report['rows'];
 

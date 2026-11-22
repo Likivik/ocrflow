@@ -8,7 +8,7 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\BackgroundJob;
 
 use OCA\OcrFlow\AppInfo\Application;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\PendingResults;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -61,7 +61,7 @@ class ReconcileJob extends TimedJob
 
 	public function __construct(
 		ITimeFactory $time,
-		private Queue $queue,
+		private JobStore $jobs,
 		private LoggerInterface $logger,
 		private IConfig $config,
 		private ILockingProvider $locks,
@@ -78,7 +78,7 @@ class ReconcileJob extends TimedJob
 		// renewing it. The worker's liveness is not evidence of ownership — a
 		// claim whose report was lost to a 502 belonged to a perfectly healthy
 		// worker and could never be recovered by a heartbeat rule.
-		$requeued = $this->queue->requeueStale(Queue::CLAIM_LEASE_SECONDS);
+		$requeued = $this->jobs->requeueStale(JobStore::CLAIM_LEASE_SECONDS);
 		if ($requeued > 0) {
 			$this->logger->info('ocrflow: requeued ' . $requeued . ' claim(s) whose lease expired');
 		}
@@ -136,7 +136,7 @@ class ReconcileJob extends TimedJob
 		}
 		$this->locks->acquireLock(self::RETENTION_LOCK, ILockingProvider::LOCK_EXCLUSIVE);
 		try {
-			$deleted = $this->queue->purgeTerminal(
+			$deleted = $this->jobs->purgeTerminal(
 				$this->time->getTime() - $days * 86400,
 				self::RETENTION_MAX_PER_RUN,
 			);

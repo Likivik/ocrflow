@@ -8,7 +8,7 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Tests\Unit\Command;
 
 use OCA\OcrFlow\Command\Rescan;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Service\RetryPolicy;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Tester\CommandTester;
@@ -27,9 +27,9 @@ class RescanCommandTest extends TestCase
 	/**
 	 * @param list<int> $ids
 	 */
-	private function queue(array $ids = [], array $result = ['requeued' => [], 'refused' => []]): Queue
+	private function queue(array $ids = [], array $result = ['requeued' => [], 'refused' => []]): JobStore
 	{
-		$queue = $this->createMock(Queue::class);
+		$queue = $this->createMock(JobStore::class);
 		$queue->method('idsWithReasonCode')->willReturn($ids);
 		$queue->method('forceRequeue')->willReturn($result);
 		return $queue;
@@ -47,7 +47,7 @@ class RescanCommandTest extends TestCase
 
 	public function testDryRunPrintsTheSelectionAndSpendsNothing(): void
 	{
-		$queue = $this->createMock(Queue::class);
+		$queue = $this->createMock(JobStore::class);
 		$queue->expects($this->never())->method('forceRequeue');
 
 		$tester = new CommandTester(new Rescan($queue, $this->policy()));
@@ -60,7 +60,7 @@ class RescanCommandTest extends TestCase
 
 	public function testAReasonCodeSelectsThePopulation(): void
 	{
-		$queue = $this->createMock(Queue::class);
+		$queue = $this->createMock(JobStore::class);
 		$queue->method('idsWithReasonCode')->willReturn([7, 8]);
 		$queue->expects($this->once())
 			->method('forceRequeue')
@@ -76,7 +76,7 @@ class RescanCommandTest extends TestCase
 
 	public function testAnUnknownCodeIsRefusedBeforeAnythingIsQueued(): void
 	{
-		$queue = $this->createMock(Queue::class);
+		$queue = $this->createMock(JobStore::class);
 		$queue->expects($this->never())->method('forceRequeue');
 
 		$tester = new CommandTester(new Rescan($queue, $this->policy()));
@@ -97,7 +97,7 @@ class RescanCommandTest extends TestCase
 
 	public function testRefusalsAreNamedNotSwallowed(): void
 	{
-		$queue = $this->createMock(Queue::class);
+		$queue = $this->createMock(JobStore::class);
 		$queue->method('idsWithReasonCode')->willReturn([7, 9]);
 		$queue->method('forceRequeue')->willReturn(['requeued' => [7], 'refused' => [9]]);
 

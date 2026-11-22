@@ -8,7 +8,7 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\BackgroundJob;
 
 use OCA\OcrFlow\AppInfo\Application;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
 use OCA\OcrFlow\Service\Candidate;
 use OCA\OcrFlow\Service\EnginePolicy;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -37,7 +37,7 @@ class ScanJob extends QueuedJob
 	public function __construct(
 		ITimeFactory $time,
 		private IRootFolder $rootFolder,
-		private Queue $queue,
+		private EnqueueService $enqueue,
 		private Candidate $candidate,
 		private EnginePolicy $engine,
 		private LoggerInterface $logger,
@@ -120,7 +120,7 @@ class ScanJob extends QueuedJob
 					$young++;
 					continue;
 				}
-				if ($this->queue->enqueue($current->getPath(), $current->getId(), $current->getSize(), $current->getEtag(), $engine, fromScan: true) !== null) {
+				if ($this->enqueue->enqueue($current->getPath(), $current->getId(), $current->getSize(), $current->getEtag(), $engine, fromScan: true) !== null) {
 					$queued++;
 				}
 			}

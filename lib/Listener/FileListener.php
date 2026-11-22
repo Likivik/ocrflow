@@ -7,7 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Listener;
 
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
 use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\Candidate;
 use OCA\OcrFlow\Service\EnginePolicy;
@@ -30,7 +30,7 @@ use Psr\Log\LoggerInterface;
 class FileListener implements IEventListener
 {
 	public function __construct(
-		private Queue $queue,
+		private EnqueueService $enqueue,
 		private Candidate $candidate,
 		private AccessGate $access,
 		private EnginePolicy $engine,
@@ -69,7 +69,7 @@ class FileListener implements IEventListener
 		}
 
 		try {
-			$this->queue->enqueue(
+			$this->enqueue->enqueue(
 				$node->getPath(),
 				$node->getId(),
 				$node->getSize(),

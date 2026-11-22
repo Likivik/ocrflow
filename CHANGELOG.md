@@ -16,6 +16,12 @@ written.
 
 ### Added
 
+- **Phase 2c begins: five call sites off `Queue`.** `occ ocrflow:ledger:check`
+  now takes `Ledger`, `occ ocrflow:rescan` takes `JobStore`, the delete
+  listener takes `JobStore`, the upload listener and the scan job take
+  `EnqueueService`, and the reconcile job takes `JobStore` (its
+  `CLAIM_LEASE_SECONDS` too). Behaviour unchanged; 41 call sites in 11 files
+  become 36 in 6.
 - **Phase 2g: the inventory is a test.** `QueueInventoryTest` asserts all 62
   Phase 2 names have exactly one home and that `Queue` only delegates what it
   still declares. It immediately found three methods still carrying real SQL in
