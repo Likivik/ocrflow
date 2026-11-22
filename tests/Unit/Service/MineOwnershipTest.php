@@ -8,7 +8,9 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Tests\Unit\Service;
 
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\Mine;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\UserScope;
@@ -30,9 +32,13 @@ use PHPUnit\Framework\TestCase;
  */
 class MineOwnershipTest extends TestCase
 {
-	private function attentionWith(Queue $queue): StoreAttention
+	private function attentionWith(?JobStore $jobs = null, ?Ledger $ledger = null, ?EnqueueService $enqueue = null): StoreAttention
 	{
-		return new StoreAttention($queue);
+		return new StoreAttention(
+			$jobs ?? $this->createMock(JobStore::class),
+			$ledger ?? $this->createMock(Ledger::class),
+			$enqueue ?? $this->createMock(EnqueueService::class),
+		);
 	}
 
 	private function outcomes(): StoreOutcomes
@@ -59,8 +65,10 @@ class MineOwnershipTest extends TestCase
 
 	public function testAnUnclassifiedFailureShowsTheWorkersOwnMessage(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$attention = $this->attentionWith($queue);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$attention = $this->attentionWith();
 		$attention->rows = [
 			$this->jobRow(1, '/alice/files/mystery.pdf', 100, [
 				'reason_code' => null,
@@ -92,14 +100,16 @@ class MineOwnershipTest extends TestCase
 		$job->setReasonCode('error_file_broken');
 		$job->setFileId(7);
 
-		$queue = $this->createMock(Queue::class);
-		$queue->method('getById')->willReturn($job);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$jobs->method('getById')->willReturn($job);
 		// The whole point: not one of the retry's writes may happen.
-		$queue->expects($this->never())->method('deleteTerminalForFile');
-		$queue->expects($this->never())->method('clearPermanentVerdict');
-		$queue->expects($this->never())->method('resetTimesEnqueued');
+		$jobs->expects($this->never())->method('deleteTerminalForFile');
+		$ledger->expects($this->never())->method('clearPermanentVerdict');
+		$jobs->expects($this->never())->method('resetTimesEnqueued');
 
-		$mine = new Mine($this->attentionWith($queue), $this->outcomes());
+		$mine = new Mine($this->attentionWith($jobs, $ledger, $enqueue), $this->outcomes());
 		$result = $mine->retry('alice', [42]);
 
 		$this->assertSame(0, $result['retried'], 'another user\'s id must not be retried');
@@ -115,11 +125,13 @@ class MineOwnershipTest extends TestCase
 		$job->setReasonCode('error_provider_timed_out');
 		$job->setFileId(7);
 
-		$queue = $this->createMock(Queue::class);
-		$queue->method('getById')->willReturn($job);
-		$queue->expects($this->once())->method('deleteTerminalForFile')->with(7)->willReturn(1);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$jobs->method('getById')->willReturn($job);
+		$jobs->expects($this->once())->method('deleteTerminalForFile')->with(7)->willReturn(1);
 
-		$mine = new Mine($this->attentionWith($queue), $this->outcomes());
+		$mine = new Mine($this->attentionWith($jobs, $ledger, $enqueue), $this->outcomes());
 		$result = $mine->retry('alice', [42]);
 
 		$this->assertSame(1, $result['retried']);
@@ -128,8 +140,10 @@ class MineOwnershipTest extends TestCase
 
 	public function testTheListReturnsOnlyTheCallersRows(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$attention = $this->attentionWith($queue);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$attention = $this->attentionWith();
 		$attention->rows = [
 			$this->jobRow(1, '/alice/files/a.pdf', 1000),
 			$this->jobRow(2, '/bob/files/b.pdf', 1001),
@@ -152,8 +166,10 @@ class MineOwnershipTest extends TestCase
 
 	public function testAnotherUserSeesNothingOfMine(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$attention = $this->attentionWith($queue);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$attention = $this->attentionWith();
 		$attention->rows = [$this->jobRow(1, '/alice/files/a.pdf', 1000)];
 
 		$mine = new Mine($attention, $this->outcomes());
@@ -170,8 +186,10 @@ class MineOwnershipTest extends TestCase
 	 */
 	public function testTheAdminListingIsStillUnscoped(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$attention = $this->attentionWith($queue);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$attention = $this->attentionWith();
 		$attention->rows = [
 			$this->jobRow(1, '/alice/files/a.pdf', 1000),
 			$this->jobRow(2, '/bob/files/b.pdf', 1001),
@@ -186,10 +204,12 @@ class MineOwnershipTest extends TestCase
 
 	public function testRetryCountsIdsPastTheCapAsRefused(): void
 	{
-		$queue = $this->createMock(Queue::class);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
 		// cap comes from config; StoreAttention::config() defaults to 500,
 		// so a smaller cap is built from the same fake with its own value.
-		$attention = new StoreAttention($queue, null, StoreAttention::config('1'), null);
+		$attention = new StoreAttention($jobs, $ledger, $enqueue, null, StoreAttention::config('1'), null);
 
 		$job = static function (int $id, string $path): Job {
 			$j = new Job();
@@ -199,11 +219,11 @@ class MineOwnershipTest extends TestCase
 			$j->setFileId($id);
 			return $j;
 		};
-		$queue->method('getById')->willReturnCallback(
+		$jobs->method('getById')->willReturnCallback(
 			static fn (int $id): Job => $job($id, '/alice/files/' . $id . '.pdf'),
 		);
 		// One attempt only, whatever the request names.
-		$queue->expects($this->once())->method('deleteTerminalForFile')->willReturn(1);
+		$jobs->expects($this->once())->method('deleteTerminalForFile')->willReturn(1);
 
 		$mine = new Mine($attention, $this->outcomes());
 		$result = $mine->retry('alice', [1, 2, 3]);
@@ -226,7 +246,9 @@ class MineOwnershipTest extends TestCase
 
 	public function testRedoRowsAreScopedToo(): void
 	{
-		$queue = $this->createMock(Queue::class);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
 		$outcomes = $this->outcomes();
 		$outcomes->ledger = [
 			[
@@ -241,7 +263,7 @@ class MineOwnershipTest extends TestCase
 			],
 		];
 
-		$mine = new Mine($this->attentionWith($queue), $outcomes);
+		$mine = new Mine($this->attentionWith(), $outcomes);
 		$result = $mine->list('alice', 50);
 
 		$paths = array_column($result['rows'], 'path');
@@ -251,9 +273,11 @@ class MineOwnershipTest extends TestCase
 
 	public function testARetryOfAnotherUsersDecideRowIsRefused(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$queue->method('getById')->willReturn(null);   // not a job id at all
-		$queue->expects($this->never())->method('deleteTerminalForFile');
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$jobs->method('getById')->willReturn(null);   // not a job id at all
+		$jobs->expects($this->never())->method('deleteTerminalForFile');
 
 		$outcomes = $this->outcomes();
 		$outcomes->ledger = [[
@@ -262,7 +286,7 @@ class MineOwnershipTest extends TestCase
 			'etag' => 'e12', 'updated_at' => 1001,
 		]];
 
-		$mine = new Mine($this->attentionWith($queue), $outcomes);
+		$mine = new Mine($this->attentionWith(), $outcomes);
 		$result = $mine->retry('alice', [12]);
 
 		$this->assertSame(0, $result['retried']);
@@ -271,8 +295,10 @@ class MineOwnershipTest extends TestCase
 
 	public function testTheRetryCapIsTheAttentionCap(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$attention = $this->attentionWith($queue);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$attention = $this->attentionWith();
 		// Same config key, same value — one cap for both planes.
 		$this->assertSame($attention->cap(), (new Mine($attention, $this->outcomes()))->retry('alice', [])['cap']);
 	}

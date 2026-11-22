@@ -10,7 +10,8 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\FileExchange;
 use OCA\OcrFlow\Service\PendingResults;
@@ -69,7 +70,8 @@ class QueueControllerWriteLadderTest extends TestCase
 		array &$finish = [],
 		?string $sourceHash = null,
 		?string $writtenEtag = null,
-		?Queue $queue = null,
+		?JobStore $jobStore = null,
+		?SettlementService $settlement = null,
 	): QueueController {
 		$config = $this->createMock(IConfig::class);
 		$config->method('getAppValue')
@@ -92,7 +94,7 @@ class QueueControllerWriteLadderTest extends TestCase
 		$job->setId(7);
 		$job->setPath(self::JOB_PATH);
 		$job->setFileId(42);
-		$job->setStatus(Queue::STATUS_CLAIMED);
+		$job->setStatus(JobStore::STATUS_CLAIMED);
 		$job->setClaimToken('tok-7');
 		if ($jobEtag !== null) {
 			$job->setEtag($jobEtag);
@@ -104,9 +106,10 @@ class QueueControllerWriteLadderTest extends TestCase
 			$job->setWrittenEtag($writtenEtag);
 		}
 
-		$queue ??= $this->createMock(Queue::class);
-		$queue->method('getById')->willReturn($job);
-		$queue->method('finish')->willReturnCallback(
+		$jobStore ??= $this->createMock(JobStore::class);
+		$settlement ??= $this->createMock(SettlementService::class);
+		$jobStore->method('getById')->willReturn($job);
+		$settlement->method('finish')->willReturnCallback(
 			function (int $id, array $result, string $token) use (&$finish): bool {
 				$finish = $result;
 				return true;
@@ -116,7 +119,8 @@ class QueueControllerWriteLadderTest extends TestCase
 		return new QueueController(
 			Application::APP_ID,
 			$request,
-			$queue,
+			$jobStore,
+			$settlement,
 			$config,
 			$this->createMock(LoggerInterface::class),
 			$files ?? $this->createMock(FileExchange::class),
@@ -225,8 +229,9 @@ class QueueControllerWriteLadderTest extends TestCase
 	 */
 	public function testPutFileStashesOnConflictAndReArmsItsOwnEtag(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$queue->expects($this->never())->method('armWrittenEtag');
+		$jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+		$jobStore->expects($this->never())->method('armWrittenEtag');
 
 		$files = $this->exchange('edited-etag', hash('sha256', 'the EDITED bytes'));
 		$files->expects($this->never())->method('replace');
@@ -235,7 +240,7 @@ class QueueControllerWriteLadderTest extends TestCase
 		$this->pending->expects($this->once())->method('stash');
 
 		$finish = [];
-		$response = $this->controller([], 'old-etag', $files, $finish, hash('sha256', 'the ORIGINAL bytes'), null, $queue)->putFile(7);
+		$response = $this->controller([], 'old-etag', $files, $finish, hash('sha256', 'the ORIGINAL bytes'), null, $jobStore, $settlement)->putFile(7);
 
 		$this->assertSame(Http::STATUS_OK, $response->getStatus());
 		$this->assertSame('skip_source_changed_result_saved', $finish['reason_code']);
@@ -252,8 +257,9 @@ class QueueControllerWriteLadderTest extends TestCase
 	 */
 	public function testARetriedPutFileOverOurOwnWriteIsAllowed(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$queue->expects($this->once())->method('armWrittenEtag')->with(7, 'written-by-us-2');
+		$jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+		$jobStore->expects($this->once())->method('armWrittenEtag')->with(7, 'written-by-us-2');
 
 		$files = $this->exchange('written-by-us', hash('sha256', 'unrelated current bytes'));
 		$files->expects($this->once())->method('replace')->willReturn(
@@ -264,7 +270,7 @@ class QueueControllerWriteLadderTest extends TestCase
 		$this->pending->expects($this->never())->method('stash');
 
 		$finish = [];
-		$response = $this->controller([], 'old-etag', $files, $finish, hash('sha256', 'the ORIGINAL bytes'), 'written-by-us', $queue)->putFile(7);
+		$response = $this->controller([], 'old-etag', $files, $finish, hash('sha256', 'the ORIGINAL bytes'), 'written-by-us', $jobStore, $settlement)->putFile(7);
 		$this->assertSame(Http::STATUS_OK, $response->getStatus());
 	}
 

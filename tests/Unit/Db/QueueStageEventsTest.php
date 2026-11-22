@@ -7,9 +7,11 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
-use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCP\DB\IResult;
 use OCP\DB\QueryBuilder\IExpressionBuilder;
 use OCP\DB\QueryBuilder\IQueryBuilder;
@@ -148,9 +150,17 @@ class QueueStageEventsTest extends TestCase
 		];
 	}
 
-	private function queue(IDBConnection $db, LoggerInterface $logger): Queue
+	private function settlement(IDBConnection $db, LoggerInterface $logger): SettlementService
 	{
-		return new Queue($db, new StageEvents(new RetryPolicy(), $logger));
+		$retryPolicy = new RetryPolicy();
+		return new SettlementService(
+			$db,
+			new JobStore($db, $retryPolicy),
+			new Ledger($db, $retryPolicy),
+			$retryPolicy,
+			$logger,
+			new StageEvents($retryPolicy, $logger),
+		);
 	}
 
 	public function testFinishPersistsStageRows(): void
@@ -158,7 +168,7 @@ class QueueStageEventsTest extends TestCase
 		$logger = $this->createMock(LoggerInterface::class);
 		$logger->expects($this->never())->method('warning');
 
-		$applied = $this->queue($this->db(true, $this->jobRow()), $logger)->finish(7, [
+		$applied = $this->settlement($this->db(true, $this->jobRow()), $logger)->finish(7, [
 			'status' => 'done',
 			'stage_events' => [
 				['stage' => 'recognize', 'reason_code' => null, 'duration_ms' => 1234, 'cost_pages' => 3],
@@ -187,7 +197,7 @@ class QueueStageEventsTest extends TestCase
 		$logger = $this->createMock(LoggerInterface::class);
 		$logger->expects($this->once())->method('warning');
 
-		$this->queue($this->db(true, $this->jobRow()), $logger)->finish(7, [
+		$this->settlement($this->db(true, $this->jobRow()), $logger)->finish(7, [
 			'status' => 'error',
 			'stage_events' => [
 				['stage' => 'recognize', 'reason_code' => 'made_up_code', 'duration_ms' => 5],
@@ -203,7 +213,7 @@ class QueueStageEventsTest extends TestCase
 		$logger = $this->createMock(LoggerInterface::class);
 		$logger->expects($this->once())->method('warning');
 
-		$this->queue($this->db(true, $this->jobRow()), $logger)->finish(7, [
+		$this->settlement($this->db(true, $this->jobRow()), $logger)->finish(7, [
 			'status' => 'done',
 			'stage_events' => [
 				['stage' => 'not_a_stage', 'reason_code' => null, 'duration_ms' => 1],
@@ -219,7 +229,7 @@ class QueueStageEventsTest extends TestCase
 	{
 		$logger = $this->createMock(LoggerInterface::class);
 
-		$applied = $this->queue($this->db(false, $this->jobRow()), $logger)->finish(7, [
+		$applied = $this->settlement($this->db(false, $this->jobRow()), $logger)->finish(7, [
 			'status' => 'done',
 			'stage_events' => [
 				['stage' => 'recognize', 'reason_code' => null, 'duration_ms' => 1],

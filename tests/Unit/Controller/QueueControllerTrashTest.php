@@ -10,7 +10,8 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\FileExchange;
 use OCA\OcrFlow\Service\PendingResults;
@@ -75,17 +76,19 @@ class QueueControllerTrashTest extends TestCase
         $job->setId(7);
         $job->setPath(self::JOB_PATH);
         $job->setFileId(42);
-        $job->setStatus(Queue::STATUS_CLAIMED);
+        $job->setStatus(JobStore::STATUS_CLAIMED);
         $job->setClaimToken('tok-7');
         $job->setEtag('old-etag');
 
-        $queue = $this->createMock(Queue::class);
-        $queue->method('getById')->willReturn($job);
+        $jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+        $jobStore->method('getById')->willReturn($job);
 
         return new QueueController(
             Application::APP_ID,
             $request,
-            $queue,
+            $jobStore,
+            $settlement,
             $config,
             $this->createMock(LoggerInterface::class),
             $files ?? $this->createMock(FileExchange::class),

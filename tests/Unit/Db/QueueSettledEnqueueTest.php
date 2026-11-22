@@ -7,10 +7,13 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
-use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\EnginePolicy;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCP\DB\IResult;
 use OCP\DB\QueryBuilder\IExpressionBuilder;
 use OCP\DB\QueryBuilder\IQueryBuilder;
@@ -200,7 +203,7 @@ class QueueSettledEnqueueTest extends TestCase
 	/**
 	 * The bar as config would give it: engine → minimum version.
 	 */
-	private function enginePolicy(string $bar): EnginePolicy
+	private function enginePolicy(string $bar = '{"google": "3.15.0"}'): EnginePolicy
 	{
 		$config = $this->createMock(IConfig::class);
 		$config->method('getAppValue')->willReturnCallback(
@@ -209,14 +212,38 @@ class QueueSettledEnqueueTest extends TestCase
 		return new EnginePolicy($config);
 	}
 
-	private function queue(IDBConnection $db, string $bar = '{"google": "3.15.0"}'): Queue
+	private function enqueueService(IDBConnection $db, ?EnginePolicy $policy = null): EnqueueService
 	{
-		return new Queue(
+		$retryPolicy = new RetryPolicy();
+		$logger = $this->createMock(LoggerInterface::class);
+		$jobs = new JobStore($db, $retryPolicy);
+		$ledger = new Ledger($db, $retryPolicy);
+		$settlement = new SettlementService(
 			$db,
-			new StageEvents(new RetryPolicy(), $this->createMock(LoggerInterface::class)),
-			null,
-			null,
-			$this->enginePolicy($bar),
+			$jobs,
+			$ledger,
+			$retryPolicy,
+			$logger,
+			new StageEvents($retryPolicy, $logger),
+		);
+
+		return new EnqueueService($db, $jobs, $ledger, $settlement, $policy, null, $logger);
+	}
+
+	private function settlementService(IDBConnection $db): SettlementService
+	{
+		$retryPolicy = new RetryPolicy();
+		$logger = $this->createMock(LoggerInterface::class);
+		$jobs = new JobStore($db, $retryPolicy);
+		$ledger = new Ledger($db, $retryPolicy);
+
+		return new SettlementService(
+			$db,
+			$jobs,
+			$ledger,
+			$retryPolicy,
+			$logger,
+			new StageEvents($retryPolicy, $logger),
 		);
 	}
 
@@ -245,7 +272,7 @@ class QueueSettledEnqueueTest extends TestCase
 	{
 		$this->seedSettled('e1', 'google', '3.15.0');
 
-		$id = $this->queue($this->db())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'google');
+		$id = $this->enqueueService($this->db(), $this->enginePolicy())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'google');
 
 		$this->assertNull($id, 'bytes this app already wrote at or above the bar must not be queued again');
 		$this->assertSame([], $this->jobs, 'no job row may be written for a settled file');
@@ -255,7 +282,7 @@ class QueueSettledEnqueueTest extends TestCase
 	{
 		$this->seedSettled('e1', 'google', '3.15.0');
 
-		$id = $this->queue($this->db())->enqueue('/alice/files/scan.pdf', 7, 123, 'e2', 'google');
+		$id = $this->enqueueService($this->db(), $this->enginePolicy())->enqueue('/alice/files/scan.pdf', 7, 123, 'e2', 'google');
 
 		$this->assertNotNull($id, 'a settled verdict is about specific bytes: new bytes earn a fresh job');
 	}
@@ -264,7 +291,7 @@ class QueueSettledEnqueueTest extends TestCase
 	{
 		$this->seedSettled('e1', 'google', '3.9.0');
 
-		$id = $this->queue($this->db())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'google');
+		$id = $this->enqueueService($this->db(), $this->enginePolicy())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'google');
 
 		$this->assertNull($id, 'a redo is a candidate the owner picks from, never an automatic re-OCR');
 		$this->assertSame([], $this->jobs, 'no job row: below the bar is still not queued');
@@ -280,7 +307,7 @@ class QueueSettledEnqueueTest extends TestCase
 		$this->seedSettled('e1', 'google', '3.15.0');
 		// The same facts, judged against a bar raised past them (from the
 		// panel's side: the bar was lowered below the stamp).
-		$id = $this->queue($this->db(), '{"google": "9.9.9"}')->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'google');
+		$id = $this->enqueueService($this->db(), $this->enginePolicy('{"google": "9.9.9"}'))->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'google');
 
 		$this->assertNull($id, 'below the (moved) bar the file is still not re-OCR\'d automatically');
 		$this->assertSame([], $this->jobs);
@@ -306,7 +333,7 @@ class QueueSettledEnqueueTest extends TestCase
 			'updated_at' => 1,
 		];
 
-		$id = $this->queue($this->db())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'google');
+		$id = $this->enqueueService($this->db(), $this->enginePolicy())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'google');
 
 		$this->assertNull($id, 'the settle check reads the code\'s spellings, not one string');
 	}
@@ -317,17 +344,14 @@ class QueueSettledEnqueueTest extends TestCase
 		// this) cannot judge a settle row, so it must not invent a verdict.
 		$this->seedSettled('e1', 'google', '3.15.0');
 
-		$id = (new Queue(
-			$this->db(),
-			new StageEvents(new RetryPolicy(), $this->createMock(LoggerInterface::class)),
-		))->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'google');
+		$id = $this->enqueueService($this->db())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'google');
 
 		$this->assertNotNull($id, 'without a bar there is no comparison, so today\'s behaviour stands');
 	}
 
 	public function testSettleProducedWritesFactsOnly(): void
 	{
-		$this->queue($this->db())->settleProduced(7, '/alice/files/scan.pdf', 123, 'e9', 'google', '3.15.0');
+		$this->settlementService($this->db())->settleProduced(7, '/alice/files/scan.pdf', 123, 'e9', 'google', '3.15.0');
 
 		$this->assertCount(1, $this->files);
 		$this->assertSame('skipped', $this->files[0]['status']);

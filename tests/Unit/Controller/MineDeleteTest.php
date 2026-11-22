@@ -8,7 +8,9 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Tests\Unit\Controller;
 
 use OCA\OcrFlow\Controller\MineController;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\Mine;
 use OCA\OcrFlow\Tests\Unit\Service\StoreAttention;
 use OCA\OcrFlow\Tests\Unit\Service\StoreOutcomes;
@@ -133,7 +135,7 @@ class MineDeleteTest extends TestCase
 		// not part of this path and must not appear.
 		$node->expects($this->once())->method('delete');
 
-		$response = $this->controller(new StoreAttention($this->createMock(Queue::class)), $this->rootFolder('alice', [7 => $node]))
+		$response = $this->controller(new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class)), $this->rootFolder('alice', [7 => $node]))
 			->delete(7);
 
 		$this->assertSame(Http::STATUS_OK, $response->getStatus());
@@ -150,7 +152,7 @@ class MineDeleteTest extends TestCase
 		// mount cache says Bob's mount holds it, and that is what makes the
 		// answer 403 rather than 404.
 		$response = $this->controller(
-			new StoreAttention($this->createMock(Queue::class)),
+			new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class)),
 			$this->rootFolder('alice', []),
 			heldBy: [9 => 'bob'],
 		)->delete(9);
@@ -171,7 +173,7 @@ class MineDeleteTest extends TestCase
 		$node->expects($this->never())->method('delete');
 
 		$response = $this->controller(
-			new StoreAttention($this->createMock(Queue::class)),
+			new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class)),
 			$this->rootFolder('alice', [9 => $node]),
 		)->delete(9);
 
@@ -180,7 +182,7 @@ class MineDeleteTest extends TestCase
 
 	public function testAMissingFileIsANotFoundAndNotAnError(): void
 	{
-		$response = $this->controller(new StoreAttention($this->createMock(Queue::class)), $this->rootFolder('alice', []))
+		$response = $this->controller(new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class)), $this->rootFolder('alice', []))
 			->delete(11);
 
 		$this->assertSame(Http::STATUS_NOT_FOUND, $response->getStatus());
@@ -193,7 +195,7 @@ class MineDeleteTest extends TestCase
 		$node->expects($this->never())->method('delete');
 
 		$response = $this->controller(
-			new StoreAttention($this->createMock(Queue::class)),
+			new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class)),
 			$this->rootFolder('alice', [7 => $node]),
 			csrfOk: false,
 		)->delete(7);
@@ -216,7 +218,7 @@ class MineDeleteTest extends TestCase
 		$foreign->expects($this->never())->method('delete');
 
 		$response = $this->controller(
-			new StoreAttention($this->createMock(Queue::class)),
+			new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class)),
 			$this->rootFolder('alice', [1 => $one, 2 => $two]),
 			['ids' => [1, 2, 3]],
 			heldBy: [3 => 'bob'],
@@ -240,7 +242,7 @@ class MineDeleteTest extends TestCase
 		$two->method('getPath')->willReturn('/alice/files/two.pdf');
 
 		return $this->controller(
-			new StoreAttention($this->createMock(Queue::class)),
+			new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class)),
 			$this->rootFolder('alice', [1 => $one, 2 => $two]),
 			$params,
 		);
@@ -255,9 +257,11 @@ class MineDeleteTest extends TestCase
 
 	public function testBulkIsCappedByTheAttentionCap(): void
 	{
-		$queue = $this->createMock(Queue::class);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
 		// The same cap the retry-all obeys: one file per request here.
-		$attention = new StoreAttention($queue, null, StoreAttention::config('1'), null);
+		$attention = new StoreAttention($jobs, $ledger, $enqueue, null, StoreAttention::config('1'), null);
 
 		$one = $this->createMock(Node::class);
 		$one->method('getPath')->willReturn('/alice/files/one.pdf');
@@ -282,8 +286,10 @@ class MineDeleteTest extends TestCase
 	 */
 	public function testEveryListedRowCarriesItsFileId(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$attention = new StoreAttention($queue);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$attention = new StoreAttention($jobs, $ledger, $enqueue);
 		$attention->rows = [[
 			'id' => 42,
 			'file_id' => 4242,

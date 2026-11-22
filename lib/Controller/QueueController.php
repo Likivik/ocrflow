@@ -9,7 +9,8 @@ namespace OCA\OcrFlow\Controller;
 
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\PublicPage;
@@ -39,7 +40,8 @@ class QueueController extends OCSController
 	public function __construct(
 		string $appName,
 		IRequest $request,
-		private Queue $queue,
+		private JobStore $jobStore,
+		private SettlementService $settlement,
 		private IConfig $config,
 		private LoggerInterface $logger,
 		private FileExchange $files,
@@ -69,7 +71,7 @@ class QueueController extends OCSController
 			return $denied;
 		}
 
-		$job = $this->queue->getById($id);
+		$job = $this->jobStore->getById($id);
 		if (($refused = $this->claimGuard($id, $job)) !== null) {
 			return $refused;
 		}
@@ -125,7 +127,7 @@ class QueueController extends OCSController
 		rewind($served);
 
 		try {
-			$this->queue->recordSourceHash($id, hash_final($hash));
+			$this->jobStore->recordSourceHash($id, hash_final($hash));
 		} catch (\Throwable $hashWriteFailed) {
 			// Not fatal for the download: without the hash the ladder
 			// simply cannot prove the bytes match, and fails safe toward
@@ -159,7 +161,7 @@ class QueueController extends OCSController
 			return $denied;
 		}
 
-		$job = $this->queue->getById($id);
+		$job = $this->jobStore->getById($id);
 		if (($refused = $this->claimGuard($id, $job)) !== null) {
 			return $refused;
 		}
@@ -217,7 +219,7 @@ class QueueController extends OCSController
 		// result idempotent instead of a false conflict. A failure here only
 		// downgrades that convenience; the write itself has already landed.
 		try {
-			$this->queue->armWrittenEtag($id, $written['etag']);
+			$this->jobStore->armWrittenEtag($id, $written['etag']);
 		} catch (\Throwable $rearmFailed) {
 			$this->logger->warning('ocrflow: job ' . $id . ' wrote back but written_etag was not re-armed: ' . $rearmFailed->getMessage());
 		}
@@ -232,7 +234,7 @@ class QueueController extends OCSController
 		$fileId = $job->getFileId();
 		if ($fileId !== null) {
 			try {
-				$this->queue->settleProduced(
+				$this->settlement->settleProduced(
 					$fileId,
 					(string) $job->getPath(),
 					$written['size'],
@@ -272,7 +274,7 @@ class QueueController extends OCSController
 			return $denied;
 		}
 
-		$job = $this->queue->getById($id);
+		$job = $this->jobStore->getById($id);
 		if (($refused = $this->claimGuard($id, $job)) !== null) {
 			return $refused;
 		}
@@ -356,7 +358,7 @@ class QueueController extends OCSController
 		// Same failure rule as `putFile`: the write-back already succeeded,
 		// so a ledger failure is logged, not thrown at the worker.
 		try {
-			$this->queue->settleProduced(
+			$this->settlement->settleProduced(
 				(int) $stored['file_id'],
 				(string) $stored['path'],
 				$stored['size'],
@@ -419,7 +421,7 @@ class QueueController extends OCSController
 		// the answer was lost in a 502 or a restart. Re-sending the same report
 		// must succeed — a retry is the worker's only defence against a lost
 		// answer, and the work is already recorded whichever worker reported it.
-		if (in_array($job->getStatus(), [Queue::STATUS_DONE, Queue::STATUS_SKIPPED, Queue::STATUS_ERROR], true)) {
+		if (in_array($job->getStatus(), [JobStore::STATUS_DONE, JobStore::STATUS_SKIPPED, JobStore::STATUS_ERROR], true)) {
 			return new DataResponse([
 				'id' => $id,
 				'status' => $job->getStatus(),
@@ -428,7 +430,7 @@ class QueueController extends OCSController
 			]);
 		}
 		if (
-			$job->getStatus() !== Queue::STATUS_CLAIMED
+			$job->getStatus() !== JobStore::STATUS_CLAIMED
 			|| $job->getClaimToken() === null
 			|| $token === ''
 			|| !hash_equals($job->getClaimToken(), $token)
@@ -452,7 +454,7 @@ class QueueController extends OCSController
 			return $denied;
 		}
 
-		$job = $this->queue->claim($this->workerName(), $this->workerId());
+		$job = $this->jobStore->claim($this->workerName(), $this->workerId());
 		if ($job === null) {
 			return new DataResponse(null, Http::STATUS_NO_CONTENT);
 		}
@@ -539,11 +541,11 @@ class QueueController extends OCSController
 		// reference. Answer it terminally — the worker must not retry —
 		// while doing nothing: no `done`, no trash, no ledger verdict. The
 		// decision about the stashed artifact belongs to the owner.
-		$job = $this->queue->getById($id);
+		$job = $this->jobStore->getById($id);
 		if ($job !== null && $this->resultAlreadyStashed($job)) {
 			return new DataResponse([
 				'id' => $id,
-				'status' => Queue::STATUS_SKIPPED,
+				'status' => JobStore::STATUS_SKIPPED,
 				'applied' => true,
 				'message' => 'the result was stashed: the source changed while the job ran',
 			]);
@@ -560,9 +562,9 @@ class QueueController extends OCSController
 		// so it is not reported as one — but it is also not "done", because no
 		// text layer was produced. One status per outcome, whitelisted here so a
 		// worker cannot invent one that the UI has no words for.
-		$status = $this->nullableString('status') ?? Queue::STATUS_DONE;
-		if (!in_array($status, [Queue::STATUS_DONE, 'skipped'], true)) {
-			$status = Queue::STATUS_DONE;
+		$status = $this->nullableString('status') ?? JobStore::STATUS_DONE;
+		if (!in_array($status, [JobStore::STATUS_DONE, 'skipped'], true)) {
+			$status = JobStore::STATUS_DONE;
 		}
 
 		$reasonCode = $this->reasonCodeParam();
@@ -577,7 +579,7 @@ class QueueController extends OCSController
 		if ($decision['agrees'] === false) {
 			$this->logger->warning('ocrflow: job ' . $id . ' worker retryable hint disagreed with policy for "' . (string) $reasonCode . '"; policy wins');
 		}
-		$applied = $this->queue->finish($id, [
+		$applied = $this->settlement->finish($id, [
 			'status' => $status,
 			'reason' => $this->nullableString('reason'),
 			'reason_code' => $reasonCode,
@@ -608,7 +610,7 @@ class QueueController extends OCSController
 			return;
 		}
 
-		$job = $this->queue->getById($id);
+		$job = $this->jobStore->getById($id);
 		if ($job === null) {
 			$this->logger->warning('ocrflow: job ' . $id . ' reported a converted source but the job is gone; nothing to trash');
 			return;
@@ -757,8 +759,8 @@ class QueueController extends OCSController
 		$this->logger->warning('ocrflow: job ' . $id . ' skipped: the source file changed while the job ran (skip_source_changed_result_saved)'
 			. ($stashed ? '; the result was stashed for the owner to decide' : '; the result was not saved'));
 
-		$applied = $this->queue->finish($id, [
-			'status' => Queue::STATUS_SKIPPED,
+		$applied = $this->settlement->finish($id, [
+			'status' => JobStore::STATUS_SKIPPED,
 			// The column is varchar(64): the detail lives in the code, the
 			// pending row and the log line, not in the reason text.
 			'reason' => 'the source changed; the result was stashed for the owner',
@@ -772,7 +774,7 @@ class QueueController extends OCSController
 
 		return new DataResponse([
 			'id' => $id,
-			'status' => Queue::STATUS_SKIPPED,
+			'status' => JobStore::STATUS_SKIPPED,
 			'applied' => $applied,
 			'stashed' => $stashed,
 		]);
@@ -792,12 +794,12 @@ class QueueController extends OCSController
 		if (($denied = $this->denyIfNotWorker()) !== null) {
 			return $denied;
 		}
-		$job = $this->queue->getById($id);
+		$job = $this->jobStore->getById($id);
 		if ($job === null) {
 			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
 		}
 		$token = (string) $this->request->getHeader(Application::CLAIM_HEADER);
-		$renewed = $this->queue->renewClaim($id, $token);
+		$renewed = $this->jobStore->renewClaim($id, $token);
 		return new DataResponse(
 			['id' => $id, 'renewed' => $renewed],
 			$renewed ? Http::STATUS_OK : Http::STATUS_CONFLICT,
@@ -817,12 +819,12 @@ class QueueController extends OCSController
 		if (($denied = $this->denyIfNotWorker()) !== null) {
 			return $denied;
 		}
-		$job = $this->queue->getById($id);
+		$job = $this->jobStore->getById($id);
 		if ($job === null) {
 			return new DataResponse(['message' => 'no such job'], Http::STATUS_NOT_FOUND);
 		}
 		$token = (string) $this->request->getHeader(Application::CLAIM_HEADER);
-		$released = $this->queue->release($id, $token);
+		$released = $this->jobStore->release($id, $token);
 		return new DataResponse(
 			['id' => $id, 'released' => $released],
 			$released ? Http::STATUS_OK : Http::STATUS_CONFLICT,
@@ -836,7 +838,7 @@ class QueueController extends OCSController
 			return $denied;
 		}
 
-		$job = $this->queue->getById($id);
+		$job = $this->jobStore->getById($id);
 		if (($refused = $this->claimGuard($id, $job)) !== null) {
 			return $refused;
 		}
@@ -848,8 +850,8 @@ class QueueController extends OCSController
 		if ($decision['agrees'] === false) {
 			$this->logger->warning('ocrflow: job ' . $id . ' worker retryable hint disagreed with policy for "' . (string) $reasonCode . '"; policy wins');
 		}
-		$applied = $this->queue->finish($id, [
-			'status' => Queue::STATUS_ERROR,
+		$applied = $this->settlement->finish($id, [
+			'status' => JobStore::STATUS_ERROR,
 			'reason' => $this->nullableString('reason'),
 			'reason_code' => $reasonCode,
 			'retryable' => $reasonCode === null ? null : $decision['retryable'],
@@ -858,7 +860,7 @@ class QueueController extends OCSController
 		], (string) $this->request->getHeader(Application::CLAIM_HEADER));
 		return new DataResponse([
 			'id' => $id,
-			'status' => Queue::STATUS_ERROR,
+			'status' => JobStore::STATUS_ERROR,
 			'applied' => $applied,
 		]);
 	}

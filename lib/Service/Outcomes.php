@@ -8,7 +8,7 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Service;
 
 use OCA\OcrFlow\AppInfo\Application;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\Ledger;
 use OCP\IConfig;
 use OCP\IDBConnection;
 use Psr\Log\LoggerInterface;
@@ -403,7 +403,7 @@ class Outcomes
 		if (!is_string($code) || $code === '') {
 			// A ledger row without a code is a done row: a successful write
 			// of ours. Settled, and counted separately.
-			if (($row['status'] ?? null) === Queue::STATUS_DONE) {
+			if (($row['status'] ?? null) === Ledger::STATUS_DONE) {
 				return $this->tabRow($row, 'settled', done: true);
 			}
 			return null;

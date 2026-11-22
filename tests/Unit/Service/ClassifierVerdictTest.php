@@ -10,7 +10,8 @@ namespace OCA\OcrFlow\Tests\Unit\Service;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\FileExchange;
 use OCA\OcrFlow\Service\RetryPolicy;
@@ -126,17 +127,18 @@ final class ClassifierVerdictTest extends TestCase
 	 */
 	public function testASkippedJobReportedInProseStillGetsACode(): void
 	{
-		$queue = $this->createMock(Queue::class);
+		$jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
 		$captured = null;
-		$queue->method('getById')->willReturnCallback(static function (): Job {
+		$jobStore->method('getById')->willReturnCallback(static function (): Job {
 			$job = new Job();
 			$job->setId(7);
 			$job->setPath('/u/files/a.pdf');
-			$job->setStatus(Queue::STATUS_CLAIMED);
+			$job->setStatus(JobStore::STATUS_CLAIMED);
 			$job->setClaimToken('tok-7');
 			return $job;
 		});
-		$queue->method('finish')->willReturnCallback(
+		$settlement->method('finish')->willReturnCallback(
 			function (int $id, array $result) use (&$captured): bool {
 				$captured = $result;
 				return true;
@@ -167,7 +169,8 @@ final class ClassifierVerdictTest extends TestCase
 		$controller = new QueueController(
 			Application::APP_ID,
 			$request,
-			$queue,
+			$jobStore,
+			$settlement,
 			$config,
 			$this->createMock(LoggerInterface::class),
 			$this->createMock(FileExchange::class),

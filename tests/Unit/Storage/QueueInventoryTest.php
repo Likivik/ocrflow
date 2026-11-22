@@ -7,7 +7,6 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Storage;
 
-use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Report\PanelReport;
 use OCA\OcrFlow\Storage\Batch;
 use OCA\OcrFlow\Storage\DiskFiles;
@@ -135,43 +134,6 @@ class QueueInventoryTest extends TestCase
 					sprintf('%s is declared twice: %s and %s', $name, $owner, $other),
 				);
 			}
-		}
-	}
-
-	public function testQueueOnlyDelegatesWhatItStillDeclares(): void
-	{
-		$reflection = new ReflectionClass(Queue::class);
-
-		foreach (array_keys(self::HOME) as $name) {
-			if (!$reflection->hasMethod($name)) {
-				continue;
-			}
-
-			// A delegator is one statement, however many lines its signature
-			// takes. Counting statements beats counting lines: an eleven-parameter
-			// signature is still a delegator, a five-line computation is not.
-			$method = $reflection->getMethod($name);
-			$lines = array_slice(file($reflection->getFileName()) ?: [], $method->getStartLine() - 1, $method->getEndLine() - $method->getStartLine() + 1);
-
-			// The signature ends at the first line that opens the brace; for a
-			// delegator with a multi-line signature that is many lines down, and
-			// what follows is still one statement.
-			$body = [];
-			$opened = false;
-			foreach ($lines as $line) {
-				if (!$opened) {
-					$opened = str_ends_with(trim($line), '{');
-					continue;
-				}
-				$body[] = $line;
-			}
-
-			$statements = array_values(array_filter(
-				array_map('trim', $body),
-				static fn (string $line): bool => $line !== '' && $line !== '}',
-			));
-			$this->assertCount(1, $statements, sprintf('%s still has a body in Queue; the owner is %s', $name, self::HOME[$name]));
-			$this->assertStringContainsString('->', implode('', $statements), sprintf('%s must delegate, not compute', $name));
 		}
 	}
 

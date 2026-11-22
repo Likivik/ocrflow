@@ -7,9 +7,12 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
-use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCP\DB\IResult;
 use OCP\DB\QueryBuilder\IExpressionBuilder;
 use OCP\DB\QueryBuilder\IQueryBuilder;
@@ -196,14 +199,26 @@ class QueueEmptySourceTest extends TestCase
 		return $db;
 	}
 
-	private function queue(IDBConnection $db): Queue
+	private function enqueue(IDBConnection $db): EnqueueService
 	{
-		return new Queue($db, new StageEvents(new RetryPolicy(), $this->createMock(LoggerInterface::class)));
+		$retryPolicy = new RetryPolicy();
+		$logger = $this->createMock(LoggerInterface::class);
+		$jobs = new JobStore($db, $retryPolicy);
+		$ledger = new Ledger($db, $retryPolicy);
+		$settlement = new SettlementService(
+			$db,
+			$jobs,
+			$ledger,
+			$retryPolicy,
+			$logger,
+			new StageEvents($retryPolicy, $logger),
+		);
+		return new EnqueueService($db, $jobs, $ledger, $settlement, null, null, $logger);
 	}
 
 	public function testAnEmptySourceIsRecordedAsASkippedJobWithACode(): void
 	{
-		$this->queue($this->db())->enqueue('/u/files/empty.pdf', null, 0, 'e1');
+		$this->enqueue($this->db())->enqueue('/u/files/empty.pdf', null, 0, 'e1');
 
 		$this->assertCount(1, $this->jobs);
 		$this->assertSame('skipped', $this->jobs[0]['status']);
@@ -213,7 +228,7 @@ class QueueEmptySourceTest extends TestCase
 
 	public function testAnEmptySourceAlsoWritesAnIntakeStageRow(): void
 	{
-		$this->queue($this->db())->enqueue('/u/files/empty.pdf', null, 0, 'e1');
+		$this->enqueue($this->db())->enqueue('/u/files/empty.pdf', null, 0, 'e1');
 
 		$this->assertCount(1, $this->stageRows, 'the decision must be recorded exactly once');
 		$row = $this->stageRows[0];
@@ -231,7 +246,7 @@ class QueueEmptySourceTest extends TestCase
 	 */
 	public function testATerminalDecisionNeverCarriesANullReasonCode(): void
 	{
-		$this->queue($this->db())->enqueue('/u/files/empty.pdf', null, 0, 'e1');
+		$this->enqueue($this->db())->enqueue('/u/files/empty.pdf', null, 0, 'e1');
 
 		$this->assertNotEmpty($this->stageRows, 'the decision must be recorded at all');
 		foreach ($this->stageRows as $row) {
@@ -247,9 +262,9 @@ class QueueEmptySourceTest extends TestCase
 	 */
 	public function testTheSameDecisionIsNotRecordedTwice(): void
 	{
-		$queue = $this->queue($this->db());
-		$queue->enqueue('/u/files/empty.pdf', null, 0, 'e1');
-		$queue->enqueue('/u/files/empty.pdf', null, 0, 'e1');
+		$enqueue = $this->enqueue($this->db());
+		$enqueue->enqueue('/u/files/empty.pdf', null, 0, 'e1');
+		$enqueue->enqueue('/u/files/empty.pdf', null, 0, 'e1');
 
 		$this->assertCount(1, $this->stageRows);
 	}

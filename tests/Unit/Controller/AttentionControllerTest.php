@@ -9,7 +9,9 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 
 use OCA\OcrFlow\Controller\AttentionController;
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Tests\Unit\Service\StoreAttention;
 use OCP\AppFramework\Http;
@@ -55,14 +57,16 @@ class AttentionControllerTest extends TestCase
 			$session,
 			$groups,
 			new RetryPolicy(),
-			$this->createMock(Queue::class),
+			$this->createMock(JobStore::class),
 		);
 	}
 
 	private function attention(): StoreAttention
 	{
-		$queue = $this->createMock(Queue::class);
-		return new StoreAttention($queue);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		return new StoreAttention($jobs, $ledger, $enqueue);
 	}
 
 	/**
@@ -161,8 +165,10 @@ class AttentionControllerTest extends TestCase
 
 	public function testRetryRetriesOneRowThroughTheSharedPath(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$queue->method('getById')->willReturnCallback(
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$jobs->method('getById')->willReturnCallback(
 			static fn (int $id): ?Job => Job::fromRow([
 				'id' => $id,
 				'file_id' => 77,
@@ -183,10 +189,10 @@ class AttentionControllerTest extends TestCase
 				'finished_at' => 2,
 			]),
 		);
-		$queue->expects($this->once())->method('deleteTerminalForFile')->with(77)->willReturn(1);
-		$queue->expects($this->once())->method('clearPermanentVerdict')->with(77);
+		$jobs->expects($this->once())->method('deleteTerminalForFile')->with(77)->willReturn(1);
+		$ledger->expects($this->once())->method('clearPermanentVerdict')->with(77);
 
-		$attention = new StoreAttention($queue);
+		$attention = new StoreAttention($jobs, $ledger, $enqueue);
 		$response = $this->controller($attention, ['id' => 7])->retry();
 		$data = $response->getData();
 
@@ -199,14 +205,16 @@ class AttentionControllerTest extends TestCase
 
 	public function testRetryIsIdempotentWhenTheRowWasAlreadyRetried(): void
 	{
-		$queue = $this->createMock(Queue::class);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
 		// The first retry deleted the terminal row; a second call finds
 		// nothing and must do no second work.
-		$queue->method('getById')->willReturn(null);
-		$queue->expects($this->never())->method('deleteTerminalForFile');
-		$queue->expects($this->never())->method('clearPermanentVerdict');
+		$jobs->method('getById')->willReturn(null);
+		$jobs->expects($this->never())->method('deleteTerminalForFile');
+		$ledger->expects($this->never())->method('clearPermanentVerdict');
 
-		$attention = new StoreAttention($queue);
+		$attention = new StoreAttention($jobs, $ledger, $enqueue);
 		$response = $this->controller($attention, ['id' => 7])->retry();
 		$data = $response->getData();
 
@@ -216,10 +224,12 @@ class AttentionControllerTest extends TestCase
 
 	public function testRetryAllIsCapped(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$jobs = [];
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$byId = [];
 		foreach ([1, 2, 3, 4] as $i => $id) {
-			$jobs[$id] = Job::fromRow([
+			$byId[$id] = Job::fromRow([
 				'id' => $id,
 				'file_id' => 100 + $i,
 				'path' => 'alice/files/scan' . $id . '.pdf',
@@ -239,10 +249,10 @@ class AttentionControllerTest extends TestCase
 				'finished_at' => $id,
 			]);
 		}
-		$queue->method('getById')->willReturnCallback(static fn (int $id): ?Job => $jobs[$id] ?? null);
-		$queue->method('deleteTerminalForFile')->willReturn(1);
+		$jobs->method('getById')->willReturnCallback(static fn (int $id): ?Job => $byId[$id] ?? null);
+		$jobs->method('deleteTerminalForFile')->willReturn(1);
 
-		$attention = new StoreAttention($queue, null, StoreAttention::config('2'));
+		$attention = new StoreAttention($jobs, $ledger, $enqueue, null, StoreAttention::config('2'));
 		$attention->rows = array_map(
 			static fn (int $id): array => [
 				'id' => $id,

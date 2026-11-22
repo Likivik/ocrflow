@@ -7,7 +7,9 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Service;
 
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\Attention;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\IConfig;
@@ -40,13 +42,17 @@ class StoreAttention extends Attention
 	public array $logLines = [];
 
 	public function __construct(
-		public Queue $queue,
+		public JobStore $jobs,
+		public Ledger $ledger,
+		public EnqueueService $enqueue,
 		?RetryPolicy $retryPolicy = null,
 		?IConfig $config = null,
 		?IDBConnection $db = null,
 	) {
 		parent::__construct(
-			$queue,
+			$jobs,
+			$ledger,
+			$enqueue,
 			$retryPolicy ?? new RetryPolicy(),
 			$config ?? self::config(),
 			new class ($this) implements \Psr\Log\LoggerInterface {

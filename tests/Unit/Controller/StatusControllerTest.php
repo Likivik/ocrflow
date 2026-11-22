@@ -9,7 +9,8 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 
 use OCA\OcrFlow\Controller\StatusController;
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Report\PanelReport;
 use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\EnginePolicy;
@@ -47,7 +48,7 @@ class StatusControllerTest extends TestCase
         return $config;
     }
 
-    private function controller(?IUser $user, Queue $queue, ?IRequest $request = null): StatusController
+    private function controller(?IUser $user, JobStore $jobStore, EnqueueService $enqueue, ?IRequest $request = null): StatusController
     {
         $session = $this->createMock(IUserSession::class);
         $session->method('getUser')->willReturn($user);
@@ -59,7 +60,8 @@ class StatusControllerTest extends TestCase
         return new StatusController(
             'ocrflow',
             $request ?? $this->createMock(IRequest::class),
-            $queue,
+            $jobStore,
+            $enqueue,
             $this->createMock(IJobList::class),
             $session,
             new AccessGate($config, $groups),
@@ -103,10 +105,11 @@ class StatusControllerTest extends TestCase
 
     public function testAJobOfAnotherUserAnswersNotFound(): void
     {
-        $queue = $this->createMock(Queue::class);
-        $queue->method('getById')->willReturn($this->job('bob/files/secret.pdf'));
+        $jobStore = $this->createMock(\OCA\OcrFlow\Storage\JobStore::class);
+        $enqueue = $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class);
+        $jobStore->method('getById')->willReturn($this->job('bob/files/secret.pdf'));
 
-        $response = $this->controller($this->user('alice'), $queue)->job(7);
+        $response = $this->controller($this->user('alice'), $jobStore, $enqueue)->job(7);
 
         // The same status and body as a genuinely missing job: a guessed id
         // must not reveal that it exists and belongs to someone else.
@@ -116,10 +119,11 @@ class StatusControllerTest extends TestCase
 
     public function testOwnJobIsReturned(): void
     {
-        $queue = $this->createMock(Queue::class);
-        $queue->method('getById')->willReturn($this->job('alice/files/mine.pdf'));
+        $jobStore = $this->createMock(\OCA\OcrFlow\Storage\JobStore::class);
+        $enqueue = $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class);
+        $jobStore->method('getById')->willReturn($this->job('alice/files/mine.pdf'));
 
-        $response = $this->controller($this->user('alice'), $queue)->job(7);
+        $response = $this->controller($this->user('alice'), $jobStore, $enqueue)->job(7);
 
         $this->assertSame(Http::STATUS_OK, $response->getStatus());
         $this->assertSame('alice/files/mine.pdf', $response->getData()['path']);
@@ -127,25 +131,27 @@ class StatusControllerTest extends TestCase
 
     public function testAMissingJobAnswersNotFound(): void
     {
-        $queue = $this->createMock(Queue::class);
-        $queue->method('getById')->willReturn(null);
+        $jobStore = $this->createMock(\OCA\OcrFlow\Storage\JobStore::class);
+        $enqueue = $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class);
+        $jobStore->method('getById')->willReturn(null);
 
         $this->assertSame(
             Http::STATUS_NOT_FOUND,
-            $this->controller($this->user('alice'), $queue)->job(999)->getStatus(),
+            $this->controller($this->user('alice'), $jobStore, $enqueue)->job(999)->getStatus(),
         );
     }
 
     public function testNoSessionIsForbidden(): void
     {
         $this->expectException(OCSForbiddenException::class);
-        $this->controller(null, $this->createMock(Queue::class))->job(7);
+        $this->controller(null, $this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class))->job(7);
     }
 
     public function testFileStatusOfAForeignPathLeaksNothing(): void
     {
-        $queue = $this->createMock(Queue::class);
-        $queue->expects($this->never())->method('findByPath');
+        $jobStore = $this->createMock(\OCA\OcrFlow\Storage\JobStore::class);
+        $enqueue = $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class);
+        $jobStore->expects($this->never())->method('findByPath');
 
         $request = $this->createMock(IRequest::class);
         $request->method('getParam')->willReturnCallback(
@@ -154,7 +160,7 @@ class StatusControllerTest extends TestCase
                 : $default,
         );
 
-        $data = $this->controller($this->user('alice'), $queue, $request)->file()->getData();
+        $data = $this->controller($this->user('alice'), $jobStore, $enqueue, $request)->file()->getData();
 
         // Indistinguishable from a file that was never queued.
         $this->assertSame('unknown', $data['status']);
@@ -163,8 +169,9 @@ class StatusControllerTest extends TestCase
 
     public function testFileStatusOfOwnPathIsAnswered(): void
     {
-        $queue = $this->createMock(Queue::class);
-        $queue->method('findByPath')->willReturn($this->job('alice/files/mine.pdf'));
+        $jobStore = $this->createMock(\OCA\OcrFlow\Storage\JobStore::class);
+        $enqueue = $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class);
+        $jobStore->method('findByPath')->willReturn($this->job('alice/files/mine.pdf'));
 
         $request = $this->createMock(IRequest::class);
         $request->method('getParam')->willReturnCallback(
@@ -173,7 +180,7 @@ class StatusControllerTest extends TestCase
                 : $default,
         );
 
-        $data = $this->controller($this->user('alice'), $queue, $request)->file()->getData();
+        $data = $this->controller($this->user('alice'), $jobStore, $enqueue, $request)->file()->getData();
 
         $this->assertSame('done', $data['status']);
         $this->assertSame('tesseract', $data['engine']);

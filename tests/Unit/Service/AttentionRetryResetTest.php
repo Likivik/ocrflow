@@ -8,7 +8,9 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Tests\Unit\Service;
 
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\Attention;
 use OCP\IConfig;
 use PHPUnit\Framework\TestCase;
@@ -32,14 +34,18 @@ class AttentionRetryResetTest extends TestCase
 		$job->setReasonCode('error_provider_timed_out');
 		$job->setFileId(7);
 
-		$queue = $this->createMock(Queue::class);
-		$queue->method('getById')->willReturn($job);
-		$queue->expects($this->once())->method('deleteTerminalForFile')->with(7)->willReturn(1);
-		$queue->expects($this->once())->method('clearPermanentVerdict')->with(7);
-		$queue->expects($this->once())->method('resetTimesEnqueued')->with(7);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$jobs->method('getById')->willReturn($job);
+		$jobs->expects($this->once())->method('deleteTerminalForFile')->with(7)->willReturn(1);
+		$ledger->expects($this->once())->method('clearPermanentVerdict')->with(7);
+		$jobs->expects($this->once())->method('resetTimesEnqueued')->with(7);
 
 		$attention = new Attention(
-			$queue,
+			$jobs,
+			$ledger,
+			$enqueue,
 			$this->retryPolicyWithTheCode(),
 			$this->createMock(IConfig::class),
 			$this->createMock(LoggerInterface::class),
@@ -50,19 +56,23 @@ class AttentionRetryResetTest extends TestCase
 
 	public function testRetryPathResetsTimesEnqueuedToo(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$queue->method('findFileByPath')->willReturn([
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$ledger->method('findFileByPath')->willReturn([
 			'file_id' => 7,
 			'path' => '/alice/files/scan.pdf',
 			'status' => 'error',
 			'reason' => 'error_queued_twice_for_same_bytes',
 		]);
-		$queue->expects($this->once())->method('deleteTerminalForFile')->with(7)->willReturn(0);
-		$queue->expects($this->once())->method('clearPermanentVerdict')->with(7);
-		$queue->expects($this->once())->method('resetTimesEnqueued')->with(7);
+		$jobs->expects($this->once())->method('deleteTerminalForFile')->with(7)->willReturn(0);
+		$ledger->expects($this->once())->method('clearPermanentVerdict')->with(7);
+		$jobs->expects($this->once())->method('resetTimesEnqueued')->with(7);
 
 		$attention = new Attention(
-			$queue,
+			$jobs,
+			$ledger,
+			$enqueue,
 			$this->retryPolicyWithTheCode(),
 			$this->createMock(IConfig::class),
 			$this->createMock(LoggerInterface::class),

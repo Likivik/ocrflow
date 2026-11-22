@@ -7,7 +7,9 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Service;
 
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\Attention;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\IConfig;
@@ -28,17 +30,25 @@ use Psr\Log\NullLogger;
  */
 class AttentionRetryQueuesTest extends TestCase
 {
-	/** @var Queue&MockObject */
-	private Queue $queue;
+	/** @var JobStore&MockObject */
+	private JobStore $jobs;
+	/** @var Ledger&MockObject */
+	private Ledger $ledger;
+	/** @var EnqueueService&MockObject */
+	private EnqueueService $enqueue;
 	private Attention $attention;
 
 	protected function setUp(): void
 	{
-		$this->queue = $this->createMock(Queue::class);
+		$this->jobs = $this->createMock(JobStore::class);
+		$this->ledger = $this->createMock(Ledger::class);
+		$this->enqueue = $this->createMock(EnqueueService::class);
 		$config = $this->createMock(IConfig::class);
 		$config->method('getAppValue')->willReturn('500');
 		$this->attention = new Attention(
-			$this->queue,
+			$this->jobs,
+			$this->ledger,
+			$this->enqueue,
 			new RetryPolicy(),
 			$config,
 			new NullLogger(),
@@ -47,7 +57,7 @@ class AttentionRetryQueuesTest extends TestCase
 
 	public function testRetryingAFileQueuesItAgain(): void
 	{
-		$this->queue->method('findFileByPath')
+		$this->ledger->method('findFileByPath')
 			->with('/bob/files/broken.pdf')
 			->willReturn([
 				'file_id' => 7,
@@ -56,9 +66,9 @@ class AttentionRetryQueuesTest extends TestCase
 				'reason' => 'error_file_broken',
 				'etag' => 'abc123',
 			]);
-		$this->queue->method('deleteTerminalForFile')->with(7)->willReturn(2);
+		$this->jobs->method('deleteTerminalForFile')->with(7)->willReturn(2);
 
-		$this->queue->expects($this->once())
+		$this->enqueue->expects($this->once())
 			->method('enqueue')
 			->with('/bob/files/broken.pdf', 7, null, 'abc123')
 			->willReturn(42);
@@ -70,9 +80,9 @@ class AttentionRetryQueuesTest extends TestCase
 
 	public function testRetryStillQueuesWhenTheLedgerHasNoEtag(): void
 	{
-		$this->queue->method('findFileByPath')->willReturn(null);
+		$this->ledger->method('findFileByPath')->willReturn(null);
 
-		$this->queue->expects($this->once())
+		$this->enqueue->expects($this->once())
 			->method('enqueue')
 			->with('/bob/files/broken.pdf', 7, null, null)
 			->willReturn(43);

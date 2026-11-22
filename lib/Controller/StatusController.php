@@ -9,7 +9,8 @@ namespace OCA\OcrFlow\Controller;
 
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\BackgroundJob\ScanJob;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Report\PanelReport;
 use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\EnginePolicy;
@@ -42,7 +43,8 @@ class StatusController extends OCSController
 	public function __construct(
 		string $appName,
 		IRequest $request,
-		private Queue $queue,
+		private JobStore $jobStore,
+		private EnqueueService $enqueue,
 		private IJobList $jobs,
 		private IUserSession $userSession,
 		private AccessGate $access,
@@ -63,7 +65,7 @@ class StatusController extends OCSController
 		$report = $this->panelReport->forUser($this->uid());
 
 		return new DataResponse([
-			'queue' => $this->queue->counts(),
+			'queue' => $this->jobStore->counts(),
 			// "Skipped" is six decisions, not one: a photo, a born-digital
 			// PDF, our own stamp, a foreign tesseract layer, an unsupported
 			// type. Split by the code the worker already records, with the
@@ -215,7 +217,7 @@ class StatusController extends OCSController
 		if ($user === null) {
 			throw new OCSForbiddenException('no session');
 		}
-		$job = $this->queue->getById($id);
+		$job = $this->jobStore->getById($id);
 		// "Does not exist" and "not yours" must be the same answer: a guessed
 		// id must not tell an attacker which is which.
 		if ($job === null || !$this->ownsPath($user, $job->getPath())) {
@@ -316,7 +318,7 @@ class StatusController extends OCSController
 			], Http::STATUS_TOO_MANY_REQUESTS);
 		}
 
-		$result = $this->queue->enqueueNeverProcessed($uid, $limit, $this->engine->engineForJob());
+		$result = $this->enqueue->enqueueNeverProcessed($uid, $limit, $this->engine->engineForJob());
 		if ($result['queued'] > 0) {
 			$this->setDailyUsed($uid, $used + $result['queued']);
 		}
@@ -421,7 +423,7 @@ class StatusController extends OCSController
 		if ($user === null || !$this->ownsPath($user, $path)) {
 			return new DataResponse(['path' => $path, 'status' => 'unknown']);
 		}
-		$job = $this->queue->findByPath($path);
+		$job = $this->jobStore->findByPath($path);
 		if ($job === null) {
 			return new DataResponse(['path' => $path, 'status' => 'unknown']);
 		}

@@ -9,7 +9,8 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\StatusController;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Report\PanelReport;
 use OCA\OcrFlow\Service\AccessGate;
 use OCP\IGroupManager;
@@ -65,8 +66,8 @@ class StatusProcessTest extends TestCase
 		$this->userValues['app:engine'] = $this->configured ? 'google' : 'none';
 		$engine = new EnginePolicy($config);
 
-		$queue = $this->createMock(Queue::class);
-		$queue->method('enqueueNeverProcessed')->willReturnCallback(
+		$enqueue = $this->createMock(EnqueueService::class);
+		$enqueue->method('enqueueNeverProcessed')->willReturnCallback(
 			fn (string $uid, int $limit, ?string $eng) => $queued + ['uid' => $uid, 'limit' => $limit, 'engine' => $eng]
 		);
 
@@ -77,7 +78,7 @@ class StatusProcessTest extends TestCase
 			'read_by_engine' => [], 'no_text_by_engine' => [],
 		]);
 
-		return new StatusController('ocrflow', $request, $queue, $this->createMock(IJobList::class), $session, $access, $engine, $panelReport, null, $config);
+		return new StatusController('ocrflow', $request, $this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $enqueue, $this->createMock(IJobList::class), $session, $access, $engine, $panelReport, null, $config);
 	}
 
 	public function testARequestWithoutACSRFTokenNeverSpends(): void
@@ -115,7 +116,7 @@ class StatusProcessTest extends TestCase
 		$groupManager->method('isInGroup')->willReturn(false);
 
 		$controller = new StatusController(
-			'ocrflow', $request, $this->createMock(Queue::class), $this->createMock(IJobList::class),
+			'ocrflow', $request, $this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class), $this->createMock(IJobList::class),
 			$session, new AccessGate($config, $groupManager), new EnginePolicy($config),
 			$this->createMock(PanelReport::class),
 		);

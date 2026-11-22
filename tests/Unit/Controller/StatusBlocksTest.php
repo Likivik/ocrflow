@@ -8,7 +8,8 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Tests\Unit\Controller;
 
 use OCA\OcrFlow\Controller\StatusController;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Report\PanelReport;
 use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\EnginePolicy;
@@ -34,7 +35,7 @@ class StatusBlocksTest extends TestCase
 		$config = $this->createMock(IConfig::class);
 		$config->method('getAppValue')->willReturn('');
 
-		$queue = $this->createMock(Queue::class);
+		$queue = $this->createMock(JobStore::class);
 		$panelReport = $this->createMock(PanelReport::class);
 		$panelReport->method('forUser')->willReturn($report);
 		$queue->method('counts')->willReturn(['done' => 2657, 'skipped' => 1]);
@@ -47,7 +48,8 @@ class StatusBlocksTest extends TestCase
 		return new StatusController(
 			'ocrflow',
 			$this->createMock(IRequest::class),
-			$queue,
+			$this->createMock(\OCA\OcrFlow\Storage\JobStore::class),
+			$this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class),
 			$this->createMock(IJobList::class),
 			$session,
 			new AccessGate($config, $this->createMock(IGroupManager::class)),

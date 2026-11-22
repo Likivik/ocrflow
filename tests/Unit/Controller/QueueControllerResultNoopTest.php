@@ -10,7 +10,8 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\FileExchange;
 use OCA\OcrFlow\Service\PendingResults;
@@ -65,13 +66,14 @@ class QueueControllerResultNoopTest extends TestCase
 		$job->setFileId(42);
 		$job->setEtag('old-etag');
 		// The state the stash leaves behind: terminal, no claim token.
-		$job->setStatus(Queue::STATUS_SKIPPED);
+		$job->setStatus(JobStore::STATUS_SKIPPED);
 		$job->setReasonCode('skip_source_changed_result_saved');
 
-		$queue = $this->createMock(Queue::class);
-		$queue->method('getById')->willReturn($job);
-		$queue->expects($this->never())->method('finish');
-		$queue->expects($this->never())->method('settleProduced');
+		$jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+		$jobStore->method('getById')->willReturn($job);
+		$settlement->expects($this->never())->method('finish');
+		$settlement->expects($this->never())->method('settleProduced');
 
 		$pending = $this->createMock(PendingResults::class);
 		$pending->method('hasPending')->willReturn($hasPending);
@@ -82,7 +84,8 @@ class QueueControllerResultNoopTest extends TestCase
 		return new QueueController(
 			Application::APP_ID,
 			$request,
-			$queue,
+			$jobStore,
+			$settlement,
 			$config,
 			$this->createMock(LoggerInterface::class),
 			$files,

@@ -139,10 +139,14 @@ class OutcomesControllerTest extends TestCase
 	/** [unit] the cap bounds one redo click, and the answer carries the estimate */
 	public function testRedoIsCappedAndAnswersWithItsEstimate(): void
 	{
-		$queue = $this->createMock(\OCA\OcrFlow\Db\Queue::class);
-		$queue->method('deleteTerminalForFile')->willReturn(1);
+				$jobs = $this->createMock(\OCA\OcrFlow\Storage\JobStore::class);
+		$ledger = $this->createMock(\OCA\OcrFlow\Storage\Ledger::class);
+		$enqueue = $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class);
+		$jobs->method('deleteTerminalForFile')->willReturn(1);
 		$attention = new \OCA\OcrFlow\Service\Attention(
-			$queue,
+			$jobs,
+			$ledger,
+			$enqueue,
 			new RetryPolicy(),
 			StoreOutcomes::configWith(['attention_retry_cap' => '1']),
 		);
@@ -163,9 +167,11 @@ class OutcomesControllerTest extends TestCase
 	/** [unit] an empty selection spends nothing and is not an error */
 	public function testAnEmptySelectionSpendsNothing(): void
 	{
-		$queue = $this->createMock(\OCA\OcrFlow\Db\Queue::class);
-		$queue->expects($this->never())->method('deleteTerminalForFile');
-		$attention = new \OCA\OcrFlow\Service\Attention($queue, new RetryPolicy(), StoreOutcomes::configWith([]));
+				$jobs = $this->createMock(\OCA\OcrFlow\Storage\JobStore::class);
+		$ledger = $this->createMock(\OCA\OcrFlow\Storage\Ledger::class);
+		$enqueue = $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class);
+		$jobs->expects($this->never())->method('deleteTerminalForFile');
+		$attention = new \OCA\OcrFlow\Service\Attention($jobs, $ledger, $enqueue, new RetryPolicy(), StoreOutcomes::configWith([]));
 		$store = new StoreOutcomes([], [], $attention);
 		$store->ledger = $this->store()->ledger;
 
