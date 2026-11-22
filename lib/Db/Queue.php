@@ -11,6 +11,7 @@ use OCA\OcrFlow\Service\EnginePolicy;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
 use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCA\OcrFlow\Storage\Ledger;
 use OCP\AppFramework\Db\QBMapper;
 use OCP\DB\Exception;
@@ -95,6 +96,8 @@ class Queue extends QBMapper
 
 	private ?JobStore $jobStore = null;
 
+	private ?SettlementService $settlementService = null;
+
 	private StageEvents $stageEvents;
 
 	private ?EnginePolicy $enginePolicy;
@@ -126,6 +129,11 @@ class Queue extends QBMapper
 	 * policy — both already here — and because Queue's own constructor is
 	 * frozen by four test harnesses until Phase 2c deletes it.
 	 */
+	private function settlement(): SettlementService
+	{
+		return $this->settlementService ??= new SettlementService($this->db, $this->jobs(), $this->ledger(), $this->retryPolicy, $this->logger, $this->stageEvents);
+	}
+
 	private function jobs(): JobStore
 	{
 		return $this->jobStore ??= new JobStore($this->db, $this->retryPolicy);
@@ -163,7 +171,7 @@ class Queue extends QBMapper
 		// including the `error` row written the last time this file was queued,
 		// so the correction would otherwise never be recorded.
 		if ($size !== null && $size <= 0) {
-			$this->recordEmptySource($path, $fileId, $size, $etag);
+			$this->settlement()->recordEmptySource($path, $fileId, $size, $etag);
 			return null;
 		}
 
@@ -224,7 +232,7 @@ class Queue extends QBMapper
 			// a loop is a defect to read about, not a bill to pay. The
 			// operator override resets the counter and stays exempt.
 			if ($fromScan && $this->jobs()->alreadyEnqueuedForVersion($fileId, $etag)) {
-				$this->recordQueuedTwice($path, $fileId, $size, $etag);
+				$this->settlement()->recordQueuedTwice($path, $fileId, $size, $etag);
 				return null;
 			}
 		} elseif ($this->findByPath($path) !== null) {
@@ -286,48 +294,7 @@ class Queue extends QBMapper
 	 */
 	private function recordEmptySource(string $path, ?int $fileId, ?int $size, ?string $etag): void
 	{
-		// The zero-byte verdict goes to the ledger too, not only to the job
-		// row: retention will purge the job row, and the file is still zero
-		// bytes — the verdict must survive so the next scan does not have to
-		// rediscover it (and so the block stays explainable).
-		if ($fileId !== null) {
-			$this->writeLedger($fileId, $path, $size, $etag, self::STATUS_SKIPPED, 'error_source_file_zero_bytes', null, null, null);
-		}
-
-		$existing = $fileId === null ? $this->findByPath($path) : $this->jobForVersion($fileId, $etag);
-		if ($existing !== null) {
-			$qb = $this->db->getQueryBuilder();
-			$qb->update(self::JOBS)
-				->set('status', $qb->createNamedParameter('skipped'))
-				->set('reason', $qb->createNamedParameter('error_source_file_zero_bytes'))
-				->set('reason_code', $qb->createNamedParameter('error_source_file_zero_bytes'))
-				->set('retryable', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL))
-				->set('error', $qb->createNamedParameter(null))
-				->set('claim_token', $qb->createNamedParameter(null))
-				->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
-				->set('finished_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
-				->where($qb->expr()->eq('id', $qb->createNamedParameter((int) $existing->getId(), IQueryBuilder::PARAM_INT)));
-			$qb->executeStatement();
-			$this->recordDecision((int) $existing->getId(), 'error_source_file_zero_bytes');
-			return;
-		}
-
-		$qb = $this->db->getQueryBuilder();
-		$qb->insert(self::JOBS)
-			->values([
-				'path' => $qb->createNamedParameter($path),
-				'file_id' => $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
-				'status' => $qb->createNamedParameter('skipped'),
-				'reason' => $qb->createNamedParameter('error_source_file_zero_bytes'),
-				'reason_code' => $qb->createNamedParameter('error_source_file_zero_bytes'),
-				'retryable' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
-				'created_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
-				'finished_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
-				'size' => $qb->createNamedParameter($size, IQueryBuilder::PARAM_INT),
-				'etag' => $qb->createNamedParameter($etag),
-			]);
-		$qb->executeStatement();
-		$this->recordDecision((int) $qb->getLastInsertId(), 'error_source_file_zero_bytes');
+		$this->settlement()->recordEmptySource($path, $fileId, $size, $etag);
 	}
 
 	/**
@@ -342,14 +309,7 @@ class Queue extends QBMapper
 	 */
 	private function recordDecision(int $jobId, string $reasonCode): void
 	{
-		if ($this->hasStageRow($jobId, 'intake', $reasonCode)) {
-			return;
-		}
-		$row = $this->stageEvents->appDecision('intake', $reasonCode, 0, 0);
-		if ($row === null) {
-			return;
-		}
-		$this->insertStageRow($jobId, $row);
+		$this->settlement()->recordDecision($jobId, $reasonCode);
 	}
 
 	/**
@@ -364,21 +324,7 @@ class Queue extends QBMapper
 	 */
 	private function insertStageRow(int $jobId, array $row): void
 	{
-		// Parameters belong to the builder that created them, so every
-		// placeholder below is made by this builder and bound by it.
-		$qb = $this->db->getQueryBuilder();
-		$qb->insert(self::STAGE_EVENTS)
-			->values([
-				'job_id' => $qb->createNamedParameter($jobId, IQueryBuilder::PARAM_INT),
-				'stage' => $qb->createNamedParameter($row['stage']),
-				'reason_code' => $qb->createNamedParameter($row['reason_code']),
-				'duration_ms' => $qb->createNamedParameter($row['duration_ms'], IQueryBuilder::PARAM_INT),
-				'cost_pages' => $qb->createNamedParameter($row['cost_pages'], IQueryBuilder::PARAM_INT),
-				// A DATETIME column: the driver wants the object, not a
-				// formatted string, or the value lands as "0000-00-00".
-				'created_at' => $qb->createNamedParameter(new \DateTime(), IQueryBuilder::PARAM_DATETIME_MUTABLE),
-			]);
-		$qb->executeStatement();
+		$this->settlement()->insertStageRow($jobId, $row);
 	}
 
 	/**
@@ -393,13 +339,7 @@ class Queue extends QBMapper
 	 */
 	private function hasStageRow(int $jobId, string $stage, string $reasonCode): bool
 	{
-		$qb = $this->db->getQueryBuilder();
-		$qb->select('id')->from(self::STAGE_EVENTS)
-			->where($qb->expr()->eq('job_id', $qb->createNamedParameter($jobId, IQueryBuilder::PARAM_INT)))
-			->andWhere($qb->expr()->eq('stage', $qb->createNamedParameter($stage)))
-			->andWhere($qb->expr()->eq('reason_code', $qb->createNamedParameter($reasonCode)))
-			->setMaxResults(1);
-		return $qb->executeQuery()->fetch() !== false;
+		return $this->settlement()->hasStageRow($jobId, $stage, $reasonCode);
 	}
 
 	public function findByPath(string $path): ?Job
@@ -460,7 +400,7 @@ class Queue extends QBMapper
 		?string $engine,
 		?string $engineVersion,
 	): void {
-		$this->writeLedger($fileId, $path, $size, $etag, self::STATUS_SKIPPED, 'skip_ocred_by_ocrflow', $engine, $engineVersion, null, settle: true);
+		$this->settlement()->settleProduced($fileId, $path, $size, $etag, $engine, $engineVersion);
 	}
 
 	/**
@@ -474,32 +414,7 @@ class Queue extends QBMapper
 	 */
 	private function recordQueuedTwice(string $path, int $fileId, ?int $size, ?string $etag): void
 	{
-		$this->writeLedger($fileId, $path, $size, $etag, self::STATUS_ERROR, 'error_queued_twice_for_same_bytes', null, null, null);
-
-		$qb = $this->db->getQueryBuilder();
-		$qb->insert(self::JOBS)
-			->values([
-				'path' => $qb->createNamedParameter($path),
-				'file_id' => $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
-				'status' => $qb->createNamedParameter(self::STATUS_ERROR),
-				'reason' => $qb->createNamedParameter('error_queued_twice_for_same_bytes'),
-				'reason_code' => $qb->createNamedParameter('error_queued_twice_for_same_bytes'),
-				'retryable' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
-				'created_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
-				'finished_at' => $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
-				'size' => $qb->createNamedParameter($size, IQueryBuilder::PARAM_INT),
-				'etag' => $qb->createNamedParameter($etag),
-			]);
-		$qb->executeStatement();
-		$this->recordDecision((int) $qb->getLastInsertId(), 'error_queued_twice_for_same_bytes');
-
-		// The line names the file, the etag and the code, so an operator
-		// sees the loop rather than silent inactivity.
-		$this->logger?->warning(
-			'ocrflow: file refused: queued twice for the same bytes (etag ' . $etag . ')'
-			. ' for ' . $path . ' (error_queued_twice_for_same_bytes)'
-			. '; occ ocrflow:requeue "' . $path . '" to queue it once more',
-		);
+		$this->settlement()->recordQueuedTwice($path, $fileId, $size, $etag);
 	}
 
 	public function findFileByPath(string $path): ?array
@@ -572,78 +487,7 @@ class Queue extends QBMapper
 	 */
 	public function finish(int $id, array $result, string $claimToken): bool
 	{
-		$job = $this->getById($id);
-		if ($job === null) {
-			return false;
-		}
-
-		$status = $result['status'];
-		$qb = $this->db->getQueryBuilder();
-		$qb->update(self::JOBS)
-			->set('status', $qb->createNamedParameter($status))
-			->set('reason', $qb->createNamedParameter($result['reason'] ?? null))
-			->set('reason_code', $qb->createNamedParameter($result['reason_code'] ?? null))
-			->set('retryable', ($result['retryable'] ?? null) === null
-				? $qb->createNamedParameter(null)
-				: $qb->createNamedParameter((bool) $result['retryable'], IQueryBuilder::PARAM_BOOL))
-			->set('engine', $qb->createNamedParameter($result['engine'] ?? null))
-			->set('pages', $qb->createNamedParameter($result['pages'] ?? null, IQueryBuilder::PARAM_INT))
-			->set('chars', $qb->createNamedParameter($result['chars'] ?? null, IQueryBuilder::PARAM_INT))
-			->set('error', $qb->createNamedParameter($result['error'] ?? null))
-			->set('finished_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
-			->set('claim_token', $qb->createNamedParameter(null))
-			->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
-			->set('claim_expires_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
-			// The operator's one-off decision ends with the job it was taken
-			// for: a force bit left on the row would make the NEXT ordinary
-			// scan of this file bypass the skip bar too, which nobody asked for.
-			->set('force', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT))
-			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
-			// Only the worker holding the claim may finish it, and the claim
-			// is the token minted at claim time. A stale claim is requeued
-			// and can be re-claimed by another worker while the first is
-			// still processing (a very large PDF); the late worker's result
-			// must then be discarded, not written over the new claimant's
-			// row. The caller has already refused a non-matching token with
-			// a logged 409; this guard is the database's own say.
-			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
-			->andWhere($qb->expr()->eq('claim_token', $qb->createNamedParameter($claimToken)));
-		$updated = $qb->executeStatement() === 1;
-
-		if ($updated) {
-			$this->recordFile($job, $status, $result);
-			// The stage events are part of the same outcome as the job row:
-			// they are written only when the guarded UPDATE actually
-			// happened, so a worker whose claim was recovered cannot leave
-			// stage rows on a job that now belongs to somebody else.
-			$this->recordStageEvents((int) $job->getId(), $result['stage_events'] ?? null);
-		}
-
-		// Retry is the app's decision, taken here because this is the only place
-		// that knows both the policy verdict and the attempt count. The error
-		// text is kept on the requeued row: the next failure must not erase the
-		// evidence of the first.
-		if ($updated && $status === self::STATUS_ERROR && ($result['retryable'] ?? false) === true) {
-			$attempts = (int) $job->getAttempts();
-			if ($attempts + 1 < self::MAX_ATTEMPTS) {
-				$retry = $this->db->getQueryBuilder();
-				$retry->update(self::JOBS)
-					->set('status', $retry->createNamedParameter(self::STATUS_QUEUED))
-					->set('attempts', $retry->createNamedParameter($attempts + 1, IQueryBuilder::PARAM_INT))
-					->set('claim_token', $retry->createNamedParameter(null))
-					->set('claimed_by_worker_id', $retry->createNamedParameter(null, IQueryBuilder::PARAM_INT))
-					->set('claimed_at', $retry->createNamedParameter(null))
-					->set('finished_at', $retry->createNamedParameter(null))
-					->where($retry->expr()->eq('id', $retry->createNamedParameter($id, IQueryBuilder::PARAM_INT)));
-				$retry->executeStatement();
-				// The per-file row is what the UI and the status endpoint read.
-				// Leaving it on `error` while the job is queued again is two
-				// answers to one question, so the row follows the job.
-				$this->recordFile($job, self::STATUS_QUEUED, $result);
-			}
-		}
-
-		return $updated;
+		return $this->settlement()->finish($id, $result, $claimToken);
 	}
 
 	public function recordSourceHash(int $id, string $sha256): void
@@ -668,12 +512,7 @@ class Queue extends QBMapper
 	 */
 	private function recordStageEvents(int $jobId, mixed $raw): void
 	{
-		$rows = $this->stageEvents->normalize($raw);
-		if ($rows === []) {
-			return;
-		}
-
-		$this->insertStageRows($jobId, $rows);
+		$this->settlement()->recordStageEvents($jobId, $raw);
 	}
 
 	/**
@@ -700,52 +539,7 @@ class Queue extends QBMapper
 	 */
 	private function insertStageRows(int $jobId, array $rows): void
 	{
-		$columns = ['job_id', 'stage', 'reason_code', 'duration_ms', 'cost_pages', 'created_at'];
-		$tuple = '(' . implode(', ', array_fill(0, count($columns), '?')) . ')';
-
-		foreach (array_chunk($rows, self::STAGE_INSERT_CHUNK) as $chunk) {
-			$sql = 'INSERT INTO *PREFIX*' . self::STAGE_EVENTS
-				. ' (' . implode(', ', $columns) . ') VALUES '
-				. implode(', ', array_fill(0, count($chunk), $tuple));
-
-			$params = [];
-			$types = [];
-			foreach ($chunk as $row) {
-				$params[] = $jobId;
-				$types[] = IQueryBuilder::PARAM_INT;
-				$params[] = $row['stage'];
-				$types[] = IQueryBuilder::PARAM_STR;
-				$params[] = $row['reason_code'];
-				$types[] = IQueryBuilder::PARAM_STR;
-				$params[] = $row['duration_ms'];
-				$types[] = IQueryBuilder::PARAM_INT;
-				$params[] = $row['cost_pages'];
-				$types[] = IQueryBuilder::PARAM_INT;
-				// A DATETIME column: the driver wants the object, not a
-				// formatted string, or the value lands as "0000-00-00".
-				$params[] = new \DateTime();
-				$types[] = IQueryBuilder::PARAM_DATETIME_MUTABLE;
-			}
-
-			try {
-				$this->db->executeStatement($sql, $params, $types);
-			} catch (\Exception $batchFailure) {
-				$this->logger?->warning(
-					'ocrflow: the batched stage insert for job ' . $jobId . ' failed ('
-					. $batchFailure->getMessage() . '); retrying the rows one by one',
-				);
-				foreach ($chunk as $row) {
-					try {
-						$this->insertStageRow($jobId, $row);
-					} catch (\Exception $rowFailure) {
-						$this->logger?->warning(
-							'ocrflow: stage row for job ' . $jobId . ', stage ' . $row['stage']
-							. ', could not be written (' . $rowFailure->getMessage() . ')',
-						);
-					}
-				}
-			}
-		}
+		$this->settlement()->insertStageRows($jobId, $rows);
 	}
 
 	/**
@@ -754,34 +548,7 @@ class Queue extends QBMapper
 	 */
 	private function recordFile(Job $job, string $status, array $result): void
 	{
-		if ($job->getFileId() === null) {
-			return;
-		}
-
-		// The ledger `reason` carries the vocabulary CODE, not the worker's
-		// free text: the code is the machine verdict enqueue matches against
-		// after the job row is purged, and free text cannot be matched. The
-		// free text stays on the job row, where the status endpoint reads it.
-		// Codes are written in the NEW vocabulary: an old-spelling code from
-		// a pre-0.1.5 worker is canonicalised on the way in, so the ledger
-		// never grows another old name.
-		$reason = $result['reason_code'] ?? null;
-		if (is_string($reason)) {
-			$reason = $this->retryPolicy->canonical($reason);
-		} elseif ($reason === null && isset($result['reason']) && is_string($result['reason'])) {
-			$reason = $result['reason'];
-		}
-		$this->writeLedger(
-			$job->getFileId(),
-			$job->getPath(),
-			$job->getSize(),
-			$job->getEtag(),
-			$status,
-			$reason,
-			$result['engine'] ?? null,
-			$result['engine_version'] ?? null,
-			$result['stamp_version'] ?? null,
-		);
+		$this->ledger()->recordFile($job, $status, $result);
 	}
 
 	/**
@@ -803,64 +570,7 @@ class Queue extends QBMapper
 		?string $stampVersion,
 		bool $settle = false,
 	): void {
-		$qb = $this->db->getQueryBuilder();
-		$qb->select('id', 'etag', 'reason', 'engine', 'engine_version', 'stamp_version')->from(self::FILES)
-			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
-			->setMaxResults(1);
-		$existing = $qb->executeQuery()->fetch();
-		$exists = $existing !== false;
-
-		// A finish for the SOURCE version must not drag the ledger back to
-		// the source etag when our own write-back settle has already
-		// recorded the PRODUCED one: the OCR-in-place path settles the new
-		// etag (putFile), then the worker's `result` closes the job for the
-		// old etag. The settle's facts are the newer truth about the bytes
-		// on disk, so they survive; only the status follows the job.
-		if ($exists && !$settle
-			&& is_string($existing['reason'] ?? null)
-			&& in_array($existing['reason'], $this->retryPolicy->spellingsOf('skip_ocred_by_ocrflow'), true)
-			&& is_string($existing['etag'] ?? null)
-			&& $existing['etag'] !== $etag
-		) {
-			$etag = $existing['etag'];
-			$engine = is_string($existing['engine'] ?? null) ? $existing['engine'] : $engine;
-			$engineVersion = is_string($existing['engine_version'] ?? null) ? $existing['engine_version'] : $engineVersion;
-			$stampVersion = is_string($existing['stamp_version'] ?? null) ? $existing['stamp_version'] : $stampVersion;
-		}
-
-		// Parameters belong to the builder that created them. Binding them on the
-		// SELECT builder and executing the INSERT/UPDATE on another raises
-		// "Named parameter dcValue2 does not have a bound value" at run time —
-		// which made every finished job answer 500, on the success path as well
-		// as the failure path. Caught by the integration smoke; no unit test can
-		// see it, because it is a property of the query builder, not of our data.
-		$w = $this->db->getQueryBuilder();
-		$values = [
-			'status' => $w->createNamedParameter($status),
-			'reason' => $w->createNamedParameter($reason),
-			'engine' => $w->createNamedParameter($engine),
-			// What the engine bar is compared against: a file OCR'd below
-			// the bar is a redo candidate, not a frozen verdict.
-			'engine_version' => $w->createNamedParameter($engineVersion),
-			'stamp_version' => $w->createNamedParameter($stampVersion),
-			'path' => $w->createNamedParameter($path),
-			'size' => $w->createNamedParameter($size, IQueryBuilder::PARAM_INT),
-			'etag' => $w->createNamedParameter($etag),
-			'updated_at' => $w->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
-		];
-		if ($exists) {
-			$w->update(self::FILES);
-			foreach ($values as $column => $param) {
-				$w->set($column, $param);
-			}
-			$w->where($w->expr()->eq('file_id', $w->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)));
-		} else {
-			$w->insert(self::FILES)
-				->values($values + [
-					'file_id' => $w->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
-				]);
-		}
-		$w->executeStatement();
+		$this->ledger()->writeLedger($fileId, $path, $size, $etag, $status, $reason, $engine, $engineVersion, $stampVersion, $settle);
 	}
 
 	public function requeueStale(int $heartbeatStaleSeconds = self::CLAIM_LEASE_SECONDS): int

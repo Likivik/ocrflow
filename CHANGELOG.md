@@ -16,6 +16,11 @@ written.
 
 ### Added
 
+- **Phase 2d: the settle transaction has one owner.** `SettlementService` now
+  holds `finish`, `settleProduced` and the stage writers, and calls
+  `Ledger::recordFile`/`writeLedger` (which moved into `Ledger`) — one result,
+  three tables, from one place. `Queue` delegates. `Queue.php`
+  1309 → 1019 lines; `SettlementService` 315; `Ledger` 459.
 - **Phase 2b: the job log is a class.** Twenty-two `ocrflow_jobs` operations
   (`claim`, `renewClaim`, `release`, `requeueStale`, `forceRequeue`, retention
   and the scan loop breaker among them) now live in

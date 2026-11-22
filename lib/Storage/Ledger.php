@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Storage;
 
+use OCA\OcrFlow\Db\Job;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
@@ -350,5 +351,109 @@ class Ledger
 		return $etag === null
 			? $qb->expr()->isNull('etag')
 			: $qb->expr()->eq('etag', $qb->createNamedParameter($etag));
+	}
+
+	public function recordFile(Job $job, string $status, array $result): void
+	{
+		if ($job->getFileId() === null) {
+			return;
+		}
+
+		// The ledger `reason` carries the vocabulary CODE, not the worker's
+		// free text: the code is the machine verdict enqueue matches against
+		// after the job row is purged, and free text cannot be matched. The
+		// free text stays on the job row, where the status endpoint reads it.
+		// Codes are written in the NEW vocabulary: an old-spelling code from
+		// a pre-0.1.5 worker is canonicalised on the way in, so the ledger
+		// never grows another old name.
+		$reason = $result['reason_code'] ?? null;
+		if (is_string($reason)) {
+			$reason = $this->retryPolicy->canonical($reason);
+		} elseif ($reason === null && isset($result['reason']) && is_string($result['reason'])) {
+			$reason = $result['reason'];
+		}
+		$this->writeLedger(
+			$job->getFileId(),
+			$job->getPath(),
+			$job->getSize(),
+			$job->getEtag(),
+			$status,
+			$reason,
+			$result['engine'] ?? null,
+			$result['engine_version'] ?? null,
+			$result['stamp_version'] ?? null,
+		);
+	}
+
+	public function writeLedger(
+		int $fileId,
+		string $path,
+		?int $size,
+		?string $etag,
+		string $status,
+		?string $reason,
+		?string $engine,
+		?string $engineVersion,
+		?string $stampVersion,
+		bool $settle = false,
+	): void {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('id', 'etag', 'reason', 'engine', 'engine_version', 'stamp_version')->from(self::FILES)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->setMaxResults(1);
+		$existing = $qb->executeQuery()->fetch();
+		$exists = $existing !== false;
+
+		// A finish for the SOURCE version must not drag the ledger back to
+		// the source etag when our own write-back settle has already
+		// recorded the PRODUCED one: the OCR-in-place path settles the new
+		// etag (putFile), then the worker's `result` closes the job for the
+		// old etag. The settle's facts are the newer truth about the bytes
+		// on disk, so they survive; only the status follows the job.
+		if ($exists && !$settle
+			&& is_string($existing['reason'] ?? null)
+			&& in_array($existing['reason'], $this->retryPolicy->spellingsOf('skip_ocred_by_ocrflow'), true)
+			&& is_string($existing['etag'] ?? null)
+			&& $existing['etag'] !== $etag
+		) {
+			$etag = $existing['etag'];
+			$engine = is_string($existing['engine'] ?? null) ? $existing['engine'] : $engine;
+			$engineVersion = is_string($existing['engine_version'] ?? null) ? $existing['engine_version'] : $engineVersion;
+			$stampVersion = is_string($existing['stamp_version'] ?? null) ? $existing['stamp_version'] : $stampVersion;
+		}
+
+		// Parameters belong to the builder that created them. Binding them on the
+		// SELECT builder and executing the INSERT/UPDATE on another raises
+		// "Named parameter dcValue2 does not have a bound value" at run time —
+		// which made every finished job answer 500, on the success path as well
+		// as the failure path. Caught by the integration smoke; no unit test can
+		// see it, because it is a property of the query builder, not of our data.
+		$w = $this->db->getQueryBuilder();
+		$values = [
+			'status' => $w->createNamedParameter($status),
+			'reason' => $w->createNamedParameter($reason),
+			'engine' => $w->createNamedParameter($engine),
+			// What the engine bar is compared against: a file OCR'd below
+			// the bar is a redo candidate, not a frozen verdict.
+			'engine_version' => $w->createNamedParameter($engineVersion),
+			'stamp_version' => $w->createNamedParameter($stampVersion),
+			'path' => $w->createNamedParameter($path),
+			'size' => $w->createNamedParameter($size, IQueryBuilder::PARAM_INT),
+			'etag' => $w->createNamedParameter($etag),
+			'updated_at' => $w->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
+		];
+		if ($exists) {
+			$w->update(self::FILES);
+			foreach ($values as $column => $param) {
+				$w->set($column, $param);
+			}
+			$w->where($w->expr()->eq('file_id', $w->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)));
+		} else {
+			$w->insert(self::FILES)
+				->values($values + [
+					'file_id' => $w->createNamedParameter($fileId, IQueryBuilder::PARAM_INT),
+				]);
+		}
+		$w->executeStatement();
 	}
 }
