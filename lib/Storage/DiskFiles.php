@@ -25,6 +25,7 @@ use OCP\IDBConnection;
  */
 class DiskFiles
 {
+	private const IN_CHUNK = 900;
 	/** Extensions the pipeline reads. Mirrors `Queue::READABLE_EXTS`. */
 	public const READABLE_EXTS = ['pdf', 'jpg', 'jpeg', 'png', 'webp', 'heic'];
 
@@ -135,5 +136,26 @@ class DiskFiles
 		$this->constrain($qb, $uid);
 		$scope($qb, 'f');
 		return (int) $qb->executeQuery()->fetchOne();
+	}
+
+	public function rows(array $fileIds): array
+	{
+		$out = [];
+		foreach (array_chunk($fileIds, self::IN_CHUNK) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('fileid', 'path', 'size', 'etag', 'mtime')
+				->from('filecache')
+				->where($qb->expr()->in('fileid', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
+			foreach ($qb->executeQuery()->fetchAll() as $row) {
+				$out[] = [
+					'fileId' => (int) $row['fileid'],
+					'path' => (string) $row['path'],
+					'size' => (int) $row['size'],
+					'etag' => (string) $row['etag'],
+					'mtime' => (int) $row['mtime'],
+				];
+			}
+		}
+		return $out;
 	}
 }

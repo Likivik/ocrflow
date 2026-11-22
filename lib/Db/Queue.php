@@ -10,6 +10,8 @@ namespace OCA\OcrFlow\Db;
 use OCA\OcrFlow\Service\EnginePolicy;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
+use OCA\OcrFlow\Storage\Batch;
+use OCA\OcrFlow\Storage\DiskFiles;
 use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Storage\SettlementService;
 use OCA\OcrFlow\Storage\Ledger;
@@ -98,6 +100,10 @@ class Queue extends QBMapper
 
 	private ?SettlementService $settlementService = null;
 
+	private ?Batch $batchService = null;
+
+	private ?DiskFiles $diskFiles = null;
+
 	private StageEvents $stageEvents;
 
 	private ?EnginePolicy $enginePolicy;
@@ -129,6 +135,16 @@ class Queue extends QBMapper
 	 * policy — both already here — and because Queue's own constructor is
 	 * frozen by four test harnesses until Phase 2c deletes it.
 	 */
+	private function disk(): DiskFiles
+	{
+		return $this->diskFiles ??= new DiskFiles($this->db);
+	}
+
+	protected function batch(): Batch
+	{
+		return $this->batchService ??= new Batch($this->disk(), $this->ledger(), $this->jobs(), $this->config);
+	}
+
 	private function settlement(): SettlementService
 	{
 		return $this->settlementService ??= new SettlementService($this->db, $this->jobs(), $this->ledger(), $this->retryPolicy, $this->logger, $this->stageEvents);
@@ -631,121 +647,11 @@ class Queue extends QBMapper
 	 */
 	public function neverProcessedFor(string $uid, int $limit): array
 	{
-		$limit = max(1, $limit);
-		$ids = array_keys($this->diskFileIds($uid));
-		if ($ids === []) {
-			return ['ready' => [], 'readyTotal' => 0, 'young' => 0];
-		}
-
-		$ledger = $this->ledgerRowsFor($ids);
-		$live = $this->liveQueueFor($ids);
-
-		$ghosts = [];
-		$plain = [];
-		foreach ($ids as $fileId) {
-			if (isset($live[$fileId])) {
-				continue;
-			}
-			if (!isset($ledger[$fileId])) {
-				$plain[$fileId] = true;
-				continue;
-			}
-			// A ledger row means settled — except `file_gone`, which means the
-			// file was not there to read and is here now.
-			if (($ledger[$fileId]['reason'] ?? '') === 'error_worker_file_gone') {
-				$ghosts[$fileId] = true;
-			}
-		}
-
-		$candidates = array_keys($plain + $ghosts);
-		if ($candidates === []) {
-			return ['ready' => [], 'readyTotal' => 0, 'young' => 0];
-		}
-
-		$rows = $this->fileRowsFor($candidates);
-		$cutoff = time() - $this->scanMinAgeSeconds();
-
-		$ready = [];
-		$young = 0;
-		foreach ($rows as $row) {
-			if ((int) $row['mtime'] > $cutoff) {
-				$young++;
-				continue;
-			}
-			$ready[] = $row;
-		}
-		usort($ready, static fn (array $a, array $b): int => strcmp((string) $a['path'], (string) $b['path']));
-
-		$readyTotal = count($ready);
-		$ready = array_slice($ready, 0, $limit);
-
-		$jobIds = [];
-		$ghostIds = array_values(array_intersect(array_column($ready, 'fileId'), array_keys($ghosts)));
-		if ($ghostIds !== []) {
-			$jobIds = $this->terminalJobIdsFor($ghostIds);
-		}
-
-		$out = [];
-		foreach ($ready as $row) {
-			$fileId = (int) $row['fileId'];
-			$out[] = [
-				'fileId' => $fileId,
-				'jobId' => $jobIds[$fileId] ?? null,
-				'path' => (string) $row['path'],
-				'size' => (int) $row['size'],
-				'etag' => (string) $row['etag'],
-			];
-		}
-
-		return ['ready' => $out, 'readyTotal' => $readyTotal, 'young' => $young];
+		return $this->batch()->neverProcessedFor($uid, $limit);
 	}
 
 
 
-	/**
-	 * What this user's own history says about the cost of another batch.
-	 *
-	 * Pages are the only unit the provider bills, so an estimate built on this
-	 * account's own rows beats a constant. Both figures are omitted when there
-	 * is too little to average: a made-up number next to a paid button is worse
-	 * than an honest blank.
-	 *
-	 * @return array{avg_pages: ?float, samples: int, per_minute: ?float}
-	 */
-	public function pageStatsFor(string $uid, int $days = 30): array
-	{
-		$prefix = $uid . '/files/%';
-
-		$qb = $this->db->getQueryBuilder();
-		// No AVG in Nextcloud's function builder, and no reason to add one:
-		// SUM over COUNT is the same number and both are portable.
-		$qb->selectAlias($qb->func()->count('*'), 'n')
-			->selectAlias($qb->func()->count('pages'), 'n_pages')
-			->selectAlias($qb->func()->sum('pages'), 'sum_pages')
-			->from(self::JOBS)
-			->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_DONE)))
-			->andWhere($qb->expr()->isNotNull('pages'))
-			->andWhere($qb->expr()->like('path', $qb->createNamedParameter($prefix)))
-			->andWhere($qb->expr()->gt('finished_at', $qb->createNamedParameter(time() - $days * 86400, IQueryBuilder::PARAM_INT)));
-		$row = $qb->executeQuery()->fetch();
-		$samples = (int) ($row['n'] ?? 0);
-		$paged = (int) ($row['n_pages'] ?? 0);
-		$avg = $paged > 0 ? (float) $row['sum_pages'] / $paged : null;
-
-		$qb2 = $this->db->getQueryBuilder();
-		$qb2->selectAlias($qb2->func()->count('*'), 'n')
-			->from(self::JOBS)
-			->where($qb2->expr()->eq('status', $qb2->createNamedParameter(self::STATUS_DONE)))
-			->andWhere($qb2->expr()->like('path', $qb2->createNamedParameter($prefix)))
-			->andWhere($qb2->expr()->gt('finished_at', $qb2->createNamedParameter(time() - 3600, IQueryBuilder::PARAM_INT)));
-		$recent = (int) ($qb2->executeQuery()->fetchOne() ?? 0);
-
-		return [
-			'avg_pages' => $samples >= 20 && $avg !== null ? round((float) $avg, 1) : null,
-			'samples' => $samples,
-			'per_minute' => $recent >= 3 ? round($recent / 60, 1) : null,
-		];
-	}
 
 	/**
 	 * Queue the user's own unprocessed files, up to `$limit`.
@@ -760,7 +666,7 @@ class Queue extends QBMapper
 	 */
 	public function enqueueNeverProcessed(string $uid, int $limit, ?string $engine): array
 	{
-		$candidates = $this->neverProcessedFor($uid, $limit);
+		$candidates = $this->batch()->neverProcessedFor($uid, $limit);
 		$queued = 0;
 		$refused = 0;
 		$force = [];
@@ -794,150 +700,15 @@ class Queue extends QBMapper
 		];
 	}
 
-	/**
-	 * Path, size, etag and mtime for a set of file ids, in one read.
-	 *
-	 * @param list<int> $fileIds
-	 * @return list<array{fileId: int, path: string, size: int, etag: string, mtime: int}>
-	 */
-	protected function fileRowsFor(array $fileIds): array
-	{
-		$out = [];
-		foreach (array_chunk($fileIds, self::IN_CHUNK) as $chunk) {
-			$qb = $this->db->getQueryBuilder();
-			$qb->select('fileid', 'path', 'size', 'etag', 'mtime')
-				->from('filecache')
-				->where($qb->expr()->in('fileid', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
-			foreach ($qb->executeQuery()->fetchAll() as $row) {
-				$out[] = [
-					'fileId' => (int) $row['fileid'],
-					'path' => (string) $row['path'],
-					'size' => (int) $row['size'],
-					'etag' => (string) $row['etag'],
-					'mtime' => (int) $row['mtime'],
-				];
-			}
-		}
-		return $out;
-	}
-
-	/**
-	 * The newest terminal job row per file — the id `forceRequeue()` needs.
-	 *
-	 * @param list<int> $fileIds
-	 * @return array<int, int> file id => job id
-	 */
-	protected function terminalJobIdsFor(array $fileIds): array
-	{
-		$out = [];
-		foreach (array_chunk($fileIds, self::IN_CHUNK) as $chunk) {
-			$qb = $this->db->getQueryBuilder();
-			$qb->select('file_id')
-				->selectAlias($qb->func()->max('id'), 'job_id')
-				->from(self::JOBS)
-				->where($qb->expr()->in('file_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
-				->andWhere($qb->expr()->in('status', $qb->createNamedParameter(
-					[self::STATUS_DONE, self::STATUS_SKIPPED, self::STATUS_ERROR],
-					IQueryBuilder::PARAM_STR_ARRAY,
-				)))
-				->groupBy('file_id');
-			foreach ($qb->executeQuery()->fetchAll() as $row) {
-				$out[(int) $row['file_id']] = (int) $row['job_id'];
-			}
-		}
-		return $out;
-	}
-
-	/**
-	 * How long a file must sit untouched before a scan may queue it.
-	 *
-	 * Same setting `ScanJob` reads, and the same fallback: a value that is not a
-	 * positive integer means "unset", never "zero".
-	 */
-	protected function scanMinAgeSeconds(): int
-	{
-		if ($this->config === null) {
-			return 120;
-		}
-		$raw = trim((string) $this->config->getAppValue('ocrflow', 'scan_min_age_seconds', '120'));
-		return ctype_digit($raw) && (int) $raw > 0 ? (int) $raw : 120;
-	}
-
-	/**
-	 * Files with a live worker task right now.
-	 *
-	 * @param list<int> $fileIds
-	 * @return array<int, string> file id => 'queued'|'claimed'
-	 */
-	protected function liveQueueFor(array $fileIds): array
-	{
-		$out = [];
-		foreach (array_chunk($fileIds, self::IN_CHUNK) as $chunk) {
-			$qb = $this->db->getQueryBuilder();
-			$qb->select('file_id', 'status')
-				->from(self::JOBS)
-				->where($qb->expr()->in('status', $qb->createNamedParameter(
-					[self::STATUS_QUEUED, self::STATUS_CLAIMED],
-					IQueryBuilder::PARAM_STR_ARRAY,
-				)))
-				->andWhere($qb->expr()->in('file_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
-			foreach ($qb->executeQuery()->fetchAll() as $row) {
-				$fileId = (int) $row['file_id'];
-				// A claim outranks a queued row for the same file.
-				if (($out[$fileId] ?? '') !== self::STATUS_CLAIMED) {
-					$out[$fileId] = (string) $row['status'];
-				}
-			}
-		}
-		return $out;
-	}
-
-	protected function ledgerRowsFor(array $fileIds): array
-	{
-		return $this->ledger()->ledgerRowsFor($fileIds);
-	}
-
 
 	public function ledgerDrift(int $limit = 500): array
 	{
 		return $this->ledger()->ledgerDrift($limit);
 	}
 
-	/**
-	 * Processable files on disk for this user: fileid => size.
-	 *
-	 * @return array<int, int>
-	 */
-	protected function diskFileIds(string $uid): array
-	{
-		$qb = $this->db->getQueryBuilder();
-		$qb->select('f.fileid')
-			->from('filecache', 'f')
-			->innerJoin('f', 'storages', 's', $qb->expr()->eq('s.numeric_id', 'f.storage'))
-			->where($qb->expr()->eq('s.id', $qb->createNamedParameter('home::' . $uid)))
-			->andWhere($qb->expr()->like('f.path', $qb->createNamedParameter('files/%')))
-			->andWhere($qb->expr()->gt('f.size', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT)))
-			->andWhere($qb->expr()->orX(...$this->extPredicates($qb)));
-		$out = [];
-		foreach ($qb->executeQuery()->fetchAll() as $row) {
-			$out[(int) $row['fileid']] = 1;
-		}
-		return $out;
-	}
 
 
 
-	/**
-	 * @return list<\OCP\DB\QueryBuilder\ICompositeExpression|string>
-	 */
-	private function extPredicates(IQueryBuilder $qb): array
-	{
-		$out = [];
-		foreach (self::READABLE_EXTS as $ext) {
-			$out[] = $qb->expr()->like($qb->func()->lower('f.name'), $qb->createNamedParameter('%.' . $ext));
-		}
-		return $out;
-	}
 	public function counts(): array
 	{
 		return $this->jobs()->counts();

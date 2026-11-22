@@ -718,4 +718,48 @@ class JobStore
 			->where($qb->expr()->in('id', $qb->createNamedParameter($ids, IQueryBuilder::PARAM_INT_ARRAY)));
 		return $qb->executeStatement();
 	}
+
+	public function liveQueueFor(array $fileIds): array
+	{
+		$out = [];
+		foreach (array_chunk($fileIds, self::IN_CHUNK) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('file_id', 'status')
+				->from(self::JOBS)
+				->where($qb->expr()->in('status', $qb->createNamedParameter(
+					[self::STATUS_QUEUED, self::STATUS_CLAIMED],
+					IQueryBuilder::PARAM_STR_ARRAY,
+				)))
+				->andWhere($qb->expr()->in('file_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
+			foreach ($qb->executeQuery()->fetchAll() as $row) {
+				$fileId = (int) $row['file_id'];
+				// A claim outranks a queued row for the same file.
+				if (($out[$fileId] ?? '') !== self::STATUS_CLAIMED) {
+					$out[$fileId] = (string) $row['status'];
+				}
+			}
+		}
+		return $out;
+	}
+
+	public function terminalJobIdsFor(array $fileIds): array
+	{
+		$out = [];
+		foreach (array_chunk($fileIds, self::IN_CHUNK) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('file_id')
+				->selectAlias($qb->func()->max('id'), 'job_id')
+				->from(self::JOBS)
+				->where($qb->expr()->in('file_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)))
+				->andWhere($qb->expr()->in('status', $qb->createNamedParameter(
+					[self::STATUS_DONE, self::STATUS_SKIPPED, self::STATUS_ERROR],
+					IQueryBuilder::PARAM_STR_ARRAY,
+				)))
+				->groupBy('file_id');
+			foreach ($qb->executeQuery()->fetchAll() as $row) {
+				$out[(int) $row['file_id']] = (int) $row['job_id'];
+			}
+		}
+		return $out;
+	}
 }

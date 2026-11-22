@@ -16,6 +16,10 @@ written.
 
 ### Added
 
+- **Phase 2e: candidate selection and the cost estimate are their own classes.**
+  `Batch` owns `neverProcessedFor` (who the process button may take, and in
+  what order) and the scan-age gate; `PanelReport` owns `pageStatsFor` (what
+  another batch will cost). `Queue` delegates. `Queue.php` 1019 → 923 lines.
 - **Phase 2d: the settle transaction has one owner.** `SettlementService` now
   holds `finish`, `settleProduced` and the stage writers, and calls
   `Ledger::recordFile`/`writeLedger` (which moved into `Ledger`) — one result,

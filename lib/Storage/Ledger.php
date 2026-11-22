@@ -164,7 +164,7 @@ class Ledger
 	 * @param list<int> $fileIds
 	 * @return array<int, array{status: mixed, reason: mixed, engine: mixed, engine_version: mixed}>
 	 */
-	protected function ledgerRowsFor(array $fileIds): array
+	public function ledgerRowsFor(array $fileIds): array
 	{
 		$out = [];
 		foreach (array_chunk($fileIds, self::IN_CHUNK) as $chunk) {
