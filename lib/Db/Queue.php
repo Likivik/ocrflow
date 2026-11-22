@@ -900,92 +900,6 @@ class Queue extends QBMapper
 	 */
 	public const READABLE_EXTS = ['pdf', 'jpg', 'jpeg', 'png', 'webp', 'heic'];
 
-	/**
-	 * Everything the panel needs, counted per FILE.
-	 *
-	 * Rows were the old unit and they lied three ways: a file read once and
-	 * refused once counted twice; `status` put 5 damaged and 2 empty files in
-	 * the skip block; and "done" described our activity instead of the file.
-	 *
-	 * So: the on-disk set comes from `filecache` (no filesystem walk — Nextcloud
-	 * already knows every file), each file is described by its **latest** job
-	 * row, and a file with no row at all is "not processed yet".
-	 *
-	 * @return array{
-	 *   total: int, never_processed: int, empty: int, unreadable_format: int,
-	 *   queue: array{queued: int, claimed: int},
-	 *   by_code: array<string, int>,
-	 *   read_by_engine: list<array{engine: ?string, version: ?string, count: int}>,
-	 *   no_text_by_engine: list<array{engine: ?string, version: ?string, count: int}>
-	 * }
-	 */
-	public function fileReport(string $uid): array
-	{
-		$ids = $this->diskFileIds($uid);
-		$ledger = $this->ledgerRowsFor(array_keys($ids));
-		// The queue is live state: a row is queued or claimed because a worker
-		// task exists right now. The ledger records what settled, so it cannot
-		// answer this — a file re-queued for re-OCR still reads "skipped" there
-		// until the worker finishes with it. Asking the ledger is how the panel
-		// came to say "In the queue 0" while 592 files sat in the queue.
-		$live = $this->liveQueueFor(array_keys($ids));
-
-		$byCode = [];
-		$queue = ['queued' => 0, 'claimed' => 0];
-		$readEngines = [];
-		$noTextEngines = [];
-		$settled = 0;
-		foreach ($ledger as $fileId => $row) {
-			if (isset($live[$fileId])) {
-				$queue[$live[$fileId]]++;
-				continue;
-			}
-			$code = $row['reason'] === null ? '' : (string) $row['reason'];
-			// The file vanished between enqueue and fetch, so it was never read
-			// for these bytes. This report is built from filecache, so a row
-			// still in it describes a file that is back on disk: an unprocessed
-			// file, not an error. It gets no error row and does not count as
-			// settled — the `never_processed` subtraction below already covers
-			// it, because it never entered `$settled`.
-			if ($code === 'error_worker_file_gone') {
-				continue;
-			}
-			$settled++;
-			$byCode[$code] = ($byCode[$code] ?? 0) + 1;
-			$engineKey = ($row['engine'] ?? '') . '|' . ($row['engine_version'] ?? '');
-			// "Read, nothing to transcribe" is still a read, and the reader is
-			// the fact the owner cares about: it is split by engine like every
-			// other read.
-			if ($code === '' || $code === 'skip_ocred_by_ocrflow') {
-				$readEngines[$engineKey] = ($readEngines[$engineKey] ?? 0) + 1;
-			}
-			// Split by engine only: the row reads "by google, no text to
-			// transcribe", so two versions of one engine must not become two
-			// rows with one label.
-			if ($code === 'skip_ocred_by_ocrflow_found_nothing') {
-				$reader = $row['engine'] ?? '';
-				$noTextEngines[$reader . '|'] = ($noTextEngines[$reader . '|'] ?? 0) + 1;
-			}
-		}
-		foreach ($live as $fileId => $status) {
-			if (!isset($ledger[$fileId])) {
-				$queue[$status]++;
-			}
-		}
-
-		return [
-			'total' => count($ids),
-			// No ledger row and no live row: a file in our formats nobody has
-			// queued yet.
-			'never_processed' => count($ids) - $settled - count($live),
-			'empty' => $this->emptyCount($uid),
-			'unreadable_format' => $this->unreadableFormatCount($uid),
-			'queue' => $queue,
-			'by_code' => $byCode,
-			'read_by_engine' => $this->engineSplit($readEngines),
-			'no_text_by_engine' => $this->engineSplit($noTextEngines),
-		];
-	}
 
 
 	/**
@@ -1273,24 +1187,6 @@ class Queue extends QBMapper
 		return $this->ledger()->ledgerRowsFor($fileIds);
 	}
 
-	/**
-	 * @param array<string, int> $counts key: engine|version
-	 * @return list<array{engine: ?string, version: ?string, count: int}>
-	 */
-	private function engineSplit(array $counts): array
-	{
-		$out = [];
-		foreach ($counts as $key => $count) {
-			[$engine, $version] = explode('|', $key, 2);
-			$out[] = [
-				'engine' => $engine === '' ? null : $engine,
-				'version' => $version === '' ? null : $version,
-				'count' => $count,
-			];
-		}
-		usort($out, static fn (array $a, array $b): int => $b['count'] <=> $a['count']);
-		return $out;
-	}
 
 	public function ledgerDrift(int $limit = 500): array
 	{
@@ -1319,40 +1215,7 @@ class Queue extends QBMapper
 		return $out;
 	}
 
-	/**
-	 * @return array<string, mixed>
-	 */
-	protected function emptyCount(string $uid): int
-	{
-		$qb = $this->db->getQueryBuilder();
-		$qb->selectAlias($qb->func()->count('*'), 'n')
-			->from('filecache', 'f')
-			->innerJoin('f', 'storages', 's', $qb->expr()->eq('s.numeric_id', 'f.storage'))
-			->where($qb->expr()->eq('s.id', $qb->createNamedParameter('home::' . $uid)))
-			->andWhere($qb->expr()->like('f.path', $qb->createNamedParameter('files/%')))
-			->andWhere($qb->expr()->eq('f.size', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT)))
-			->andWhere($qb->expr()->orX(...$this->extPredicates($qb)));
-		return (int) $qb->executeQuery()->fetchOne();
-	}
 
-	/**
-	 * Files on disk in a format the pipeline does not read (TIFF today).
-	 */
-	protected function unreadableFormatCount(string $uid): int
-	{
-		$qb = $this->db->getQueryBuilder();
-		$qb->selectAlias($qb->func()->count('*'), 'n')
-			->from('filecache', 'f')
-			->innerJoin('f', 'storages', 's', $qb->expr()->eq('s.numeric_id', 'f.storage'))
-			->where($qb->expr()->eq('s.id', $qb->createNamedParameter('home::' . $uid)))
-			->andWhere($qb->expr()->like('f.path', $qb->createNamedParameter('files/%')))
-			->andWhere($qb->expr()->gt('f.size', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT)))
-			->andWhere($qb->expr()->orX(
-				$qb->expr()->like($qb->func()->lower('f.name'), $qb->createNamedParameter('%.tif')),
-				$qb->expr()->like($qb->func()->lower('f.name'), $qb->createNamedParameter('%.tiff')),
-			));
-		return (int) $qb->executeQuery()->fetchOne();
-	}
 
 	/**
 	 * @return list<\OCP\DB\QueryBuilder\ICompositeExpression|string>
