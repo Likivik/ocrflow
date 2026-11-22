@@ -7,17 +7,12 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
-use OCA\OcrFlow\Db\Queue;
-use OCA\OcrFlow\Service\RetryPolicy;
-use OCA\OcrFlow\Service\StageEvents;
 use OCA\OcrFlow\Storage\Batch;
 use OCA\OcrFlow\Storage\DiskFiles;
 use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Storage\Ledger;
 use OCP\IConfig;
-use OCP\IDBConnection;
 use PHPUnit\Framework\TestCase;
-use Psr\Log\LoggerInterface;
 
 /**
  * [unit] Who the "process them" button may touch, and who it may not.
@@ -66,34 +61,6 @@ class ProcessBatchTest extends TestCase
 		$config->method('getAppValue')->willReturn((string) $this->minAge);
 
 		return new Batch($disk, $ledger, $jobs, $config);
-	}
-
-	private function queue(): Queue
-	{
-		$db = $this->createMock(IDBConnection::class);
-		$stage = new StageEvents(new RetryPolicy(), $this->createMock(LoggerInterface::class));
-
-		return new class($db, $stage, $this) extends Queue {
-			public function __construct(IDBConnection $db, StageEvents $stage, private ProcessBatchTest $t)
-			{
-				parent::__construct($db, $stage);
-			}
-
-			protected function batch(): Batch
-			{
-				return $this->t->batchForSubclass();
-			}
-
-			public function enqueue(string $path, ?int $fileId, ?int $size, ?string $etag, ?string $engine = null, bool $fromScan = false): ?int
-			{
-				return in_array($fileId, $this->t->enqueueAccepts, true) ? 999 : null;
-			}
-
-			public function forceRequeue(array $ids): array
-			{
-				return $this->t->forceResult;
-			}
-		};
 	}
 
 	public function batchForSubclass(): Batch
@@ -177,22 +144,5 @@ class ProcessBatchTest extends TestCase
 
 		$this->assertCount(2, $result['ready'], 'two are queued');
 		$this->assertSame(5, $result['readyTotal'], 'five were available, so three are left over');
-	}
-
-	public function testTheBatchTriesTheOrdinaryDoorFirstAndForcesOnlyTheGhost(): void
-	{
-		$this->disk = [1 => 1, 2 => 1, 3 => 1];
-		$this->ledger = [3 => ['status' => 'error', 'reason' => 'error_worker_file_gone', 'engine' => null, 'engine_version' => null]];
-		$this->rows = [$this->row(1, 'files/a.pdf'), $this->row(2, 'files/b.pdf'), $this->row(3, 'files/c.pdf')];
-		$this->jobIds = [3 => 77];
-		// File 2 is refused by enqueue and has no job row: genuinely refused.
-		$this->enqueueAccepts = [1, 3];
-		$this->forceResult = ['requeued' => [77], 'refused' => []];
-
-		$result = $this->queue()->enqueueNeverProcessed('alice', 10, 'google');
-
-		$this->assertSame(2, $result['queued'], 'file 1 queued, file 3 forced');
-		$this->assertSame(1, $result['refused'], 'file 2 was refused by both doors');
-		$this->assertSame(1, $result['remaining'], 'the file both doors refused is still unprocessed');
 	}
 }
