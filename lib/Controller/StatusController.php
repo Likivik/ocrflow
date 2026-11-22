@@ -80,7 +80,7 @@ class StatusController extends OCSController
 				'max_files' => $this->processMaxFiles(),
 				'daily_used' => $this->dailyUsed($this->uid()),
 				'daily_cap' => $this->dailyCap(),
-				'estimate' => $this->queue->pageStatsFor($this->uid()),
+				'estimate' => $this->panelReport->pageStatsFor($this->uid()),
 			],
 			// Whether the instance will do OCR at all. The sidebar can say
 			// "not configured" instead of offering a button that queues nothing.

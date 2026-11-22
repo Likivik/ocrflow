@@ -33,6 +33,7 @@ class PanelReport
 
 	private const STATUS_QUEUED = 'queued';
 	private const STATUS_CLAIMED = 'claimed';
+	private const STATUS_DONE = 'done';
 
 	private const FILES = 'ocrflow_files';
 
@@ -224,5 +225,40 @@ class PanelReport
 				?: ((string) ($a['version'] ?? '') <=> (string) ($b['version'] ?? ''));
 		});
 		return $out;
+	}
+
+	public function pageStatsFor(string $uid, int $days = 30): array
+	{
+		$prefix = $uid . '/files/%';
+
+		$qb = $this->db->getQueryBuilder();
+		// No AVG in Nextcloud's function builder, and no reason to add one:
+		// SUM over COUNT is the same number and both are portable.
+		$qb->selectAlias($qb->func()->count('*'), 'n')
+			->selectAlias($qb->func()->count('pages'), 'n_pages')
+			->selectAlias($qb->func()->sum('pages'), 'sum_pages')
+			->from(self::JOBS)
+			->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_DONE)))
+			->andWhere($qb->expr()->isNotNull('pages'))
+			->andWhere($qb->expr()->like('path', $qb->createNamedParameter($prefix)))
+			->andWhere($qb->expr()->gt('finished_at', $qb->createNamedParameter(time() - $days * 86400, IQueryBuilder::PARAM_INT)));
+		$row = $qb->executeQuery()->fetch();
+		$samples = (int) ($row['n'] ?? 0);
+		$paged = (int) ($row['n_pages'] ?? 0);
+		$avg = $paged > 0 ? (float) $row['sum_pages'] / $paged : null;
+
+		$qb2 = $this->db->getQueryBuilder();
+		$qb2->selectAlias($qb2->func()->count('*'), 'n')
+			->from(self::JOBS)
+			->where($qb2->expr()->eq('status', $qb2->createNamedParameter(self::STATUS_DONE)))
+			->andWhere($qb2->expr()->like('path', $qb2->createNamedParameter($prefix)))
+			->andWhere($qb2->expr()->gt('finished_at', $qb2->createNamedParameter(time() - 3600, IQueryBuilder::PARAM_INT)));
+		$recent = (int) ($qb2->executeQuery()->fetchOne() ?? 0);
+
+		return [
+			'avg_pages' => $samples >= 20 && $avg !== null ? round((float) $avg, 1) : null,
+			'samples' => $samples,
+			'per_minute' => $recent >= 3 ? round($recent / 60, 1) : null,
+		];
 	}
 }
