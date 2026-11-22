@@ -118,4 +118,16 @@ class PanelReportTest extends TestCase
 			['engine' => 'google', 'version' => null, 'count' => 5],
 		], $report['no_text_by_engine'], 'two versions of one reader are one row');
 	}
+
+	public function testAStaleJobReferenceStaysVisible(): void
+	{
+		// `error_worker_job_reference_stale` means the row lost its job, not
+		// that the file is fine. It stays an error the owner can see.
+		$report = $this->report(10, [
+			['reason' => 'error_worker_job_reference_stale', 'engine' => null, 'version' => null, 'count' => 1],
+		]);
+
+		$this->assertSame(1, $report['by_code']['error_worker_job_reference_stale'] ?? 0);
+		$this->assertSame(9, $report['never_processed']);
+	}
 }

@@ -5,6 +5,15 @@ written.
 
 ## Unreleased
 
+### Removed
+
+- **Phase 2c: the id-list report is deleted.** `Queue::fileReport()` and its
+  four readers (`engineSplit`, `emptyCount`, `unreadableFormatCount`) are gone —
+  nothing in `lib/` had called them since 0.1.46 put the panel on aggregates.
+  `NeverProcessedTest` went with them; the one case it held that
+  `PanelReportTest` did not (a stale job reference staying visible) was ported
+  there. `Queue.php` 1446 → 1309 lines.
+
 ### Added
 
 - **Phase 2b: the job log is a class.** Twenty-two `ocrflow_jobs` operations
