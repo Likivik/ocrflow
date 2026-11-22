@@ -16,6 +16,12 @@ written.
 
 ### Added
 
+- **Phase 2g: the inventory is a test.** `QueueInventoryTest` asserts all 62
+  Phase 2 names have exactly one home and that `Queue` only delegates what it
+  still declares. It immediately found three methods still carrying real SQL in
+  `Queue` (`selectOrphanStageIds`, `selectStageIdsForJobs`,
+  `deleteStageRowsById`) — dead duplicates of `JobStore`'s copies; deleted.
+  `Queue.php` 644 → 588 lines.
 - **Phase 2f: the enqueue policy is its own class.** `EnqueueService` owns
   `enqueue` — the six refusals and the engine decision — and
   `enqueueNeverProcessed`, the two-door batch. `Queue` delegates; `Queue.php`

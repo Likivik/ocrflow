@@ -340,13 +340,6 @@ class Queue extends QBMapper
 		return $this->jobs()->deleteTerminalForFile($fileId);
 	}
 
-	private function etagPredicate(IQueryBuilder $qb, ?string $etag): string
-	{
-		return $etag === null
-			? $qb->expr()->isNull('etag')
-			: $qb->expr()->eq('etag', $qb->createNamedParameter($etag));
-	}
-
 	public function deleteQueuedForFile(int $fileId): int
 	{
 		return $this->jobs()->deleteQueuedForFile($fileId);
@@ -590,62 +583,6 @@ class Queue extends QBMapper
 		return $this->jobs()->purgeablePredicate($qb);
 	}
 
-	/**
-	 * Ids of stage rows whose job is gone and that predate the cutoff.
-	 *
-	 * @return list<int>
-	 * @throws Exception
-	 */
-	protected function selectOrphanStageIds(int $cutoff, int $limit): array
-	{
-		$qb = $this->db->getQueryBuilder();
-		// A DATETIME column wants the object, not a formatted string.
-		$cutoffDate = \DateTime::createFromFormat('U', (string) $cutoff);
-		$qb->select('se.id')
-			->from(self::STAGE_EVENTS, 'se')
-			->leftJoin('se', self::JOBS, 'j', $qb->expr()->eq('j.id', 'se.job_id'))
-			->where($qb->expr()->isNull('j.id'))
-			->andWhere($qb->expr()->lt('se.created_at', $qb->createNamedParameter($cutoffDate, IQueryBuilder::PARAM_DATETIME_MUTABLE)))
-			->orderBy('se.id', 'ASC')
-			->setMaxResults($limit);
-		return array_map(intval(...), array_column($qb->executeQuery()->fetchAll(), 'id'));
-	}
 
-	/**
-	 * @param list<int> $jobIds
-	 * @return list<int>
-	 * @throws Exception
-	 */
-	protected function selectStageIdsForJobs(array $jobIds): array
-	{
-		if ($jobIds === []) {
-			return [];
-		}
-		$qb = $this->db->getQueryBuilder();
-		$qb->select('id')->from(self::STAGE_EVENTS)
-			->where($qb->expr()->in('job_id', $qb->createNamedParameter($jobIds, IQueryBuilder::PARAM_INT_ARRAY)))
-			->orderBy('id', 'ASC')
-			->setMaxResults(PHP_INT_MAX);
-		return array_map(intval(...), array_column($qb->executeQuery()->fetchAll(), 'id'));
-	}
 
-	protected function deleteJobsById(array $ids): int
-	{
-		return $this->jobs()->deleteJobsById($ids);
-	}
-
-	/**
-	 * @param list<int> $ids
-	 * @throws Exception
-	 */
-	protected function deleteStageRowsById(array $ids): int
-	{
-		if ($ids === []) {
-			return 0;
-		}
-		$qb = $this->db->getQueryBuilder();
-		$qb->delete(self::STAGE_EVENTS)
-			->where($qb->expr()->in('id', $qb->createNamedParameter($ids, IQueryBuilder::PARAM_INT_ARRAY)));
-		return $qb->executeStatement();
-	}
 }
