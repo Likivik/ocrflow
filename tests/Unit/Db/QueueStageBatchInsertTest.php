@@ -7,9 +7,11 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
-use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCP\DB\Exception as DbException;
 use OCP\DB\IResult;
 use OCP\DB\QueryBuilder\IExpressionBuilder;
@@ -163,9 +165,17 @@ class QueueStageBatchInsertTest extends TestCase
 		];
 	}
 
-	private function queue(IDBConnection $db, LoggerInterface $logger): Queue
+	private function settlement(IDBConnection $db, LoggerInterface $logger): SettlementService
 	{
-		return new Queue($db, new StageEvents(new RetryPolicy(), $logger), $logger);
+		$retryPolicy = new RetryPolicy();
+		return new SettlementService(
+			$db,
+			new JobStore($db, $retryPolicy),
+			new Ledger($db, $retryPolicy),
+			$retryPolicy,
+			$logger,
+			new StageEvents($retryPolicy, $logger),
+		);
 	}
 
 	/**
@@ -198,7 +208,7 @@ class QueueStageBatchInsertTest extends TestCase
 		$this->jobRow = $this->jobRow();
 		$logger = $this->createMock(LoggerInterface::class);
 
-		$applied = $this->queue($this->db(), $logger)->finish(7, [
+		$applied = $this->settlement($this->db(), $logger)->finish(7, [
 			'status' => 'done',
 			'stage_events' => $this->events(6),
 		], 'worker-1');
@@ -223,7 +233,7 @@ class QueueStageBatchInsertTest extends TestCase
 		$this->jobRow = $this->jobRow();
 		$logger = $this->createMock(LoggerInterface::class);
 
-		$applied = $this->queue($this->db(), $logger)->finish(7, [
+		$applied = $this->settlement($this->db(), $logger)->finish(7, [
 			'status' => 'done',
 			'stage_events' => [],
 		], 'worker-1');
@@ -239,7 +249,7 @@ class QueueStageBatchInsertTest extends TestCase
 		$this->jobRow = $this->jobRow();
 		$logger = $this->createMock(LoggerInterface::class);
 
-		$applied = $this->queue($this->db(), $logger)->finish(7, [
+		$applied = $this->settlement($this->db(), $logger)->finish(7, [
 			'status' => 'done',
 			'stage_events' => [
 				['stage' => 'recognize', 'reason_code' => null, 'duration_ms' => 5, 'cost_pages' => 2],
@@ -268,10 +278,10 @@ class QueueStageBatchInsertTest extends TestCase
 			$rows[] = ['stage' => 'recognize', 'reason_code' => null, 'duration_ms' => $i, 'cost_pages' => null];
 		}
 
-		$queue = $this->queue($this->db(), $this->createMock(LoggerInterface::class));
-		$method = new \ReflectionMethod(Queue::class, 'insertStageRows');
+		$settlement = $this->settlement($this->db(), $this->createMock(LoggerInterface::class));
+		$method = new \ReflectionMethod(SettlementService::class, 'insertStageRows');
 		$method->setAccessible(true);
-		$method->invoke($queue, 7, $rows);
+		$method->invoke($settlement, 7, $rows);
 
 		$sql = $this->insertSql();
 		$this->assertCount(2, $sql, '501 rows at a chunk size of 500 must be two statements');
@@ -292,7 +302,7 @@ class QueueStageBatchInsertTest extends TestCase
 		$logger = $this->createMock(LoggerInterface::class);
 		$logger->expects($this->exactly(2))->method('warning');
 
-		$applied = $this->queue($this->db(), $logger)->finish(7, [
+		$applied = $this->settlement($this->db(), $logger)->finish(7, [
 			'status' => 'done',
 			'stage_events' => [
 				['stage' => 'recognize', 'reason_code' => null, 'duration_ms' => 1],

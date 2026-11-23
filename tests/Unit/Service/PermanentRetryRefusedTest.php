@@ -8,7 +8,9 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Tests\Unit\Service;
 
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\Attention;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\IConfig;
@@ -30,16 +32,22 @@ use Psr\Log\NullLogger;
  */
 class PermanentRetryRefusedTest extends TestCase
 {
-	/** @var Queue&MockObject */
-	private Queue $queue;
+	/** @var JobStore&MockObject */
+	private JobStore $jobs;
+	/** @var Ledger&MockObject */
+	private Ledger $ledger;
+	/** @var EnqueueService&MockObject */
+	private EnqueueService $enqueue;
 	private Attention $attention;
 
 	protected function setUp(): void
 	{
-		$this->queue = $this->createMock(Queue::class);
+		$this->jobs = $this->createMock(JobStore::class);
+		$this->ledger = $this->createMock(Ledger::class);
+		$this->enqueue = $this->createMock(EnqueueService::class);
 		$config = $this->createMock(IConfig::class);
 		$config->method('getAppValue')->willReturn('500');
-		$this->attention = new Attention($this->queue, new RetryPolicy(), $config, new NullLogger());
+		$this->attention = new Attention($this->jobs, $this->ledger, $this->enqueue, new RetryPolicy(), $config, new NullLogger());
 	}
 
 	private function job(string $code, string $reason): Job
@@ -68,8 +76,8 @@ class PermanentRetryRefusedTest extends TestCase
 
 	public function testADamagedFileIsRefusedWithoutQueueingAnything(): void
 	{
-		$this->queue->method('getById')->with(11)->willReturn($this->job('error_file_broken', 'broken_pdf'));
-		$this->queue->expects($this->never())->method('enqueue');
+		$this->jobs->method('getById')->with(11)->willReturn($this->job('error_file_broken', 'broken_pdf'));
+		$this->enqueue->expects($this->never())->method('enqueue');
 
 		self::assertFalse(
 			$this->attention->retryById(11),
@@ -79,24 +87,24 @@ class PermanentRetryRefusedTest extends TestCase
 
 	public function testAZeroByteSourceIsRefusedWithoutQueueingAnything(): void
 	{
-		$this->queue->method('getById')->with(11)->willReturn($this->job('error_source_file_zero_bytes', 'empty_source'));
-		$this->queue->expects($this->never())->method('enqueue');
+		$this->jobs->method('getById')->with(11)->willReturn($this->job('error_source_file_zero_bytes', 'empty_source'));
+		$this->enqueue->expects($this->never())->method('enqueue');
 
 		self::assertFalse($this->attention->retryById(11));
 	}
 
 	public function testATransientFailureStillQueuesAnotherAttempt(): void
 	{
-		$this->queue->method('getById')->with(11)->willReturn($this->job('error_provider_timed_out', 'engine_timeout'));
-		$this->queue->method('deleteTerminalForFile')->willReturn(1);
-		$this->queue->method('findFileByPath')->willReturn([
+		$this->jobs->method('getById')->with(11)->willReturn($this->job('error_provider_timed_out', 'engine_timeout'));
+		$this->jobs->method('deleteTerminalForFile')->willReturn(1);
+		$this->ledger->method('findFileByPath')->willReturn([
 			'file_id' => 7,
 			'path' => '/bob/files/broken.pdf',
 			'status' => 'needs_fix',
 			'reason' => 'engine_timeout',
 			'etag' => 'abc123',
 		]);
-		$this->queue->expects($this->once())->method('enqueue')->with('/bob/files/broken.pdf', 7, null, 'abc123');
+		$this->enqueue->expects($this->once())->method('enqueue')->with('/bob/files/broken.pdf', 7, null, 'abc123');
 
 		self::assertTrue(
 			$this->attention->retryById(11),

@@ -7,7 +7,9 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Service;
 
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\Attention;
 use OCA\OcrFlow\Service\Outcomes;
 use OCA\OcrFlow\Service\PendingResults;
@@ -52,8 +54,18 @@ class StoreOutcomes extends Outcomes
 		?Attention $attention = null,
 	) {
 		$this->storeAttention = $attention ?? new StoreAttention(
-			new class () extends Queue {
-				/** no database: the seams below never reach it */
+			// No database: the seam methods are overridden and never reach these.
+			new class () extends JobStore {
+				public function __construct()
+				{
+				}
+			},
+			new class () extends Ledger {
+				public function __construct()
+				{
+				}
+			},
+			new class () extends EnqueueService {
 				public function __construct()
 				{
 				}

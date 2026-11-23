@@ -10,7 +10,8 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\AppFramework\Http;
@@ -28,7 +29,7 @@ use Psr\Log\LoggerInterface;
  */
 class QueueControllerTest extends TestCase
 {
-    private function controller(string $configuredSecret, ?string $givenSecret, ?Queue $queue = null): QueueController
+    private function controller(string $configuredSecret, ?string $givenSecret, ?JobStore $jobStore = null, ?SettlementService $settlement = null): QueueController
     {
         $config = $this->createMock(IConfig::class);
         $config->method('getAppValue')
@@ -47,7 +48,8 @@ class QueueControllerTest extends TestCase
         return new QueueController(
             Application::APP_ID,
             $request,
-            $queue ?? $this->createMock(Queue::class),
+            $jobStore ?? $this->createMock(JobStore::class),
+            $settlement ?? $this->createMock(SettlementService::class),
             $config,
             $this->createMock(LoggerInterface::class),
             $this->createMock(FileExchange::class),
@@ -64,7 +66,7 @@ class QueueControllerTest extends TestCase
         $job = new Job();
         $job->setId(7);
         $job->setPath('/u/files/a.pdf');
-        $job->setStatus(Queue::STATUS_CLAIMED);
+        $job->setStatus(JobStore::STATUS_CLAIMED);
         $job->setClaimToken($token);
         return $job;
     }
@@ -95,10 +97,11 @@ class QueueControllerTest extends TestCase
 
     public function testCorrectSecretWithAnEmptyQueueAnswersNoContent(): void
     {
-        $queue = $this->createMock(Queue::class);
-        $queue->expects($this->once())->method('claim')->willReturn(null);
+        $jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+        $jobStore->expects($this->once())->method('claim')->willReturn(null);
 
-        $response = $this->controller('s3cret', 's3cret', $queue)->claim();
+        $response = $this->controller('s3cret', 's3cret', $jobStore, $settlement)->claim();
 
         // 204, not 200-with-empty-body: the worker must be able to tell "nothing
         // to do" from "the call failed" without parsing a body.
@@ -114,10 +117,11 @@ class QueueControllerTest extends TestCase
      */
     public function testFailureWithAnUnrecognizedReasonCodeStoresTheCanonicalCodeAndDoesNotRetry(): void
     {
-        $queue = $this->createMock(Queue::class);
-        $queue->method('getById')->willReturn($this->claimedJob('tok-7'));
+        $jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+        $jobStore->method('getById')->willReturn($this->claimedJob('tok-7'));
         $captured = null;
-        $queue->expects($this->once())
+        $settlement->expects($this->once())
             ->method('finish')
             ->with(7, $this->callback(function (array $payload) use (&$captured): bool {
                 $captured = $payload;
@@ -149,7 +153,8 @@ class QueueControllerTest extends TestCase
         $controller = new QueueController(
             Application::APP_ID,
             $request,
-            $queue,
+            $jobStore,
+            $settlement,
             $config,
             $this->createMock(LoggerInterface::class),
             $this->createMock(FileExchange::class),
@@ -159,7 +164,7 @@ class QueueControllerTest extends TestCase
 
         $data = $controller->failure(7)->getData();
         $this->assertTrue($data['applied']);
-        $this->assertSame(Queue::STATUS_ERROR, $captured['status']);
+        $this->assertSame(JobStore::STATUS_ERROR, $captured['status']);
         $this->assertSame(
             'error_worker_sent_unknown_code',
             $captured['reason_code'],
@@ -187,10 +192,11 @@ class QueueControllerTest extends TestCase
 
     public function testFileEndpointReportsAMissingJob(): void
     {
-        $queue = $this->createMock(Queue::class);
-        $queue->expects($this->once())->method('getById')->with(42)->willReturn(null);
+        $jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+        $jobStore->expects($this->once())->method('getById')->with(42)->willReturn(null);
 
-        $response = $this->controller('s3cret', 's3cret', $queue)->file(42);
+        $response = $this->controller('s3cret', 's3cret', $jobStore, $settlement)->file(42);
 
         $this->assertSame(Http::STATUS_NOT_FOUND, $response->getStatus());
     }
@@ -232,10 +238,11 @@ class QueueControllerTest extends TestCase
 
     public function testPutFileReportsAMissingJob(): void
     {
-        $queue = $this->createMock(Queue::class);
-        $queue->expects($this->once())->method('getById')->with(9)->willReturn(null);
+        $jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+        $jobStore->expects($this->once())->method('getById')->with(9)->willReturn(null);
 
-        $response = $this->controller('s3cret', 's3cret', $queue)->putFile(9);
+        $response = $this->controller('s3cret', 's3cret', $jobStore, $settlement)->putFile(9);
 
         $this->assertSame(Http::STATUS_NOT_FOUND, $response->getStatus());
     }
@@ -249,10 +256,11 @@ class QueueControllerTest extends TestCase
 
     public function testResultFileReportsAMissingJob(): void
     {
-        $queue = $this->createMock(Queue::class);
-        $queue->method('getById')->willReturn(null);
+        $jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+        $jobStore->method('getById')->willReturn(null);
 
-        $response = $this->controller('s3cret', 's3cret', $queue)->resultFile(3);
+        $response = $this->controller('s3cret', 's3cret', $jobStore, $settlement)->resultFile(3);
 
         $this->assertSame(Http::STATUS_NOT_FOUND, $response->getStatus());
     }
@@ -298,9 +306,10 @@ class QueueControllerTest extends TestCase
      */
     public function testResultPassesTheClaimingWorkersTokenToFinish(): void
     {
-        $queue = $this->createMock(Queue::class);
-        $queue->method('getById')->willReturn($this->claimedJob('tok-7'));
-        $queue->expects($this->once())
+        $jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+        $jobStore->method('getById')->willReturn($this->claimedJob('tok-7'));
+        $settlement->expects($this->once())
             ->method('finish')
             ->with(7, $this->isType('array'), 'tok-7')
             ->willReturn(true);
@@ -326,7 +335,8 @@ class QueueControllerTest extends TestCase
         $controller = new QueueController(
             Application::APP_ID,
             $request,
-            $queue,
+            $jobStore,
+            $settlement,
             $config,
             $this->createMock(LoggerInterface::class),
             $this->createMock(FileExchange::class),
@@ -344,10 +354,11 @@ class QueueControllerTest extends TestCase
         // error_file_broken` in machine terms. The row must hold BOTH: the
         // prose is for the human, the code is what policy and the worklist
         // read. Until 0.1.17 the code was dropped here and the row read NULL.
-        $queue = $this->createMock(Queue::class);
-        $queue->method('getById')->willReturn($this->claimedJob('tok-7'));
+        $jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+        $jobStore->method('getById')->willReturn($this->claimedJob('tok-7'));
         $captured = null;
-        $queue->expects($this->once())
+        $settlement->expects($this->once())
             ->method('finish')
             ->with(7, $this->callback(function (array $payload) use (&$captured): bool {
                 $captured = $payload;
@@ -380,7 +391,8 @@ class QueueControllerTest extends TestCase
         $controller = new QueueController(
             Application::APP_ID,
             $request,
-            $queue,
+            $jobStore,
+            $settlement,
             $config,
             $this->createMock(LoggerInterface::class),
             $this->createMock(FileExchange::class),
@@ -401,9 +413,10 @@ class QueueControllerTest extends TestCase
 
     public function testAWorkerThatLostTheClaimIsToldTheResultWasDiscarded(): void
     {
-        $queue = $this->createMock(Queue::class);
-        $queue->method('getById')->willReturn($this->claimedJob('tok-7'));
-        $queue->method('finish')->willReturn(false);
+        $jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+        $jobStore->method('getById')->willReturn($this->claimedJob('tok-7'));
+        $settlement->method('finish')->willReturn(false);
 
         $request = $this->createMock(IRequest::class);
         $request->method('getHeader')->willReturnCallback(
@@ -425,7 +438,8 @@ class QueueControllerTest extends TestCase
         $controller = new QueueController(
             Application::APP_ID,
             $request,
-            $queue,
+            $jobStore,
+            $settlement,
             $config,
             $this->createMock(LoggerInterface::class),
             $this->createMock(FileExchange::class),

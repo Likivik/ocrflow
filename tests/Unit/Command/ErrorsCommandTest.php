@@ -9,7 +9,9 @@ namespace OCA\OcrFlow\Tests\Unit\Command;
 
 use OCA\OcrFlow\Command\Errors;
 use OCA\OcrFlow\Controller\AttentionController;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Tests\Unit\Service\StoreAttention;
 use OCP\IGroupManager;
@@ -26,11 +28,6 @@ use Symfony\Component\Console\Tester\CommandTester;
  */
 class ErrorsCommandTest extends TestCase
 {
-	private function queueMock(): Queue
-	{
-		return $this->createMock(Queue::class);
-	}
-
 	/**
 	 * @return list<array<string, mixed>>
 	 */
@@ -45,8 +42,7 @@ class ErrorsCommandTest extends TestCase
 
 	public function testTheCommandAndTheEndpointReturnTheSameSet(): void
 	{
-		$queue = $this->queueMock();
-		$attention = new StoreAttention($queue);
+		$attention = new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class));
 		$attention->rows = $this->fixture();
 
 		// The endpoint door.
@@ -60,7 +56,7 @@ class ErrorsCommandTest extends TestCase
 		$request->method('getParam')->willReturnCallback(
 			static fn (string $key, mixed $default = null): mixed => $key === 'limit' ? 200 : $default,
 		);
-		$controller = new AttentionController('ocrflow', $request, $attention, $session, $groups, new RetryPolicy(), $this->createMock(Queue::class));
+		$controller = new AttentionController('ocrflow', $request, $attention, $session, $groups, new RetryPolicy(), $this->createMock(JobStore::class));
 		$endpointIds = array_column($controller->index()->getData()['rows'], 'id');
 
 		// The terminal door, over the SAME service instance.
@@ -83,8 +79,7 @@ class ErrorsCommandTest extends TestCase
 	 */
 	public function testACanonicalUnknownCodeRowIsInTheWorklistThroughBothDoors(): void
 	{
-		$queue = $this->queueMock();
-		$attention = new StoreAttention($queue);
+		$attention = new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class));
 		$attention->rows = [
 			['id' => 21, 'path' => 'alice/files/a.pdf', 'reason_code' => 'error_worker_sent_unknown_code', 'reason' => 'error_worker_sent_unknown_code', 'error' => 'x', 'attempts' => 1, 'finished_at' => 500],
 		];
@@ -99,7 +94,7 @@ class ErrorsCommandTest extends TestCase
 		$request->method('getParam')->willReturnCallback(
 			static fn (string $key, mixed $default = null): mixed => $key === 'limit' ? 200 : $default,
 		);
-		$controller = new AttentionController('ocrflow', $request, $attention, $session, $groups, new RetryPolicy(), $this->createMock(Queue::class));
+		$controller = new AttentionController('ocrflow', $request, $attention, $session, $groups, new RetryPolicy(), $this->createMock(JobStore::class));
 		$endpointIds = array_column($controller->index()->getData()['rows'], 'id');
 
 		$tester = new CommandTester(new Errors($attention));
@@ -116,7 +111,7 @@ class ErrorsCommandTest extends TestCase
 
 	public function testTheEmptyWorklistSaysSo(): void
 	{
-		$attention = new StoreAttention($this->queueMock());
+		$attention = new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class));
 
 		$tester = new CommandTester(new Errors($attention));
 		$tester->execute([]);
@@ -127,7 +122,7 @@ class ErrorsCommandTest extends TestCase
 
 	public function testTheFilterShowsOnlyOneCode(): void
 	{
-		$attention = new StoreAttention($this->queueMock());
+		$attention = new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class));
 		$attention->rows = $this->fixture();
 
 		$tester = new CommandTester(new Errors($attention));

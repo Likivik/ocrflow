@@ -16,6 +16,16 @@ written.
 
 ### Added
 
+- **`Queue` is gone.** `lib/Db/Queue.php` deleted: 2,158 lines became six
+  classes with one subject each (`JobStore`, `Ledger`, `SettlementService`,
+  `DiskFiles`, `Batch`, `EnqueueService`) plus `PanelReport`. The 10 behaviour
+  test files follow their subject. `QueueInventoryTest` keeps the inventory
+  assertion: every one of the 62 names has exactly one home.
+- **Phase 2c continues: `Attention` and `Outcomes` off `Queue`.** `Attention`
+  now takes `JobStore` + `Ledger` + `EnqueueService` — one class per table it
+  touches. The `StoreAttention`/`StoreOutcomes` test fixtures follow, and
+  `AttentionController` takes `JobStore` for its one call. 36 → 27 Queue call
+  sites.
 - **Phase 2c begins: five call sites off `Queue`.** `occ ocrflow:ledger:check`
   now takes `Ledger`, `occ ocrflow:rescan` takes `JobStore`, the delete
   listener takes `JobStore`, the upload listener and the scan job take

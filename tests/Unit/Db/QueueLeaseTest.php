@@ -7,16 +7,14 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
-use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\RetryPolicy;
-use OCA\OcrFlow\Service\StageEvents;
+use OCA\OcrFlow\Storage\JobStore;
 use OCP\DB\IResult;
 use OCP\DB\QueryBuilder\ICompositeExpression;
 use OCP\DB\QueryBuilder\IExpressionBuilder;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
 use PHPUnit\Framework\TestCase;
-use Psr\Log\LoggerInterface;
 
 /**
  * Recovery reads the lease, not the worker's heartbeat.
@@ -33,7 +31,7 @@ class QueueLeaseTest extends TestCase
 	/** @var list<string> every predicate the recovery query asks for */
 	private array $predicates = [];
 
-	private function queue(): Queue
+	private function jobs(): JobStore
 	{
 		$result = $this->createMock(IResult::class);
 		$result->method('fetchAll')->willReturn([['id' => 938]]);
@@ -71,12 +69,12 @@ class QueueLeaseTest extends TestCase
 		$db = $this->createMock(IDBConnection::class);
 		$db->method('getQueryBuilder')->willReturn($qb);
 
-		return new Queue($db, new StageEvents(new RetryPolicy(), $this->createMock(LoggerInterface::class)));
+		return new JobStore($db, new RetryPolicy());
 	}
 
 	public function testRecoveryAsksTheLeaseBeforeTheHeartbeat(): void
 	{
-		$requeued = $this->queue()->requeueStale(Queue::CLAIM_LEASE_SECONDS);
+		$requeued = $this->jobs()->requeueStale(JobStore::CLAIM_LEASE_SECONDS);
 
 		$this->assertSame(1, $requeued);
 		$this->assertContains('isNull:j.claim_expires_at', $this->predicates, 'a pre-lease claim is expired by definition');
@@ -87,26 +85,26 @@ class QueueLeaseTest extends TestCase
 
 	public function testTheHardCapIsTwoHours(): void
 	{
-		$this->assertSame(7200, Queue::CLAIM_HARD_CAP_SECONDS);
+		$this->assertSame(7200, JobStore::CLAIM_HARD_CAP_SECONDS);
 	}
 
 	public function testTheLeaseIsShorterThanTheReconcileTick(): void
 	{
 		// The reaper runs every 300 s; a lease longer than the tick would add a
 		// whole tick of delay to every recovery for no reason.
-		$this->assertLessThan(300, Queue::CLAIM_LEASE_SECONDS);
+		$this->assertLessThan(300, JobStore::CLAIM_LEASE_SECONDS);
 	}
 
 	public function testRenewAndReleaseAreBothGuardedByTheClaimToken(): void
 	{
-		$queue = $this->queue();
+		$jobs = $this->jobs();
 
 		$this->params = [];
-		$this->assertTrue($queue->renewClaim(7, 'token'));
+		$this->assertTrue($jobs->renewClaim(7, 'token'));
 		$this->assertContains('token', $this->params, 'a renew without the token would be a free takeover');
 
 		$this->params = [];
-		$this->assertTrue($queue->release(7, 'token'));
+		$this->assertTrue($jobs->release(7, 'token'));
 		$this->assertContains('token', $this->params, 'a release without the token would be a free takeover');
 	}
 }

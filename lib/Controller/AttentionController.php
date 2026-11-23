@@ -7,7 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Controller;
 
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Service\Attention;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\AppFramework\Http;
@@ -44,7 +44,7 @@ class AttentionController extends OCSController
 		private IUserSession $userSession,
 		private IGroupManager $groupManager,
 		private RetryPolicy $retryPolicy,
-		private Queue $queue,
+		private JobStore $jobs,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -151,7 +151,7 @@ class AttentionController extends OCSController
 			);
 		}
 
-		$result = $this->queue->forceRequeue($clean);
+		$result = $this->jobs->forceRequeue($clean);
 		return new DataResponse([
 			'requeued' => count($result['requeued']),
 			'refused' => count($result['refused']),

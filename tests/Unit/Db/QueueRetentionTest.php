@@ -7,7 +7,6 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
-use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
@@ -91,12 +90,12 @@ class QueueRetentionTest extends TestCase
 
 	public function testOnlyTerminalRowsPastTheCutoffGo(): void
 	{
-		$this->job(1, Queue::STATUS_DONE, 91 * 86400);    // terminal, past
-		$this->job(2, Queue::STATUS_DONE, 89 * 86400);    // terminal, recent
-		$this->job(3, Queue::STATUS_QUEUED, 365 * 86400); // non-terminal, any age
-		$this->job(4, Queue::STATUS_CLAIMED, 365 * 86400);
-		$this->job(5, Queue::STATUS_SKIPPED, 91 * 86400); // terminal, past
-		$this->job(6, Queue::STATUS_ERROR, 91 * 86400);   // terminal, past
+		$this->job(1, JobStore::STATUS_DONE, 91 * 86400);    // terminal, past
+		$this->job(2, JobStore::STATUS_DONE, 89 * 86400);    // terminal, recent
+		$this->job(3, JobStore::STATUS_QUEUED, 365 * 86400); // non-terminal, any age
+		$this->job(4, JobStore::STATUS_CLAIMED, 365 * 86400);
+		$this->job(5, JobStore::STATUS_SKIPPED, 91 * 86400); // terminal, past
+		$this->job(6, JobStore::STATUS_ERROR, 91 * 86400);   // terminal, past
 
 		$deleted = $this->sweep();
 
@@ -108,7 +107,7 @@ class QueueRetentionTest extends TestCase
 	{
 		// Defensive: every terminal row written today carries finished_at, but
 		// a null timestamp must not be treated as "older than everything".
-		$this->job(1, Queue::STATUS_DONE, null);
+		$this->job(1, JobStore::STATUS_DONE, null);
 
 		$this->assertSame(0, $this->sweep()['jobs']);
 		$this->assertSameCanonical([1], array_keys($this->queue->jobs));
@@ -116,8 +115,8 @@ class QueueRetentionTest extends TestCase
 
 	public function testStageRowsGoWithTheirJobAndStayWithTheirJob(): void
 	{
-		$this->job(1, Queue::STATUS_DONE, 91 * 86400);
-		$this->job(2, Queue::STATUS_DONE, 89 * 86400);
+		$this->job(1, JobStore::STATUS_DONE, 91 * 86400);
+		$this->job(2, JobStore::STATUS_DONE, 89 * 86400);
 		$this->stage(10, 1, 91 * 86400); // goes: its job goes
 		$this->stage(11, 1, 10);         // goes: same job, recent row dies with it
 		$this->stage(12, 2, 91 * 86400);  // stays: its job stays
@@ -151,7 +150,7 @@ class QueueRetentionTest extends TestCase
 			['file_id' => 7, 'etag' => 'a', 'status' => 'done', 'stamp_version' => 'v2'],
 			['file_id' => 8, 'etag' => 'b', 'status' => 'skipped', 'stamp_version' => null],
 		];
-		$this->job(1, Queue::STATUS_DONE, 400 * 86400);
+		$this->job(1, JobStore::STATUS_DONE, 400 * 86400);
 		$this->stage(10, 1, 400 * 86400);
 
 		$this->sweep();
@@ -173,7 +172,7 @@ class QueueRetentionTest extends TestCase
 		// for the next tick — one run must not lock the table for an hour.
 		$cap = 10;
 		for ($i = 1; $i <= $cap + 50; $i++) {
-			$this->job($i, Queue::STATUS_DONE, 400 * 86400);
+			$this->job($i, JobStore::STATUS_DONE, 400 * 86400);
 		}
 
 		$deleted = $this->sweep($cap);
@@ -201,7 +200,7 @@ class QueueRetentionTest extends TestCase
 
 	public function testAnEmptySweepReportsZeros(): void
 	{
-		$this->job(1, Queue::STATUS_DONE, 10);
+		$this->job(1, JobStore::STATUS_DONE, 10);
 
 		$this->assertSame(['jobs' => 0, 'stage_events' => 0], $this->sweep());
 	}
@@ -213,11 +212,11 @@ class QueueRetentionTest extends TestCase
 	 */
 	public function testNeedsFixRowsSurviveTheSweepAndTheRestStillGoes(): void
 	{
-		$this->job(1, Queue::STATUS_ERROR, 91 * 86400, 'error_file_broken');     // needs_fix, new name
-		$this->legacyJob(2, Queue::STATUS_ERROR, 91 * 86400, 'broken_pdf');       // needs_fix, old name
-		$this->job(3, Queue::STATUS_ERROR, 91 * 86400, 'error_app_answered_5xx'); // wait
-		$this->legacyJob(4, Queue::STATUS_SKIPPED, 91 * 86400, 'no_text_detected'); // nothing_to_do
-		$this->job(5, Queue::STATUS_ERROR, 91 * 86400);                          // no code at all
+		$this->job(1, JobStore::STATUS_ERROR, 91 * 86400, 'error_file_broken');     // needs_fix, new name
+		$this->legacyJob(2, JobStore::STATUS_ERROR, 91 * 86400, 'broken_pdf');       // needs_fix, old name
+		$this->job(3, JobStore::STATUS_ERROR, 91 * 86400, 'error_app_answered_5xx'); // wait
+		$this->legacyJob(4, JobStore::STATUS_SKIPPED, 91 * 86400, 'no_text_detected'); // nothing_to_do
+		$this->job(5, JobStore::STATUS_ERROR, 91 * 86400);                          // no code at all
 		$this->queue->files = [
 			['file_id' => 7, 'etag' => 'a', 'status' => 'error', 'reason' => 'error_file_broken'],
 		];
@@ -289,7 +288,7 @@ class QueueRetentionTest extends TestCase
 			static fn (array $p) => $p[0],
 			array_values(array_filter($calls['params'], static fn (array $p) => is_array($p[0])))
 		);
-		$this->assertContains([Queue::STATUS_DONE, Queue::STATUS_SKIPPED, Queue::STATUS_ERROR], $statuses);
+		$this->assertContains([JobStore::STATUS_DONE, JobStore::STATUS_SKIPPED, JobStore::STATUS_ERROR], $statuses);
 		$this->assertContains(self::NOW, array_map(static fn (array $p) => $p[0], $calls['params']));
 	}
 
@@ -439,7 +438,7 @@ class StoreQueue extends JobStore
 		$ids = [];
 		foreach ($this->jobs as $row) {
 			$status = (string) $row['status'];
-			$terminal = in_array($status, [Queue::STATUS_DONE, Queue::STATUS_SKIPPED, Queue::STATUS_ERROR], true);
+			$terminal = in_array($status, [JobStore::STATUS_DONE, JobStore::STATUS_SKIPPED, JobStore::STATUS_ERROR], true);
 			$finishedAt = $row['finished_at'];
 			if (!($terminal && $finishedAt !== null && $finishedAt < $cutoff)) {
 				continue;

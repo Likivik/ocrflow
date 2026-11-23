@@ -7,7 +7,9 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Service;
 
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\RetryPolicy;
 use PHPUnit\Framework\TestCase;
 
@@ -26,7 +28,7 @@ class ActionableListTest extends TestCase
 
 	protected function setUp(): void
 	{
-		$this->attention = new StoreAttention($this->createMock(Queue::class));
+		$this->attention = new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class));
 	}
 
 	/** @return array<string, mixed> */

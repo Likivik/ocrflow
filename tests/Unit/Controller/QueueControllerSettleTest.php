@@ -10,7 +10,8 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\FileExchange;
 use OCA\OcrFlow\Service\RetryPolicy;
@@ -61,9 +62,10 @@ class QueueControllerSettleTest extends TestCase
 
 		$job ??= $this->claimedJob();
 
-		$queue = $this->createMock(Queue::class);
-		$queue->method('getById')->willReturn($job);
-		$queue->method('settleProduced')->willReturnCallback(
+		$jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+		$jobStore->method('getById')->willReturn($job);
+		$settlement->method('settleProduced')->willReturnCallback(
 			function (...$args) use (&$settles): void {
 				$settles[] = $args;
 			}
@@ -72,7 +74,8 @@ class QueueControllerSettleTest extends TestCase
 		return new QueueController(
 			Application::APP_ID,
 			$request,
-			$queue,
+			$jobStore,
+			$settlement,
 			$config,
 			$this->createMock(LoggerInterface::class),
 			$this->files(),
@@ -86,7 +89,7 @@ class QueueControllerSettleTest extends TestCase
 		$job = new Job();
 		$job->setId(7);
 		$job->setPath(self::JOB_PATH);
-		$job->setStatus(Queue::STATUS_CLAIMED);
+		$job->setStatus(JobStore::STATUS_CLAIMED);
 		$job->setClaimToken('tok-7');
 		$job->setFileId(42);
 		$job->setEtag('old-etag');
@@ -172,14 +175,16 @@ class QueueControllerSettleTest extends TestCase
 			static fn (string $key, mixed $default = null): mixed => $default
 		);
 
-		$queue = $this->createMock(Queue::class);
-		$queue->method('getById')->willReturn($this->claimedJob());
-		$queue->method('settleProduced')->willThrowException(new \RuntimeException('ledger down'));
+		$jobStore = $this->createMock(JobStore::class);
+        $settlement = $this->createMock(SettlementService::class);
+		$jobStore->method('getById')->willReturn($this->claimedJob());
+		$settlement->method('settleProduced')->willThrowException(new \RuntimeException('ledger down'));
 
 		$controller = new QueueController(
 			Application::APP_ID,
 			$request,
-			$queue,
+			$jobStore,
+			$settlement,
 			$config,
 			$this->createMock(LoggerInterface::class),
 			$this->files(),

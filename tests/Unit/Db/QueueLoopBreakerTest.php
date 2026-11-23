@@ -7,9 +7,12 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
-use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCP\DB\IResult;
 use OCP\DB\QueryBuilder\IExpressionBuilder;
 use OCP\DB\QueryBuilder\IQueryBuilder;
@@ -228,9 +231,29 @@ class QueueLoopBreakerTest extends TestCase
 		return $db;
 	}
 
-	private function queue(IDBConnection $db): Queue
+	/**
+	 * The write policy, over the same mocked connection the test already
+	 * uses: the enqueue door, the run log it reads, the ledger it reads and
+	 * the settlement it falls back to.
+	 *
+	 * @return array{0: EnqueueService, 1: JobStore, 2: Ledger}
+	 */
+	private function graph(IDBConnection $db): array
 	{
-		return new Queue($db, new StageEvents(new RetryPolicy(), $this->createMock(LoggerInterface::class)));
+		$retryPolicy = new RetryPolicy();
+		$logger = $this->createMock(LoggerInterface::class);
+		$jobs = new JobStore($db, $retryPolicy);
+		$ledger = new Ledger($db, $retryPolicy);
+		$settlement = new SettlementService(
+			$db,
+			$jobs,
+			$ledger,
+			$retryPolicy,
+			$logger,
+			new StageEvents($retryPolicy, $logger),
+		);
+
+		return [new EnqueueService($db, $jobs, $ledger, $settlement, null, null, $logger), $jobs, $ledger];
 	}
 
 	/** Retention's work: every job row gone, the ledger untouched. */
@@ -242,7 +265,7 @@ class QueueLoopBreakerTest extends TestCase
 	public function testTheSecondScanEnqueueForIdenticalBytesIsRefusedWithNeedsFix(): void
 	{
 		$db = $this->db();
-		$queue = $this->queue($db);
+		[$queue, $jobs, $ledger] = $this->graph($db);
 
 		$first = $queue->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'tesseract', fromScan: true);
 		$this->assertNotNull($first, 'the first scan enqueue must go through');
@@ -264,7 +287,7 @@ class QueueLoopBreakerTest extends TestCase
 	public function testTheRefusalDecisionReportsZeroEnginePages(): void
 	{
 		$db = $this->db();
-		$queue = $this->queue($db);
+		[$queue, $jobs, $ledger] = $this->graph($db);
 		$queue->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'tesseract', fromScan: true);
 		$this->purgeJobs();
 		$queue->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'tesseract', fromScan: true);
@@ -278,7 +301,7 @@ class QueueLoopBreakerTest extends TestCase
 	public function testAnUploadEventEnqueueIsExemptFromTheBreaker(): void
 	{
 		$db = $this->db();
-		$queue = $this->queue($db);
+		[$queue, $jobs, $ledger] = $this->graph($db);
 		$queue->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'tesseract', fromScan: true);
 		$this->purgeJobs();
 
@@ -293,7 +316,7 @@ class QueueLoopBreakerTest extends TestCase
 	public function testNewBytesResetTheBudget(): void
 	{
 		$db = $this->db();
-		$queue = $this->queue($db);
+		[$queue, $jobs, $ledger] = $this->graph($db);
 		$queue->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'tesseract', fromScan: true);
 		$this->purgeJobs();
 
@@ -306,16 +329,16 @@ class QueueLoopBreakerTest extends TestCase
 	public function testTheOperatorRequeueResetsTheCounterAndWorksExactlyOnce(): void
 	{
 		$db = $this->db();
-		$queue = $this->queue($db);
+		[$queue, $jobs, $ledger] = $this->graph($db);
 
 		$queue->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'tesseract', fromScan: true);
 		$this->purgeJobs();
 		$this->assertNull($queue->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'tesseract', fromScan: true), 'refused before the override');
 
 		// What Attention::retryFile() does, in order.
-		$queue->deleteTerminalForFile(7);
-		$queue->clearPermanentVerdict(7);
-		$queue->resetTimesEnqueued(7);
+		$jobs->deleteTerminalForFile(7);
+		$ledger->clearPermanentVerdict(7);
+		$jobs->resetTimesEnqueued(7);
 		$this->assertSame(0, (int) $this->files[0]['times_enqueued'], 'the override must reset the counter');
 
 		$again = $queue->enqueue('/alice/files/scan.pdf', 7, 123, 'e1', 'tesseract', fromScan: true);

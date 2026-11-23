@@ -7,9 +7,12 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
-use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCP\DB\IResult;
 use OCP\DB\QueryBuilder\IExpressionBuilder;
 use OCP\DB\QueryBuilder\IQueryBuilder;
@@ -223,9 +226,33 @@ class QueuePermanentFailureTest extends TestCase
 		return $db;
 	}
 
-	private function queue(IDBConnection $db): Queue
+	/**
+	 * The write policy, the settle transaction and the two stores they read
+	 * and write, over the same mocked connection the test already uses.
+	 *
+	 * @return array{0: EnqueueService, 1: JobStore, 2: Ledger, 3: SettlementService}
+	 */
+	private function graph(IDBConnection $db): array
 	{
-		return new Queue($db, new StageEvents(new RetryPolicy(), $this->createMock(LoggerInterface::class)));
+		$retryPolicy = new RetryPolicy();
+		$logger = $this->createMock(LoggerInterface::class);
+		$jobs = new JobStore($db, $retryPolicy);
+		$ledger = new Ledger($db, $retryPolicy);
+		$settlement = new SettlementService(
+			$db,
+			$jobs,
+			$ledger,
+			$retryPolicy,
+			$logger,
+			new StageEvents($retryPolicy, $logger),
+		);
+
+		return [
+			new EnqueueService($db, $jobs, $ledger, $settlement, null, null, $logger),
+			$jobs,
+			$ledger,
+			$settlement,
+		];
 	}
 
 	/**
@@ -252,7 +279,7 @@ class QueuePermanentFailureTest extends TestCase
 	{
 		$this->seedLedger('error', 'broken_pdf', 'e1');
 
-		$id = $this->queue($this->db())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
+		$id = $this->graph($this->db())[0]->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
 
 		$this->assertNull($id, 'a permanent verdict on the same bytes must block the enqueue');
 		$this->assertSame([], $this->jobs, 'no job row may be written for a blocked enqueue');
@@ -262,7 +289,7 @@ class QueuePermanentFailureTest extends TestCase
 	{
 		$this->seedLedger('error', 'broken_pdf', 'e1');
 
-		$id = $this->queue($this->db())->enqueue('/alice/files/scan.pdf', 7, 123, 'e2');
+		$id = $this->graph($this->db())[0]->enqueue('/alice/files/scan.pdf', 7, 123, 'e2');
 
 		$this->assertNotNull($id, 'new bytes earn a fresh attempt: a permanent verdict is about specific bytes');
 	}
@@ -271,7 +298,7 @@ class QueuePermanentFailureTest extends TestCase
 	{
 		$this->seedLedger('error', 'engine_5xx', 'e1');
 
-		$id = $this->queue($this->db())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
+		$id = $this->graph($this->db())[0]->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
 
 		$this->assertNotNull($id, 'a retryable failure keeps today\'s behaviour: the next scan retries it');
 	}
@@ -280,7 +307,7 @@ class QueuePermanentFailureTest extends TestCase
 	{
 		$this->seedLedger('done', null, 'e1');
 
-		$id = $this->queue($this->db())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
+		$id = $this->graph($this->db())[0]->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
 
 		$this->assertNull($id);
 	}
@@ -291,7 +318,7 @@ class QueuePermanentFailureTest extends TestCase
 		// an ambiguous diagnosis is not a permanent verdict.
 		$this->seedLedger('error', 'made_up_code', 'e1');
 
-		$id = $this->queue($this->db())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
+		$id = $this->graph($this->db())[0]->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
 
 		$this->assertNotNull($id, 'an unknown reason must not block the enqueue');
 	}
@@ -300,14 +327,14 @@ class QueuePermanentFailureTest extends TestCase
 	{
 		$this->seedLedger('error', null, 'e1');
 
-		$id = $this->queue($this->db())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
+		$id = $this->graph($this->db())[0]->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
 
 		$this->assertNotNull($id, 'no recorded reason means no verdict, so the file is enqueued');
 	}
 
 	public function testAMissingLedgerRowIsEnqueued(): void
 	{
-		$id = $this->queue($this->db())->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
+		$id = $this->graph($this->db())[0]->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
 
 		$this->assertNotNull($id, 'a file with no ledger row has no verdict and must be enqueued');
 	}
@@ -324,9 +351,9 @@ class QueuePermanentFailureTest extends TestCase
 			'finished_at' => 1, 'reason_code' => 'broken_pdf', 'attempts' => 0, 'created_at' => 1,
 		];
 
-		$queue = $this->queue($this->db());
-		$queue->deleteTerminalForFile(7);
-		$queue->clearPermanentVerdict(7);
+		[$queue, $jobs, $ledger] = $this->graph($this->db());
+		$jobs->deleteTerminalForFile(7);
+		$ledger->clearPermanentVerdict(7);
 
 		$id = $queue->enqueue('/alice/files/scan.pdf', 7, 123, 'e1');
 
@@ -348,8 +375,8 @@ class QueuePermanentFailureTest extends TestCase
 			'finished_at' => null, 'reason_code' => null, 'attempts' => 0, 'created_at' => 1,
 		];
 
-		$queue = $this->queue($this->db());
-		$updated = $queue->finish(9, [
+		[, , , $settlement] = $this->graph($this->db());
+		$updated = $settlement->finish(9, [
 			'status' => 'error',
 			'reason' => 'the pdf is broken',
 			'reason_code' => 'broken_pdf',
@@ -365,7 +392,7 @@ class QueuePermanentFailureTest extends TestCase
 
 	public function testAnEmptySourceWritesItsVerdictToTheLedger(): void
 	{
-		$this->queue($this->db())->enqueue('/alice/files/empty.pdf', 7, 0, 'e1');
+		$this->graph($this->db())[0]->enqueue('/alice/files/empty.pdf', 7, 0, 'e1');
 
 		$this->assertCount(1, $this->files, 'the zero-byte verdict must be recorded where the purge cannot reach it');
 		$this->assertSame('skipped', $this->files[0]['status']);

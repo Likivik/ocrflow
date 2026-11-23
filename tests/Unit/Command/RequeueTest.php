@@ -8,7 +8,9 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Tests\Unit\Command;
 
 use OCA\OcrFlow\Command\Requeue;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\Attention;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\IConfig;
@@ -23,25 +25,27 @@ use Symfony\Component\Console\Tester\CommandTester;
  */
 class RequeueTest extends TestCase
 {
-	private function command(Queue $queue): Requeue
+	private function command(JobStore $jobs, Ledger $ledger, EnqueueService $enqueue): Requeue
 	{
-		return new Requeue(new Attention($queue, new RetryPolicy(), $this->createMock(IConfig::class)));
+		return new Requeue(new Attention($jobs, $ledger, $enqueue, new RetryPolicy(), $this->createMock(IConfig::class)));
 	}
 
 	public function testItClearsTheVerdictAndTheTerminalJobRows(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$queue->method('findFileByPath')->willReturn([
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$ledger->method('findFileByPath')->willReturn([
 			'file_id' => 7,
 			'path' => 'alice/files/scan.pdf',
 			'status' => 'error',
 			'reason' => 'broken_pdf',
 			'etag' => 'e1',
 		]);
-		$queue->expects($this->once())->method('deleteTerminalForFile')->with(7)->willReturn(2);
-		$queue->expects($this->once())->method('clearPermanentVerdict')->with(7);
+		$jobs->expects($this->once())->method('deleteTerminalForFile')->with(7)->willReturn(2);
+		$ledger->expects($this->once())->method('clearPermanentVerdict')->with(7);
 
-		$tester = new CommandTester($this->command($queue));
+		$tester = new CommandTester($this->command($jobs, $ledger, $enqueue));
 		$tester->execute(['path' => 'alice/files/scan.pdf']);
 
 		$this->assertSame(0, $tester->getStatusCode());
@@ -51,12 +55,14 @@ class RequeueTest extends TestCase
 
 	public function testAnUnknownPathIsNotAnError(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$queue->method('findFileByPath')->willReturn(null);
-		$queue->expects($this->never())->method('deleteTerminalForFile');
-		$queue->expects($this->never())->method('clearPermanentVerdict');
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$ledger->method('findFileByPath')->willReturn(null);
+		$jobs->expects($this->never())->method('deleteTerminalForFile');
+		$ledger->expects($this->never())->method('clearPermanentVerdict');
 
-		$tester = new CommandTester($this->command($queue));
+		$tester = new CommandTester($this->command($jobs, $ledger, $enqueue));
 		$tester->execute(['path' => 'nobody/knows.pdf']);
 
 		$this->assertSame(0, $tester->getStatusCode());
@@ -65,13 +71,15 @@ class RequeueTest extends TestCase
 
 	public function testADoneFileIsRefusedGently(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$queue->method('findFileByPath')->willReturn([
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$ledger->method('findFileByPath')->willReturn([
 			'file_id' => 7, 'path' => 'a.pdf', 'status' => 'done', 'reason' => null, 'etag' => 'e1',
 		]);
-		$queue->expects($this->never())->method('deleteTerminalForFile');
+		$jobs->expects($this->never())->method('deleteTerminalForFile');
 
-		$tester = new CommandTester($this->command($queue));
+		$tester = new CommandTester($this->command($jobs, $ledger, $enqueue));
 		$tester->execute(['path' => 'a.pdf']);
 
 		$this->assertSame(0, $tester->getStatusCode());

@@ -284,10 +284,14 @@ class OutcomesTest extends TestCase
 	 */
 	public function testRedoIsCappedAndReportsTheEstimateItSpent(): void
 	{
-		$queue = $this->createMock(\OCA\OcrFlow\Db\Queue::class);
-		$queue->method('deleteTerminalForFile')->willReturn(1);
+				$jobs = $this->createMock(\OCA\OcrFlow\Storage\JobStore::class);
+		$ledger = $this->createMock(\OCA\OcrFlow\Storage\Ledger::class);
+		$enqueue = $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class);
+		$jobs->method('deleteTerminalForFile')->willReturn(1);
 		$attention = new \OCA\OcrFlow\Service\Attention(
-			$queue,
+			$jobs,
+			$ledger,
+			$enqueue,
 			new RetryPolicy(),
 			StoreOutcomes::configWith(['attention_retry_cap' => '2']),
 		);
@@ -296,9 +300,9 @@ class OutcomesTest extends TestCase
 		$store->ledger = $this->store()->ledger;
 		$store->pending = $this->store()->pending;
 
-		$queue->expects($this->exactly(2))->method('deleteTerminalForFile');
-		$queue->expects($this->exactly(2))->method('clearPermanentVerdict');
-		$queue->expects($this->exactly(2))->method('resetTimesEnqueued');
+		$jobs->expects($this->exactly(2))->method('deleteTerminalForFile');
+		$ledger->expects($this->exactly(2))->method('clearPermanentVerdict');
+		$jobs->expects($this->exactly(2))->method('resetTimesEnqueued');
 
 		$result = $store->redo([14, 15, 16], null);
 
@@ -312,14 +316,16 @@ class OutcomesTest extends TestCase
 	 */
 	public function testAnEmptySelectionSpendsNothing(): void
 	{
-		$queue = $this->createMock(\OCA\OcrFlow\Db\Queue::class);
-		$attention = new \OCA\OcrFlow\Service\Attention($queue, new RetryPolicy(), StoreOutcomes::configWith([]));
+				$jobs = $this->createMock(\OCA\OcrFlow\Storage\JobStore::class);
+		$ledger = $this->createMock(\OCA\OcrFlow\Storage\Ledger::class);
+		$enqueue = $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class);
+		$attention = new \OCA\OcrFlow\Service\Attention($jobs, $ledger, $enqueue, new RetryPolicy(), StoreOutcomes::configWith([]));
 		$store = new StoreOutcomes([], [], $attention);
 		$store->ledger = $this->store()->ledger;
 		$store->pending = $this->store()->pending;
 
-		$queue->expects($this->never())->method('deleteTerminalForFile');
-		$queue->expects($this->never())->method('clearPermanentVerdict');
+		$jobs->expects($this->never())->method('deleteTerminalForFile');
+		$ledger->expects($this->never())->method('clearPermanentVerdict');
 
 		$result = $store->redo([], null);
 

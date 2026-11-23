@@ -7,9 +7,12 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
-use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCP\DB\IPreparedStatement;
 use OCP\DB\IResult;
 use OCP\DB\QueryBuilder\IQueryBuilder;
@@ -73,14 +76,20 @@ class QueueEnqueueTest extends TestCase
         // Nextcloud 34 stubs — which is why the live host raised "undefined
         // method" while PHPStan saw nothing.
 
-        $queue = new Queue(
+        $retryPolicy = new RetryPolicy();
+        $logger = $this->createMock(LoggerInterface::class);
+        $jobs = new JobStore($db, $retryPolicy);
+        $ledger = new Ledger($db, $retryPolicy);
+        $settlement = new SettlementService(
             $db,
-            new StageEvents(
-                new RetryPolicy(),
-                $this->createMock(LoggerInterface::class),
-            ),
+            $jobs,
+            $ledger,
+            $retryPolicy,
+            $logger,
+            new StageEvents($retryPolicy, $logger),
         );
+        $enqueue = new EnqueueService($db, $jobs, $ledger, $settlement, null, null, $logger);
 
-        $this->assertSame(42, $queue->enqueue('alice/files/a.pdf', 7, 1234, 'etag', 'tesseract'));
+        $this->assertSame(42, $enqueue->enqueue('alice/files/a.pdf', 7, 1234, 'etag', 'tesseract'));
     }
 }

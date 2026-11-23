@@ -9,7 +9,8 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\FileExchange;
 use OCA\OcrFlow\Service\RetryPolicy;
@@ -57,7 +58,8 @@ class WorkerSlotsTest extends TestCase
 		return new QueueController(
 			Application::APP_ID,
 			$request,
-			$this->createMock(Queue::class),
+			$this->createMock(JobStore::class),
+			$this->createMock(SettlementService::class),
 			$config,
 			$this->createMock(LoggerInterface::class),
 			$this->createMock(FileExchange::class),

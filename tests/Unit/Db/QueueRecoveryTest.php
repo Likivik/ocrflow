@@ -7,15 +7,13 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Db;
 
-use OCA\OcrFlow\Db\Queue;
 use OCA\OcrFlow\Service\RetryPolicy;
-use OCA\OcrFlow\Service\StageEvents;
+use OCA\OcrFlow\Storage\JobStore;
 use OCP\DB\IResult;
 use OCP\DB\QueryBuilder\IExpressionBuilder;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
 use PHPUnit\Framework\TestCase;
-use Psr\Log\LoggerInterface;
 
 /**
  * Evidence-based stale-claim recovery.
@@ -128,10 +126,9 @@ class QueueRecoveryTest extends TestCase
 		return $result;
 	}
 
-	private function queue(): Queue
+	private function jobs(): JobStore
 	{
-		$logger = $this->createMock(LoggerInterface::class);
-		return new Queue($this->db(), new StageEvents(new RetryPolicy(), $logger), $logger);
+		return new JobStore($this->db(), new RetryPolicy());
 	}
 
 	public function testAClaimedByALiveHeartbeatIsNotRequeued(): void
@@ -140,7 +137,7 @@ class QueueRecoveryTest extends TestCase
 		// the heartbeat check. Nothing may be requeued.
 		$this->selectResult = [];
 
-		$requeued = $this->queue()->requeueStale(180);
+		$requeued = $this->jobs()->requeueStale(180);
 
 		$this->assertSame(0, $requeued);
 		$this->assertSame([], $this->updates, 'a live claim must not be touched');
@@ -150,7 +147,7 @@ class QueueRecoveryTest extends TestCase
 	{
 		$this->selectResult = [['id' => 5]];
 
-		$requeued = $this->queue()->requeueStale(180);
+		$requeued = $this->jobs()->requeueStale(180);
 
 		$this->assertSame(1, $requeued);
 		// The requeue UPDATE is the second statement the queue builds.
@@ -167,7 +164,7 @@ class QueueRecoveryTest extends TestCase
 	{
 		$this->selectResult = [];
 
-		$this->queue()->requeueStale(90);
+		$this->jobs()->requeueStale(90);
 
 		// The rule changed on purpose. A heartbeat proves the process lives,
 		// never that it still owns this job: three rows were held by healthy,
@@ -191,7 +188,7 @@ class QueueRecoveryTest extends TestCase
 	{
 		$this->selectResult = [['id' => 5]];
 
-		$this->queue()->requeueStale(180);
+		$this->jobs()->requeueStale(180);
 
 		$joined = implode(' | ', $this->predicates);
 		$this->assertStringContainsString('eq:j.status', $joined);

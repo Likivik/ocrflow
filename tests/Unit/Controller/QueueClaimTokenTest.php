@@ -10,7 +10,8 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\SettlementService;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\FileExchange;
 use OCA\OcrFlow\Service\RetryPolicy;
@@ -34,7 +35,9 @@ use Psr\Log\LoggerInterface;
  */
 class QueueClaimTokenTest extends TestCase
 {
-	private Queue&MockObject $queue;
+	private JobStore&MockObject $jobStore;
+
+	private SettlementService&MockObject $settlement;
 
 	private LoggerInterface&MockObject $logger;
 
@@ -49,7 +52,8 @@ class QueueClaimTokenTest extends TestCase
 
 	protected function setUp(): void
 	{
-		$this->queue = $this->createMock(Queue::class);
+		$this->jobStore = $this->createMock(JobStore::class);
+		$this->settlement = $this->createMock(SettlementService::class);
 		$this->logger = $this->createMock(LoggerInterface::class);
 		$this->warnings = [];
 		$this->headers = [];
@@ -78,7 +82,8 @@ class QueueClaimTokenTest extends TestCase
 		return new QueueController(
 			Application::APP_ID,
 			$request,
-			$this->queue,
+			$this->jobStore,
+			$this->settlement,
 			$config,
 			$this->logger,
 			$files ?? $this->createMock(FileExchange::class),
@@ -90,7 +95,7 @@ class QueueClaimTokenTest extends TestCase
 	/**
 	 * A claimed job row, as the queue would hand it back after `claim()`.
 	 */
-	private function claimedJob(string $token = 'tok-abc', string $status = Queue::STATUS_CLAIMED): Job
+	private function claimedJob(string $token = 'tok-abc', string $status = JobStore::STATUS_CLAIMED): Job
 	{
 		return Job::fromRow([
 			'id' => 7,
@@ -117,7 +122,7 @@ class QueueClaimTokenTest extends TestCase
 
 	public function testFileWithoutAClaimTokenIsRefusedWith409(): void
 	{
-		$this->queue->method('getById')->willReturn($this->claimedJob());
+		$this->jobStore->method('getById')->willReturn($this->claimedJob());
 
 		$response = $this->controller()->file(7);
 
@@ -127,7 +132,7 @@ class QueueClaimTokenTest extends TestCase
 
 	public function testFileWithAWrongClaimTokenIsRefusedWith409(): void
 	{
-		$this->queue->method('getById')->willReturn($this->claimedJob('tok-abc'));
+		$this->jobStore->method('getById')->willReturn($this->claimedJob('tok-abc'));
 		$this->headers[Application::CLAIM_HEADER] = 'tok-xyz';
 
 		$response = $this->controller()->file(7);
@@ -138,7 +143,7 @@ class QueueClaimTokenTest extends TestCase
 
 	public function testFileWithTheRightClaimTokenProceeds(): void
 	{
-		$this->queue->method('getById')->willReturn($this->claimedJob('tok-abc'));
+		$this->jobStore->method('getById')->willReturn($this->claimedJob('tok-abc'));
 		$this->headers[Application::CLAIM_HEADER] = 'tok-abc';
 
 		$files = $this->createMock(FileExchange::class);
@@ -160,10 +165,10 @@ class QueueClaimTokenTest extends TestCase
 
 	public function testResultWithAWrongTokenIsRefusedAndNothingIsWritten(): void
 	{
-		$this->queue->method('getById')->willReturn($this->claimedJob('tok-abc'));
+		$this->jobStore->method('getById')->willReturn($this->claimedJob('tok-abc'));
 		$this->headers[Application::CLAIM_HEADER] = 'tok-xyz';
 
-		$this->queue->expects($this->never())->method('finish');
+		$this->settlement->expects($this->never())->method('finish');
 
 		$response = $this->controller()->result(7);
 
@@ -173,9 +178,9 @@ class QueueClaimTokenTest extends TestCase
 
 	public function testResultWithoutATokenIsRefusedWith409(): void
 	{
-		$this->queue->method('getById')->willReturn($this->claimedJob());
+		$this->jobStore->method('getById')->willReturn($this->claimedJob());
 
-		$this->queue->expects($this->never())->method('finish');
+		$this->settlement->expects($this->never())->method('finish');
 
 		$response = $this->controller()->result(7);
 
@@ -189,10 +194,10 @@ class QueueClaimTokenTest extends TestCase
 		// again — look like a stale claim. Three live rows stayed claimed for
 		// eleven hours because of that. The row is settled; the report changes
 		// nothing; the honest answer to "record this" is "it is recorded".
-		$this->queue->method('getById')->willReturn($this->claimedJob('tok-abc', Queue::STATUS_DONE));
+		$this->jobStore->method('getById')->willReturn($this->claimedJob('tok-abc', JobStore::STATUS_DONE));
 		$this->headers[Application::CLAIM_HEADER] = 'tok-abc';
 
-		$this->queue->expects($this->never())->method('finish');
+		$this->settlement->expects($this->never())->method('finish');
 
 		$response = $this->controller()->result(7);
 
@@ -203,10 +208,10 @@ class QueueClaimTokenTest extends TestCase
 
 	public function testFailureWithAWrongTokenIsRefusedAndNothingIsWritten(): void
 	{
-		$this->queue->method('getById')->willReturn($this->claimedJob('tok-abc'));
+		$this->jobStore->method('getById')->willReturn($this->claimedJob('tok-abc'));
 		$this->headers[Application::CLAIM_HEADER] = 'nope';
 
-		$this->queue->expects($this->never())->method('finish');
+		$this->settlement->expects($this->never())->method('finish');
 
 		$response = $this->controller()->failure(7);
 
@@ -216,10 +221,10 @@ class QueueClaimTokenTest extends TestCase
 
 	public function testResultPassesTheClaimTokenToFinish(): void
 	{
-		$this->queue->method('getById')->willReturn($this->claimedJob('tok-abc'));
+		$this->jobStore->method('getById')->willReturn($this->claimedJob('tok-abc'));
 		$this->headers[Application::CLAIM_HEADER] = 'tok-abc';
 
-		$this->queue->expects($this->once())->method('finish')
+		$this->settlement->expects($this->once())->method('finish')
 			->with(7, $this->anything(), 'tok-abc')
 			->willReturn(true);
 
@@ -230,7 +235,7 @@ class QueueClaimTokenTest extends TestCase
 
 	public function testPutFileWithAWrongTokenIsRefusedWith409(): void
 	{
-		$this->queue->method('getById')->willReturn($this->claimedJob('tok-abc'));
+		$this->jobStore->method('getById')->willReturn($this->claimedJob('tok-abc'));
 		$this->headers[Application::CLAIM_HEADER] = 'tok-xyz';
 
 		$response = $this->controller()->putFile(7);
@@ -241,7 +246,7 @@ class QueueClaimTokenTest extends TestCase
 
 	public function testResultFileWithAWrongTokenIsRefusedWith409(): void
 	{
-		$this->queue->method('getById')->willReturn($this->claimedJob('tok-abc'));
+		$this->jobStore->method('getById')->willReturn($this->claimedJob('tok-abc'));
 		$this->headers[Application::CLAIM_HEADER] = 'tok-xyz';
 
 		$response = $this->controller()->resultFile(7);
@@ -251,7 +256,7 @@ class QueueClaimTokenTest extends TestCase
 
 	public function testClaimPassesTheRegisteredWorkerIdToTheQueue(): void
 	{
-		$this->queue->expects($this->once())->method('claim')
+		$this->jobStore->expects($this->once())->method('claim')
 			->with('w-1', 11)
 			->willReturn($this->claimedJob('tok-abc'));
 		$this->headers[Application::WORKER_HEADER] = 'w-1';

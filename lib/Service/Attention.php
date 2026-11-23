@@ -8,7 +8,9 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\Service;
 
 use OCA\OcrFlow\AppInfo\Application;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCP\IConfig;
 use OCP\IDBConnection;
 use OCP\DB\QueryBuilder\ICompositeExpression;
@@ -48,7 +50,9 @@ class Attention
 	public const RETRY_MISSING = 'missing';
 
 	public function __construct(
-		private Queue $queue,
+		private JobStore $jobs,
+		private Ledger $ledger,
+		private EnqueueService $enqueue,
 		private RetryPolicy $retryPolicy,
 		private IConfig $config,
 		private ?LoggerInterface $logger = null,
@@ -117,7 +121,7 @@ class Attention
 	 */
 	public function retryById(int $id): bool
 	{
-		$job = $this->queue->getById($id);
+		$job = $this->jobs->getById($id);
 		if ($job === null) {
 			return false;
 		}
@@ -154,7 +158,7 @@ class Attention
 	 */
 	public function retryOwned(int $id, string $pathPrefix): string
 	{
-		$job = $this->queue->getById($id);
+		$job = $this->jobs->getById($id);
 		if ($job === null) {
 			return self::RETRY_MISSING;
 		}
@@ -207,11 +211,11 @@ class Attention
 	 */
 	public function retryPath(string $path): array
 	{
-		$file = $this->queue->findFileByPath($path);
+		$file = $this->ledger->findFileByPath($path);
 		if ($file === null) {
 			return ['status' => 'missing', 'reason' => null, 'deleted' => 0];
 		}
-		if ($file['status'] === Queue::STATUS_DONE) {
+		if ($file['status'] === Ledger::STATUS_DONE) {
 			return ['status' => 'done', 'reason' => $file['reason'], 'deleted' => 0];
 		}
 		$deleted = $this->retryFile((int) $file['file_id'], $file['path'], 'requeue');
@@ -230,16 +234,16 @@ class Attention
 	 */
 	private function retryFile(int $fileId, string $path, string $door): int
 	{
-		$ledger = $this->queue->findFileByPath($path);
-		$deleted = $this->queue->deleteTerminalForFile($fileId);
-		$this->queue->clearPermanentVerdict($fileId);
+		$ledger = $this->ledger->findFileByPath($path);
+		$deleted = $this->jobs->deleteTerminalForFile($fileId);
+		$this->ledger->clearPermanentVerdict($fileId);
 		// The requeue is exempt from the loop breaker: resetting the count
 		// is what makes an operator's "queue it once more" work exactly
 		// once, without the scan refusing it as a repeat.
-		$this->queue->resetTimesEnqueued($fileId);
+		$this->jobs->resetTimesEnqueued($fileId);
 		// `fromScan` stays false: a human pressed the button, which is the
 		// same door as an upload event and must not count as a scan repeat.
-		$jobId = $this->queue->enqueue($path, $fileId, null, $ledger['etag'] ?? null);
+		$jobId = $this->enqueue->enqueue($path, $fileId, null, $ledger['etag'] ?? null);
 		$this->logger?->info('ocrflow: ' . $door . ': cleared the failure verdict for ' . $path
 			. ' (file_id ' . $fileId . '); deleted ' . $deleted . ' terminal job row(s); '
 			. ($jobId === null ? 'nothing queued (already pending for this version)' : 'queued job ' . $jobId));

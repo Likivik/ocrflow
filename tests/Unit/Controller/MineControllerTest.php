@@ -9,7 +9,9 @@ namespace OCA\OcrFlow\Tests\Unit\Controller;
 
 use OCA\OcrFlow\Controller\MineController;
 use OCA\OcrFlow\Db\Job;
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\Mine;
 use OCA\OcrFlow\Tests\Unit\Service\StoreAttention;
 use OCA\OcrFlow\Tests\Unit\Service\StoreOutcomes;
@@ -83,7 +85,7 @@ class MineControllerTest extends TestCase
 
 	public function testAUidParameterCannotWidenTheScope(): void
 	{
-		$attention = new StoreAttention($this->createMock(Queue::class));
+		$attention = new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class));
 		$attention->rows = [
 			$this->jobRow(1, '/alice/files/a.pdf'),
 			$this->jobRow(2, '/bob/files/b.pdf'),
@@ -107,11 +109,13 @@ class MineControllerTest extends TestCase
 		$job->setReasonCode('error_file_broken');
 		$job->setFileId(42);
 
-		$queue = $this->createMock(Queue::class);
-		$queue->method('getById')->willReturn($job);
-		$queue->expects($this->never())->method('deleteTerminalForFile');
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$jobs->method('getById')->willReturn($job);
+		$jobs->expects($this->never())->method('deleteTerminalForFile');
 
-		$response = $this->controller(new StoreAttention($queue), ['ids' => [42]])->retry();
+		$response = $this->controller(new StoreAttention($jobs, $ledger, $enqueue), ['ids' => [42]])->retry();
 		$data = $response->getData();
 
 		$this->assertSame(Http::STATUS_OK, $response->getStatus());
@@ -121,17 +125,19 @@ class MineControllerTest extends TestCase
 
 	public function testTheRetryNeedsACsrfToken(): void
 	{
-		$queue = $this->createMock(Queue::class);
-		$queue->expects($this->never())->method('getById');
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$jobs->expects($this->never())->method('getById');
 
-		$response = $this->controller(new StoreAttention($queue), ['ids' => [1]], csrfOk: false)->retry();
+		$response = $this->controller(new StoreAttention($jobs, $ledger, $enqueue), ['ids' => [1]], csrfOk: false)->retry();
 
 		$this->assertSame(Http::STATUS_PRECONDITION_FAILED, $response->getStatus());
 	}
 
 	public function testTheRetryNeedsAnIdList(): void
 	{
-		$response = $this->controller(new StoreAttention($this->createMock(Queue::class)))->retry();
+		$response = $this->controller(new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class)))->retry();
 
 		$this->assertSame(Http::STATUS_BAD_REQUEST, $response->getStatus());
 	}
@@ -139,7 +145,7 @@ class MineControllerTest extends TestCase
 	public function testThereIsNoSessionNoRows(): void
 	{
 		$this->expectException(\OCP\AppFramework\OCS\OCSForbiddenException::class);
-		$this->controller(new StoreAttention($this->createMock(Queue::class)), uid: null)->index();
+		$this->controller(new StoreAttention($this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\Ledger::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class)), uid: null)->index();
 	}
 
 	public function testTheRetryOnlyTouchesTheCallersIds(): void
@@ -150,11 +156,13 @@ class MineControllerTest extends TestCase
 		$alice->setReasonCode('error_provider_timed_out');
 		$alice->setFileId(1);
 
-		$queue = $this->createMock(Queue::class);
-		$queue->method('getById')->willReturn($alice);
-		$queue->expects($this->once())->method('deleteTerminalForFile')->with(1)->willReturn(1);
+		$jobs = $this->createMock(JobStore::class);
+		$ledger = $this->createMock(Ledger::class);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$jobs->method('getById')->willReturn($alice);
+		$jobs->expects($this->once())->method('deleteTerminalForFile')->with(1)->willReturn(1);
 
-		$data = $this->controller(new StoreAttention($queue), ['ids' => [1]])->retry()->getData();
+		$data = $this->controller(new StoreAttention($jobs, $ledger, $enqueue), ['ids' => [1]])->retry()->getData();
 
 		$this->assertSame(1, $data['retried']);
 		$this->assertSame(0, $data['refused']);

@@ -7,7 +7,9 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Service;
 
-use OCA\OcrFlow\Db\Queue;
+use OCA\OcrFlow\Storage\EnqueueService;
+use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Service\Attention;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\IConfig;
@@ -88,7 +90,9 @@ final class AttentionPredicateTest extends TestCase
 	public function testPredicateReturnsTheCompositeExpressionOrXBuilds(): void
 	{
 		$attention = new Attention(
-			$this->createMock(Queue::class),
+			$this->createMock(JobStore::class),
+			$this->createMock(Ledger::class),
+			$this->createMock(EnqueueService::class),
 			new RetryPolicy(),
 			$this->createMock(IConfig::class),
 			$this->createMock(LoggerInterface::class),
@@ -122,7 +126,9 @@ final class AttentionPredicateTest extends TestCase
 	public function testPredicateCoversTheLegacyEmptyCodeShape(): void
 	{
 		$attention = new Attention(
-			$this->createMock(Queue::class),
+			$this->createMock(JobStore::class),
+			$this->createMock(Ledger::class),
+			$this->createMock(EnqueueService::class),
 			new RetryPolicy(),
 			$this->createMock(IConfig::class),
 			$this->createMock(LoggerInterface::class),
