@@ -312,31 +312,7 @@ class Attention
 
 	private function toApi(array $row): array
 	{
-		$code = $this->rowCode(
-			isset($row['reason_code']) && is_string($row['reason_code']) ? $row['reason_code'] : null,
-			isset($row['reason']) && is_string($row['reason']) ? $row['reason'] : null,
-		);
-		$entry = $this->retryPolicy->entry($code);
-		$error = isset($row['error']) && is_string($row['error']) && $row['error'] !== '' ? $row['error'] : null;
-		return [
-			'id' => (int) $row['id'],
-			// The file this job is about. The panel's Open link and Delete
-			// take a file id; the row's own `id` is the job.
-			'file_id' => (int) ($row['file_id'] ?? 0),
-			'path' => (string) $row['path'],
-			'code' => $this->retryPolicy->canonical($code),
-			// One human sentence, never two. The vocabulary used to carry a
-			// `label` and a `fix` that said the same thing in different words,
-			// and the panel rendered both.
-			'text' => $entry['text'] ?? 'OCR failed; the app recorded no code for it.',
-			// Prose can be a full exception trace; nobody needs 50 KB of it
-			// in a table row.
-			'error' => $error === null ? null : (mb_strlen($error) > self::ERROR_TRUNCATE
-				? mb_substr($error, 0, self::ERROR_TRUNCATE) . '…'
-				: $error),
-			'attempts' => (int) ($row['attempts'] ?? 0),
-			'finished_at' => isset($row['finished_at']) && $row['finished_at'] !== null ? (int) $row['finished_at'] : null,
-		];
+		return \OCA\OcrFlow\Report\FileRow::of($row, null, null, self::ERROR_TRUNCATE);
 	}
 
 	/**

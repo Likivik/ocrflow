@@ -354,27 +354,6 @@ class Mine
 	 */
 	private function row(array $row, string $origin, bool $retryable): array
 	{
-		$finished = isset($row['finished_at']) && $row['finished_at'] !== null ? (int) $row['finished_at'] : null;
-		$age = $finished === null ? null : max(0, time() - $finished);
-		return [
-			// The id the retry endpoint accepts: a job id for a needs_fix
-			// row, a Decide row id for a redo row.
-			'id' => (int) ($row['id'] ?? 0),
-			// The FILE id, which is not the same number: `id` is a job id
-			// for a needs_fix row and a Decide row id for a redo row. Open
-			// links and delete take this one.
-			'file_id' => (int) ($row['file_id'] ?? 0),
-			'origin' => $origin,
-			'kind' => (($row['verdict'] ?? null) === RetryPolicy::VERDICT_REDO) ? 'redo' : 'needs_fix',
-			'path' => (string) ($row['path'] ?? ''),
-			'code' => (string) ($row['code'] ?? ''),
-			'text' => (string) ($row['text'] ?? ''),
-			// The worker's own words, when there are any: an unclassified
-			// failure is not a mystery if the exception text is in the row.
-			'error' => isset($row['error']) && is_string($row['error']) && $row['error'] !== '' ? $row['error'] : null,
-			'attempts' => isset($row['attempts']) && $row['attempts'] !== null ? (int) $row['attempts'] : null,
-			'age' => $age,
-			'retryable' => $retryable,
-		];
+		return \OCA\OcrFlow\Report\FileRow::of($row, $origin, $retryable);
 	}
 }

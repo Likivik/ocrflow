@@ -5,6 +5,29 @@ written.
 
 ## Unreleased
 
+### Changed
+
+- **Phase 3: one outcome catalog.** The 35-code vocabulary moved out of
+  `RetryPolicy` into `OutcomeCatalog` — one table of code → verdict, sentence,
+  row label, block. `RetryPolicy` keeps only what it decides. The two
+  engine-label builders in `StatusController` are now `OutcomeCatalog::engine()`
+  and `reader()`.
+- **One row shape.** `FileRow` builds the per-file row for `/mine`, the
+  attention list and a block's drill-down; `CategoryRow` builds the aggregate
+  rows. A block row is not a file row: the types are separate so a count cannot
+  be mistaken for a file.
+- **One component per kind of row.** `FileRows.vue` (the worklist) and
+  `BlockRows.vue` (the block rows) move out of `Panel.vue`, each with its
+  contract in the header.
+
+### Added
+
+- `FileRowParityTest`: the same file routed through `/mine` and the attention
+  list comes out with the same keys, the same code and the same sentence —
+  "not processed yet 10 vs 30" cannot come back.
+- `OutcomeCatalogTest` carries every assertion `VocabCopyTest` held; that file
+  is gone.
+
 ### Removed
 
 - **Phase 2c: the id-list report is deleted.** `Queue::fileReport()` and its

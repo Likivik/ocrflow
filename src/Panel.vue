@@ -82,47 +82,15 @@
 						{{ t('Show all') }}
 					</NcButton>
 				</p>
-				<ul v-else class="ocrflow-panel__mine">
-					<li
-						v-for="row in visibleRows"
-						:key="rowKey(row)"
-						class="ocrflow-panel__mine-row"
-						:class="{ 'is-selected': isSelected(row) }">
-						<NcCheckboxRadioSwitch
-							type="checkbox"
-							:checked="isSelected(row)"
-							:aria-label="t('Select {path}', { path: shortPath(row.path) })"
-							@update:checked="(checked) => setSelected(row, checked)" />
-						<div class="ocrflow-panel__mine-text">
-							<span class="ocrflow-panel__mine-dir">{{ pathParts(row.path).dir }}</span>
-							<span class="ocrflow-panel__mine-name" :title="row.path">{{ pathParts(row.path).name }}</span>
-							<span class="ocrflow-panel__mine-text">{{ row.text }}</span>
-							<span v-if="row.error" class="ocrflow-panel__mine-error">{{ row.error }}</span>
-							<span class="ocrflow-panel__mine-meta">
-								<template v-if="row.age !== null">{{ age(row.age) }}</template><template v-if="row.attempts !== null"> · {{ t('{count} attempts', { count: row.attempts }) }}</template>
-							</span>
-						</div>
-						<div class="ocrflow-panel__mine-actions">
-							<!-- Open is a plain link: the file is Nextcloud's, not
-							     ours, and the viewer is the right place to look at it. -->
-							<NcButton
-								v-if="row.file_id"
-								:href="fileUrl(row)"
-								target="_blank"
-								rel="noopener">
-								{{ t('Open') }}
-							</NcButton>
-							<!-- Retry only where a second attempt can change the
-							     answer; a stamp needs a decision, not another run. -->
-							<NcButton v-if="row.retryable" :disabled="mineBusy" @click="retry(row)">
-								{{ retrying === rowKey(row) ? t('Retrying…') : t('Retry') }}
-							</NcButton>
-							<NcButton variant="error" :disabled="mineBusy" @click="askDeleteRow(row)">
-								{{ t('Delete') }}
-							</NcButton>
-						</div>
-					</li>
-				</ul>
+				<FileRows
+					v-else
+					:rows="visibleRows"
+					:selection="selected"
+					:retrying="retrying"
+					:busy="mineBusy"
+					@retry="retry"
+					@delete="askDeleteRow"
+					@select="setSelected" />
 				</div>
 
 				<!-- Sticky, because the selection is about rows that may have
@@ -168,16 +136,7 @@
 				{{ t(block.label) }}
 				<span class="ocrflow-panel__count">{{ block.count }}</span>
 			</h4>
-			<ul v-if="block.rows.length" class="ocrflow-panel__counts">
-				<li
-					v-for="row in block.rows"
-					:key="block.id + '-' + row.key"
-					:class="{ 'is-below-bar': row.below_bar }"
-					:title="row.title || row.key">
-					<span class="ocrflow-panel__status">{{ t(row.label) }}</span>
-					<span class="ocrflow-panel__count">{{ row.count }}</span>
-				</li>
-			</ul>
+			<BlockRows :rows="block.rows" />
 			<!-- The one block a person can act on in bulk. Everything else is
 			     either already done or needs a single file's attention. -->
 			<template v-if="block.id === 'not_processed'">
@@ -261,6 +220,8 @@
 <script>
 import axios from '@nextcloud/axios'
 import { t as translate } from '@nextcloud/l10n'
+import BlockRows from './components/BlockRows.vue'
+import FileRows from './components/FileRows.vue'
 import NcButton from '@nextcloud/vue/components/NcButton'
 import NcCheckboxRadioSwitch from '@nextcloud/vue/components/NcCheckboxRadioSwitch'
 import NcDialog from '@nextcloud/vue/components/NcDialog'
@@ -284,7 +245,7 @@ const BUCKETS = [
 
 export default {
 	name: 'OcrFlowPanel',
-	components: { NcButton, NcCheckboxRadioSwitch, NcDialog, NcNoteCard, NcTextField },
+	components: { BlockRows, FileRows, NcButton, NcCheckboxRadioSwitch, NcDialog, NcNoteCard, NcTextField },
 	data() {
 		return {
 			counts: {},
