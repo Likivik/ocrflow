@@ -7,6 +7,14 @@ written.
 
 ### Fixed
 
+- **"Files to process" no longer freezes at 1.** The panel saved the *clamped*
+  number — what the count forced — as the user's preference, so a single file
+  left on one day meant "1" forever after. It remembers the number that was
+  typed now, and starts at that ask (25 by default), never more than "Not
+  processed yet".
+
+### Fixed
+
 - **"Files to process" never says more than there is.** The field starts at 25
   (or the smaller stored ask) and is capped at "Not processed yet" and the
   daily cap. A typed value above the cap settles back down a moment after the
