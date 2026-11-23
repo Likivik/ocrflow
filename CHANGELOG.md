@@ -5,6 +5,14 @@ written.
 
 ## Unreleased
 
+### Added
+
+- **The panel numbers update live.** One quiet re-read of the status every 5 s
+  while the tab is visible; nothing at all while it is hidden. A failed poll
+  keeps the last good numbers and says nothing — only the Refresh button
+  reports errors. Push would hold a php-fpm worker hostage per open tab, so
+  the panel polls.
+
 ### Fixed
 
 - **The Process button works again.** `processCount`, `processEffective`,
