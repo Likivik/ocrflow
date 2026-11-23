@@ -150,7 +150,7 @@
 						type="number"
 						:label="t('Files to process')"
 						:min="1"
-						:max="processInfo.max_files"
+						:max="processFieldMax"
 						:disabled="processing"
 						@update:model-value="rememberBatchSize" />
 					<NcButton
@@ -364,6 +364,14 @@ export default {
 		},
 		processEffective() {
 			return Math.max(0, Math.min(Number(this.batchSize) || 0, this.processCount))
+		},
+		// The field's ceiling: never more than "Not processed yet", never more
+		// than the daily cap. A field that says 25 when ten are left is a label
+		// that lies about what the click will do.
+		processFieldMax() {
+			const count = Math.max(1, this.processCount)
+			const cap = Number(this.processInfo.max_files) || count
+			return Math.max(1, Math.min(count, cap))
 		},
 		processLabel() {
 			const n = this.processEffective
@@ -691,10 +699,20 @@ export default {
 		rememberBatchSize() {
 			clearTimeout(this.batchSaveTimer)
 			this.batchSaveTimer = setTimeout(async () => {
+				// Clamp after typing settles, not per keystroke: an empty
+				// field is a pause while typing, not a request for zero.
+				const wanted = Number(this.batchSize)
+				if (!Number.isFinite(wanted) || wanted < 1) {
+					return
+				}
+				const clamped = Math.min(wanted, this.processFieldMax)
+				if (clamped !== wanted) {
+					this.batchSize = clamped
+				}
 				try {
 					await axios.post(
 						`${BASE}/process/limit`,
-						{ size: Number(this.batchSize) },
+						{ size: Math.min(Number(this.batchSize) || 1, this.processFieldMax) },
 						{ headers: { 'OCS-APIRequest': 'true' } },
 					)
 				} catch (e) {
@@ -714,7 +732,9 @@ export default {
 				// Only adopt the stored preference on the first read: a
 				// reload while someone is typing must not undo the typing.
 				if (!this.batchLoaded) {
-					this.batchSize = process.batch_size
+					// 25 by default — or the smaller stored ask — but never
+					// more than the files that actually need processing.
+					this.batchSize = Math.min(25, Number(process.batch_size) || 25, this.processFieldMax)
 					this.batchLoaded = true
 				}
 			}

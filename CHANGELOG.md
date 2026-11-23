@@ -5,6 +5,13 @@ written.
 
 ## Unreleased
 
+### Fixed
+
+- **"Files to process" never says more than there is.** The field starts at 25
+  (or the smaller stored ask) and is capped at "Not processed yet" and the
+  daily cap. A typed value above the cap settles back down a moment after the
+  typing stops.
+
 ### Added
 
 - **The panel numbers update live.** One quiet re-read of the status every 5 s
