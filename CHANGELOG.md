@@ -5,6 +5,18 @@ written.
 
 ## Unreleased
 
+### Fixed
+
+- **The Process button works again.** `processCount`, `processEffective`,
+  `processLabel`, `processDisabled`, `processReason` and `processEstimate` sat
+  in `methods` while the template reads them like computed values — so the
+  button was always disabled and its label rendered a raw function instead of
+  words. They are computed now.
+- **Row styling came back.** 0.1.57 moved the row lists into `FileRows.vue` and
+  `BlockRows.vue`, but `Panel.vue`'s scoped styles stopped reaching inside
+  them: counts glued to labels, checkboxes adrift. Each component owns its CSS
+  now.
+
 ### Changed
 
 - **Phase 3: one outcome catalog.** The 35-code vocabulary moved out of

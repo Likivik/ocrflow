@@ -134,3 +134,107 @@ export default {
 	},
 }
 </script>
+
+<style scoped>
+
+
+/* Your own rows: path first (it is what the user recognises), then the fix
+   hint, then the provenance. The actions stay on the inline end and never
+   shrink the text to nothing. */
+.ocrflow-panel__mine{
+	list-style: none;
+	padding: 0;
+	margin: calc(var(--default-grid-baseline, 4px) * 2) 0 0;
+}
+
+
+.ocrflow-panel__mine-row{
+	display: flex;
+	align-items: flex-start;
+	gap: calc(var(--default-grid-baseline, 4px) * 3);
+	padding: calc(var(--default-grid-baseline, 4px) * 3) 0;
+	border-bottom: 1px solid var(--color-border);
+}
+
+
+/* Flexible text column: it must be allowed to shrink (min-width: 0) so the
+   path ellipsizes, and the buttons must never be the thing that shrinks — a
+   squeezed NcButton truncates its label to "Re…", which is unreadable. */
+.ocrflow-panel__mine-text{
+	display: flex;
+	min-width: 0;
+	flex: 1 1 auto;
+	flex-direction: column;
+	gap: calc(var(--default-grid-baseline, 4px) * 1);
+}
+
+
+.ocrflow-panel__mine-actions{
+	display: flex;
+	flex: 0 0 auto;
+	gap: calc(var(--default-grid-baseline, 4px) * 2);
+	align-items: flex-start;
+}
+
+
+/* On a phone a row cannot hold text and three actions side by side: stack
+   them, with the actions wrapping rather than truncating. */
+@media (max-width: 600px) {
+.ocrflow-panel__mine-row{
+		flex-direction: column;
+		align-items: stretch;
+		gap: calc(var(--default-grid-baseline, 4px) * 2);
+	}
+
+.ocrflow-panel__mine-actions{
+		flex-wrap: wrap;
+	}}
+
+
+.ocrflow-panel__mine-dir,
+.ocrflow-panel__mine-name{
+	/* Both wrap instead of ellipsizing: the point of the row is that the
+	   reader can read the whole location and the whole file name. */
+	overflow-wrap: anywhere;
+}
+
+
+.ocrflow-panel__mine-dir{
+	color: var(--color-text-maxcontrast);
+	font-size: var(--font-size-small, 13px);
+}
+
+
+.ocrflow-panel__mine-name{
+	font-weight: bold;
+}
+
+
+.ocrflow-panel__mine-error{
+	/* The worker's own words. Monospace and quiet: it is evidence, not prose,
+	   and it is the only reason an unclassified failure is not a mystery. */
+	color: var(--color-text-maxcontrast);
+	font-family: var(--font-face-monospace, monospace);
+	font-size: var(--font-size-small, 13px);
+	overflow-wrap: anywhere;
+}
+
+
+.ocrflow-panel__mine-text{
+	overflow-wrap: anywhere;
+}
+
+
+.ocrflow-panel__mine-meta{
+	color: var(--color-text-maxcontrast);
+	font-size: 0.9em;
+	overflow-wrap: anywhere;
+}
+
+
+.ocrflow-panel__count{
+	flex: 0 0 auto;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+</style>

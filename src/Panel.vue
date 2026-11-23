@@ -170,7 +170,6 @@
 			</template>
 		</section>
 
-
 		<p v-if="!blocks.length" class="ocrflow-panel__empty">
 			{{ t('Nothing has been queued yet.') }}
 		</p>
@@ -357,6 +356,46 @@ export default {
 					},
 				},
 			]
+		},
+		processCount() {
+			const block = this.blocks.find((b) => b.id === 'not_processed')
+			return block ? Number(block.count) : 0
+		},
+		processEffective() {
+			return Math.max(0, Math.min(Number(this.batchSize) || 0, this.processCount))
+		},
+		processLabel() {
+			const n = this.processEffective
+			return n === 1 ? this.t('Process 1 file') : this.t('Process {count} files', { count: n })
+		},
+		processDisabled() {
+			return this.processing
+				|| !this.engineConfigured
+				|| this.processEffective < 1
+				|| this.processInfo.daily_used >= this.processInfo.daily_cap
+		},
+		processReason() {
+			if (!this.engineConfigured) {
+				return this.t('No OCR engine is configured')
+			}
+			if (this.processInfo.daily_used >= this.processInfo.daily_cap) {
+				return this.t('Daily limit reached: {count} files.', { count: this.processInfo.daily_cap })
+			}
+			return ''
+		},
+		processEstimate() {
+			const estimate = this.processInfo.estimate || {}
+			const n = this.processEffective
+			if (estimate.avg_pages === null || estimate.avg_pages === undefined) {
+				return this.t('No page estimate yet.')
+			}
+			const pages = Math.max(1, Math.round(estimate.avg_pages * n))
+			let text = this.t('About {pages} pages', { pages })
+			if (estimate.per_minute) {
+				const minutes = Math.max(1, Math.round(n / estimate.per_minute))
+				text += ' · ' + this.t('about {minutes} min', { minutes })
+			}
+			return text
 		},
 	},
 	mounted() {
@@ -589,48 +628,10 @@ export default {
 				this.mineBusy = false
 			}
 		},
-		processCount() {
-			const block = this.blocks.find((b) => b.id === 'not_processed')
-			return block ? Number(block.count) : 0
-		},
+
 		// The effective number: a field that says 25 when three are left is a
 		// label that lies about what the click will do.
-		processEffective() {
-			return Math.max(0, Math.min(Number(this.batchSize) || 0, this.processCount))
-		},
-		processLabel() {
-			const n = this.processEffective
-			return n === 1 ? this.t('Process 1 file') : this.t('Process {count} files', { count: n })
-		},
-		processDisabled() {
-			return this.processing
-				|| !this.engineConfigured
-				|| this.processEffective < 1
-				|| this.processInfo.daily_used >= this.processInfo.daily_cap
-		},
-		processReason() {
-			if (!this.engineConfigured) {
-				return this.t('No OCR engine is configured')
-			}
-			if (this.processInfo.daily_used >= this.processInfo.daily_cap) {
-				return this.t('Daily limit reached: {count} files.', { count: this.processInfo.daily_cap })
-			}
-			return ''
-		},
-		processEstimate() {
-			const estimate = this.processInfo.estimate || {}
-			const n = this.processEffective
-			if (estimate.avg_pages === null || estimate.avg_pages === undefined) {
-				return this.t('No page estimate yet.')
-			}
-			const pages = Math.max(1, Math.round(estimate.avg_pages * n))
-			let text = this.t('About {pages} pages', { pages })
-			if (estimate.per_minute) {
-				const minutes = Math.max(1, Math.round(n / estimate.per_minute))
-				text += ' · ' + this.t('about {minutes} min', { minutes })
-			}
-			return text
-		},
+
 		async processAll() {
 			const limit = this.processEffective
 			if (limit < 1 || this.processing) {
@@ -782,7 +783,7 @@ export default {
 </script>
 
 <style scoped>
-.ocrflow-panel {
+.ocrflow-panel{
 	max-width: 40rem;
 }
 
@@ -790,24 +791,24 @@ export default {
    at the inline start (core/css/server.css), so without top padding the first
    line of the panel sits underneath it. Reserve its height when narrow. */
 @media (max-width: 1024px) {
-	.ocrflow-panel {
+.ocrflow-panel{
 		padding-top: calc(var(--default-grid-baseline, 4px) * 12);
 	}
 }
 
 .ocrflow-panel__intro,
 .ocrflow-panel__empty,
-.ocrflow-panel__updated {
+.ocrflow-panel__updated{
 	color: var(--color-text-maxcontrast);
 }
 
-.ocrflow-panel__heading {
+.ocrflow-panel__heading{
 	margin-top: calc(var(--default-grid-baseline, 4px) * 6);
 }
 
 /* The heading is a button now: the section is collapsed by default, and this is
    the only thing to click. It must look like a heading, not like a control. */
-.ocrflow-panel__heading--toggle {
+.ocrflow-panel__heading--toggle{
 	display: flex;
 	align-items: center;
 	gap: calc(var(--default-grid-baseline, 4px) * 2);
@@ -824,21 +825,21 @@ export default {
 }
 
 .ocrflow-panel__heading--toggle:hover,
-.ocrflow-panel__heading--toggle:focus-visible {
+.ocrflow-panel__heading--toggle:focus-visible{
 	color: var(--color-primary-element);
 }
 
-.ocrflow-panel__heading--toggle:focus-visible {
+.ocrflow-panel__heading--toggle:focus-visible{
 	outline: 2px solid var(--color-primary-element);
 	outline-offset: 2px;
 }
 
-.ocrflow-panel__heading-count {
+.ocrflow-panel__heading-count{
 	font-weight: normal;
 	color: var(--color-text-maxcontrast);
 }
 
-.ocrflow-panel__chevron {
+.ocrflow-panel__chevron{
 	margin-inline-start: auto;
 	width: 8px;
 	height: 8px;
@@ -848,24 +849,24 @@ export default {
 	transition: transform 120ms ease-in-out;
 }
 
-.ocrflow-panel__chevron.is-open {
+.ocrflow-panel__chevron.is-open{
 	transform: rotate(-135deg);
 }
 
-.ocrflow-panel__attention {
+.ocrflow-panel__attention{
 	margin-top: calc(var(--default-grid-baseline, 4px) * 2);
 }
 
 /* The rows scroll, the controls above them do not: tabs and "select all shown"
    are how the list is read, so they stay where the eye already is. */
-.ocrflow-panel__mine-scroll {
+.ocrflow-panel__mine-scroll{
 	max-height: 22rem;
 	overflow-y: auto;
 	overscroll-behavior: contain;
 	padding-inline-end: calc(var(--default-grid-baseline, 4px) * 1);
 }
 
-.ocrflow-panel__form {
+.ocrflow-panel__form{
 	display: flex;
 	gap: calc(var(--default-grid-baseline, 4px) * 2);
 	align-items: flex-end;
@@ -877,26 +878,26 @@ export default {
    until its label truncates to "S…". Stack them instead — one full-width field,
    one full-width action. */
 @media (max-width: 600px) {
-	.ocrflow-panel__form {
+.ocrflow-panel__form{
 		flex-direction: column;
 		align-items: stretch;
 	}
 }
 
-.ocrflow-panel__actions {
+.ocrflow-panel__actions{
 	display: flex;
 	gap: 0.75rem;
 	align-items: center;
 	margin-top: 1.5rem;
 }
 
-.ocrflow-panel__error {
+.ocrflow-panel__error{
 	margin-bottom: 1rem;
 }
 
 /* Filters: chips wrap, the search takes the rest of the line. Both are
    controls for the list below, so they sit above it and above the header. */
-.ocrflow-panel__filters {
+.ocrflow-panel__filters{
 	display: flex;
 	flex-wrap: wrap;
 	gap: calc(var(--default-grid-baseline, 4px) * 3);
@@ -904,7 +905,7 @@ export default {
 	margin-top: calc(var(--default-grid-baseline, 4px) * 3);
 }
 
-.ocrflow-panel__chips {
+.ocrflow-panel__chips{
 	display: flex;
 	flex-wrap: wrap;
 	gap: var(--default-grid-baseline, 4px);
@@ -912,17 +913,17 @@ export default {
 
 /* A chip must not shrink its label to "...": it wraps onto its own line
    instead, which is what the flex-wrap above is for. */
-.ocrflow-panel__chips :deep(.button-vue) {
+.ocrflow-panel__chips :deep(.button-vue){
 	flex: 0 0 auto;
 	white-space: nowrap;
 }
 
-.ocrflow-panel__search {
+.ocrflow-panel__search{
 	flex: 1 1 12rem;
 	min-width: 0;
 }
 
-.ocrflow-panel__list-head {
+.ocrflow-panel__list-head{
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
@@ -931,73 +932,24 @@ export default {
 	margin-top: calc(var(--default-grid-baseline, 4px) * 3);
 }
 
-.ocrflow-panel__list-count {
+.ocrflow-panel__list-count{
 	color: var(--color-text-maxcontrast);
 	font-size: 0.9em;
 	font-variant-numeric: tabular-nums;
 }
 
-/* Your own rows: path first (it is what the user recognises), then the fix
-   hint, then the provenance. The actions stay on the inline end and never
-   shrink the text to nothing. */
-.ocrflow-panel__mine {
-	list-style: none;
-	padding: 0;
-	margin: calc(var(--default-grid-baseline, 4px) * 2) 0 0;
-}
-
-.ocrflow-panel__mine-row {
-	display: flex;
-	align-items: flex-start;
-	gap: calc(var(--default-grid-baseline, 4px) * 3);
-	padding: calc(var(--default-grid-baseline, 4px) * 3) 0;
-	border-bottom: 1px solid var(--color-border);
-}
-
-.ocrflow-panel__mine-row.is-selected {
+.ocrflow-panel__mine-row.is-selected{
 	background-color: var(--color-background-hover);
 }
 
-/* Flexible text column: it must be allowed to shrink (min-width: 0) so the
-   path ellipsizes, and the buttons must never be the thing that shrinks — a
-   squeezed NcButton truncates its label to "Re…", which is unreadable. */
-.ocrflow-panel__mine-text {
-	display: flex;
-	min-width: 0;
-	flex: 1 1 auto;
-	flex-direction: column;
-	gap: calc(var(--default-grid-baseline, 4px) * 1);
-}
-
-.ocrflow-panel__mine-actions {
-	display: flex;
-	flex: 0 0 auto;
-	gap: calc(var(--default-grid-baseline, 4px) * 2);
-	align-items: flex-start;
-}
-
-.ocrflow-panel__mine-row :deep(.button-vue) {
+.ocrflow-panel__mine-row :deep(.button-vue){
 	flex: 0 0 auto;
 	white-space: nowrap;
 }
 
-/* On a phone a row cannot hold text and three actions side by side: stack
-   them, with the actions wrapping rather than truncating. */
-@media (max-width: 600px) {
-	.ocrflow-panel__mine-row {
-		flex-direction: column;
-		align-items: stretch;
-		gap: calc(var(--default-grid-baseline, 4px) * 2);
-	}
-
-	.ocrflow-panel__mine-actions {
-		flex-wrap: wrap;
-	}
-}
-
 /* The selection bar follows the scroll: the rows it acts on may be above or
    below the fold, and a bar that scrolls away is a bar nobody finds. */
-.ocrflow-panel__bulk {
+.ocrflow-panel__bulk{
 	position: sticky;
 	bottom: 0;
 	display: flex;
@@ -1011,61 +963,26 @@ export default {
 	z-index: 1;
 }
 
-.ocrflow-panel__bulk-count {
+.ocrflow-panel__bulk-count{
 	font-weight: bold;
 	font-variant-numeric: tabular-nums;
 }
 
-.ocrflow-panel__mine-dir,
-.ocrflow-panel__mine-name {
-	/* Both wrap instead of ellipsizing: the point of the row is that the
-	   reader can read the whole location and the whole file name. */
-	overflow-wrap: anywhere;
-}
-
-.ocrflow-panel__mine-dir {
-	color: var(--color-text-maxcontrast);
-	font-size: var(--font-size-small, 13px);
-}
-
-.ocrflow-panel__mine-name {
-	font-weight: bold;
-}
-
-.ocrflow-panel__mine-error {
-	/* The worker's own words. Monospace and quiet: it is evidence, not prose,
-	   and it is the only reason an unclassified failure is not a mystery. */
-	color: var(--color-text-maxcontrast);
-	font-family: var(--font-face-monospace, monospace);
-	font-size: var(--font-size-small, 13px);
-	overflow-wrap: anywhere;
-}
-
-.ocrflow-panel__mine-text {
-	overflow-wrap: anywhere;
-}
-
-.ocrflow-panel__mine-meta {
-	color: var(--color-text-maxcontrast);
-	font-size: 0.9em;
-	overflow-wrap: anywhere;
-}
-
 /* --- the report: six blocks of files ------------------------------------- */
 
-.ocrflow-panel__note {
+.ocrflow-panel__note{
 	margin: calc(var(--default-grid-baseline, 4px) * 2) 0 0;
 	font-size: 0.85em;
 	color: var(--color-text-maxcontrast);
 }
 
-.ocrflow-panel__block {
+.ocrflow-panel__block{
 	margin-top: calc(var(--default-grid-baseline, 4px) * 4);
 }
 
 /* The heading is a row, not a paragraph: label left, total right, on the same
    baseline as the rows underneath it. */
-.ocrflow-panel__block-heading {
+.ocrflow-panel__block-heading{
 	display: flex;
 	align-items: baseline;
 	justify-content: space-between;
@@ -1075,65 +992,38 @@ export default {
 	font-weight: 600;
 }
 
-.ocrflow-panel__counts {
-	list-style: none;
-	padding: 0;
-	margin: 0;
-}
-
-/* Every sub-row is one shape and one indent: the hierarchy is the step in, not
-   a second colour scheme. */
-.ocrflow-panel__counts li {
-	display: flex;
-	align-items: baseline;
-	justify-content: space-between;
-	gap: calc(var(--default-grid-baseline, 4px) * 3);
-	box-sizing: border-box;
-	padding-block: calc(var(--default-grid-baseline, 4px) * 1);
-	padding-inline-start: calc(var(--default-grid-baseline, 4px) * 4);
-	font-size: 0.9em;
-	color: var(--color-text-maxcontrast);
-}
-
-.ocrflow-panel__status {
-	flex: 1 1 auto;
-	min-width: 0;
-	/* No text-transform: the labels are sentences ("read it, no text to
-	   transcribe") or engine names ("by google 3.16.0"), and capitalising every
-	   word turned them into Titles. */
-}
-
-.ocrflow-panel__count {
+.ocrflow-panel__count{
 	flex: 0 0 auto;
 	font-variant-numeric: tabular-nums;
 	white-space: nowrap;
 }
 
 .ocrflow-panel__counts li.is-below-bar .ocrflow-panel__status,
-.ocrflow-panel__counts li.is-below-bar .ocrflow-panel__count {
+.ocrflow-panel__counts li.is-below-bar .ocrflow-panel__count{
 	color: var(--color-warning-text, var(--color-text-maxcontrast));
 }
 
 /* The one block whose numbers are a problem, not just a count. */
-.ocrflow-panel__process {
+.ocrflow-panel__process{
 	display: flex;
 	align-items: flex-end;
 	gap: calc(var(--default-grid-baseline, 4px) * 2);
 	margin-top: calc(var(--default-grid-baseline, 4px) * 2);
 }
 
-.ocrflow-panel__batch {
+.ocrflow-panel__batch{
 	width: 9rem;
 }
 
 /* Hint lines sit under a control that spends money: quiet, not shouting. */
-.ocrflow-panel__hint {
+.ocrflow-panel__hint{
 	margin: calc(var(--default-grid-baseline, 4px) * 1) 0 0;
 	color: var(--color-text-maxcontrast);
 	font-size: 0.9em;
 }
 
-.ocrflow-panel__block--error .ocrflow-panel__count {
+.ocrflow-panel__block--error .ocrflow-panel__count{
 	color: var(--color-error-text, var(--color-error));
 }
+
 </style>
