@@ -11,9 +11,11 @@ use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\BackgroundJob\ScanJob;
 use OCA\OcrFlow\Storage\EnqueueService;
 use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Report\CategoryRow;
 use OCA\OcrFlow\Report\PanelReport;
 use OCA\OcrFlow\Service\AccessGate;
 use OCA\OcrFlow\Service\EnginePolicy;
+use OCA\OcrFlow\Service\OutcomeCatalog;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\NoAdminRequired;
@@ -120,31 +122,32 @@ class StatusController extends OCSController
 				foreach ($report['read_by_engine'] as $engineRow) {
 					$engine = $engineRow['engine'];
 					$version = $engineRow['version'];
-					$label2 = $this->engineLabel($engine, $version);
-					$rows[] = [
-						'key' => ($engine ?? '') . '|' . ($version ?? ''),
-						'label' => $label2,
-						'count' => $engineRow['count'],
-						// A known version below the bar is the one case worth
-						// re-reading; an unknown version is unknown, not bad.
-						'below_bar' => $engine !== null && $version !== null && !$this->engine->meetsBar($engine, $version),
-					];
+					$label2 = OutcomeCatalog::engine($engine, $version);
+					// A known version below the bar is the one case worth
+					// re-reading; an unknown version is unknown, not bad.
+					$rows[] = \OCA\OcrFlow\Report\CategoryRow::of(
+						($engine ?? '') . '|' . ($version ?? ''),
+						$label2,
+						$engineRow['count'],
+						null,
+						$engine !== null && $version !== null && !$this->engine->meetsBar($engine, $version),
+					);
 				}
 				// "Nothing to transcribe" is a read: the reader is the fact the
 				// owner cares about, so this row is named by the engine that
 				// looked and found nothing — not by us in the abstract.
 				foreach ($report['no_text_by_engine'] as $noText) {
-					$rows[] = [
-						'key' => 'no_text|' . ($noText['engine'] ?? ''),
-						'label' => $this->readerLabel($noText['engine']) . ', no text to transcribe',
-						'count' => $noText['count'],
-					];
+					$rows[] = \OCA\OcrFlow\Report\CategoryRow::of(
+					'no_text|' . ($noText['engine'] ?? ''),
+					OutcomeCatalog::reader($noText['engine']) . ', no text to transcribe',
+					$noText['count'],
+				);
 				}
 			}
 
 			if ($id === 'queue') {
-				$rows[] = ['key' => 'queued', 'label' => 'Waiting to be processed', 'count' => $report['queue']['queued']];
-				$rows[] = ['key' => 'claimed', 'label' => 'Being processed right now', 'count' => $report['queue']['claimed']];
+				$rows[] = \OCA\OcrFlow\Report\CategoryRow::of('queued', 'Waiting to be processed', $report['queue']['queued']);
+				$rows[] = \OCA\OcrFlow\Report\CategoryRow::of('claimed', 'Being processed right now', $report['queue']['claimed']);
 				$count = $report['queue']['queued'] + $report['queue']['claimed'];
 			}
 
@@ -154,15 +157,15 @@ class StatusController extends OCSController
 						continue;
 					}
 					$entry = $policy->entry((string) $code);
-					$rows[] = [
-						'key' => (string) $code,
-						// A label, not the sentence: the rows sit in a column of
-						// counts, and the sentence explains the code. It rides
-						// along as `title` so a pointer can still ask.
-						'label' => $entry['short'] ?? (string) $code,
-						'title' => $entry['text'] ?? '',
-						'count' => $n,
-					];
+					// A label, not the sentence: the rows sit in a column of counts,
+					// and the sentence explains the code. It rides along as `title`
+					// so a pointer can still ask.
+					$rows[] = \OCA\OcrFlow\Report\CategoryRow::of(
+						(string) $code,
+						$entry['short'] ?? (string) $code,
+						$n,
+						$entry['text'] ?? '',
+					);
 				}
 				// Errors is every file we tried to read and could not — including
 				// the two kinds that never entered the pipeline, because they are
@@ -170,20 +173,10 @@ class StatusController extends OCSController
 				// is the one who can fix it. Keeping them in a footnote below a
 				// total made them look like a rounding note.
 				if ($report['empty'] > 0) {
-					$rows[] = [
-						'key' => 'empty',
-						'label' => 'Empty file',
-						'title' => 'This file has no content (0 bytes).',
-						'count' => $report['empty'],
-					];
+					$rows[] = \OCA\OcrFlow\Report\CategoryRow::of('empty', 'Empty file', $report['empty'], 'This file has no content (0 bytes).');
 				}
 				if ($report['unreadable_format'] > 0) {
-					$rows[] = [
-						'key' => 'unreadable_format',
-						'label' => 'Format we do not read',
-						'title' => 'This file type is not one the pipeline can read.',
-						'count' => $report['unreadable_format'],
-					];
+					$rows[] = \OCA\OcrFlow\Report\CategoryRow::of('unreadable_format', 'Format we do not read', $report['unreadable_format'], 'This file type is not one the pipeline can read.');
 				}
 				$count = 0;
 				foreach ($rows as $row) {
@@ -445,10 +438,10 @@ class StatusController extends OCSController
 	private function engineLabel(?string $engine, ?string $version): string
 	{
 		if ($version === null) {
-			return $this->readerLabel($engine) . ', version not recorded';
+			return OutcomeCatalog::reader($engine) . ', version not recorded';
 		}
 
-		return $this->readerLabel($engine) . ' ' . $version;
+		return OutcomeCatalog::reader($engine) . ' ' . $version;
 	}
 
 	/**

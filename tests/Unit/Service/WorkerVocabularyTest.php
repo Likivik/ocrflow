@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Service;
 
+use OCA\OcrFlow\Service\OutcomeCatalog;
 use OCA\OcrFlow\Service\RetryPolicy;
 use PHPUnit\Framework\TestCase;
 
@@ -252,7 +253,7 @@ final class WorkerVocabularyTest extends TestCase
 	 */
 	private function constant(string $name): array
 	{
-		$reflection = new \ReflectionClass(RetryPolicy::class);
+		$reflection = new \ReflectionClass(OutcomeCatalog::class);
 		$value = $reflection->getConstant($name);
 		$this->assertIsArray($value, "RetryPolicy::$name must be an array");
 		return array_keys($value);
@@ -265,7 +266,7 @@ final class WorkerVocabularyTest extends TestCase
 	 */
 	private function constantValue(string $name): array
 	{
-		$reflection = new \ReflectionClass(RetryPolicy::class);
+		$reflection = new \ReflectionClass(OutcomeCatalog::class);
 		$value = $reflection->getConstant($name);
 		$this->assertIsArray($value, "RetryPolicy::$name must be an array");
 		return $value;
