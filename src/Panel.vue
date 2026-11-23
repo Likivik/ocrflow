@@ -247,6 +247,7 @@ export default {
 	components: { BlockRows, FileRows, NcButton, NcCheckboxRadioSwitch, NcDialog, NcNoteCard, NcTextField },
 	data() {
 		return {
+			pollTimer: null,
 			counts: {},
 			blocks: [],
 			folder: '',
@@ -402,6 +403,12 @@ export default {
 		this.refresh()
 		this.loadMe()
 		this.loadMine()
+		this.startPolling()
+		document.addEventListener('visibilitychange', this.onVisibilityChange)
+	},
+	beforeUnmount() {
+		this.stopPolling()
+		document.removeEventListener('visibilitychange', this.onVisibilityChange)
 	},
 	methods: {
 		t(text, params) {
@@ -695,27 +702,64 @@ export default {
 				}
 			}, 600)
 		},
+		applyStatus(data) {
+			this.counts = data?.ocs?.data?.queue ?? {}
+			// The reasons behind the Skipped total, each with the sentence
+			// the app already writes for its code. Server-side so the
+			// reader here stays dumb, and so a new reason needs no release.
+			this.blocks = data?.ocs?.data?.blocks ?? []
+			const process = data?.ocs?.data?.process
+			if (process) {
+				this.processInfo = { ...this.processInfo, ...process }
+				// Only adopt the stored preference on the first read: a
+				// reload while someone is typing must not undo the typing.
+				if (!this.batchLoaded) {
+					this.batchSize = process.batch_size
+					this.batchLoaded = true
+				}
+			}
+			this.updatedAt = new Date().toLocaleTimeString()
+		},
+		// Live numbers: one quiet re-read every 5 s while the tab is looked
+		// at. Quiet means no `busy` flicker and no error card on a blip —
+		// stale numbers for a moment beat an error that flaps. A hidden tab
+		// polls nothing at all.
+		startPolling() {
+			this.stopPolling()
+			this.pollTimer = window.setInterval(() => {
+				if (document.visibilityState === 'visible') {
+					this.poll()
+				}
+			}, 5000)
+		},
+		stopPolling() {
+			if (this.pollTimer) {
+				window.clearInterval(this.pollTimer)
+				this.pollTimer = null
+			}
+		},
+		onVisibilityChange() {
+			// Coming back to the tab: the numbers may be minutes old, so read
+			// at once instead of waiting for the next tick.
+			if (document.visibilityState === 'visible') {
+				this.poll()
+			}
+		},
+		async poll() {
+			try {
+				const { data } = await axios.get(`${BASE}/status`, { headers: { 'OCS-APIRequest': 'true' } })
+				this.applyStatus(data)
+			} catch (e) {
+				// A poll is not the user pressing Refresh: a failed one keeps
+				// the last good numbers and says nothing.
+			}
+		},
 		async refresh() {
 			this.busy = true
 			this.error = ''
 			try {
 				const { data } = await axios.get(`${BASE}/status`, { headers: { 'OCS-APIRequest': 'true' } })
-				this.counts = data?.ocs?.data?.queue ?? {}
-				// The reasons behind the Skipped total, each with the sentence
-				// the app already writes for its code. Server-side so the
-				// reader here stays dumb, and so a new reason needs no release.
-				this.blocks = data?.ocs?.data?.blocks ?? []
-				const process = data?.ocs?.data?.process
-				if (process) {
-					this.processInfo = { ...this.processInfo, ...process }
-					// Only adopt the stored preference on the first read: a
-					// reload while someone is typing must not undo the typing.
-					if (!this.batchLoaded) {
-						this.batchSize = process.batch_size
-						this.batchLoaded = true
-					}
-				}
-				this.updatedAt = new Date().toLocaleTimeString()
+				this.applyStatus(data)
 			} catch (e) {
 				this.error = `Could not read the queue: ${e?.response?.status ?? e?.message ?? 'unknown error'}`
 			} finally {
