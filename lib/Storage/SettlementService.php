@@ -50,6 +50,18 @@ class SettlementService
 
 	public function finish(int $id, array $result, string $claimToken): bool
 	{
+		// One outcome, one transaction: the guarded job update, the ledger
+		// row, the stage rows and the retry go in together or not at all.
+		// Without this, a crash between two autocommitted writes left
+		// `ocrflow_jobs` saying one thing and `ocrflow_files` another — the
+		// exact disagreement this class exists to prevent. If it rolls
+		// back, the job stays claimed and lease recovery requeues it: no
+		// partial answer survives.
+		return $this->atomically(fn (): bool => $this->finishNow($id, $result, $claimToken));
+	}
+
+	private function finishNow(int $id, array $result, string $claimToken): bool
+	{
 		$job = $this->jobs->getById($id);
 		if ($job === null) {
 			return false;
@@ -102,12 +114,14 @@ class SettlementService
 		// text is kept on the requeued row: the next failure must not erase the
 		// evidence of the first.
 		if ($updated && $status === self::STATUS_ERROR && ($result['retryable'] ?? false) === true) {
+			// The claim already counted this try (JobStore::claim adds one),
+			// so this UPDATE must not count it again — the old double count
+			// ran every retryable failure twice and then called it three.
 			$attempts = (int) $job->getAttempts();
-			if ($attempts + 1 < self::MAX_ATTEMPTS) {
+			if ($attempts < self::MAX_ATTEMPTS) {
 				$retry = $this->db->getQueryBuilder();
 				$retry->update(self::JOBS)
 					->set('status', $retry->createNamedParameter(self::STATUS_QUEUED))
-					->set('attempts', $retry->createNamedParameter($attempts + 1, IQueryBuilder::PARAM_INT))
 					->set('claim_token', $retry->createNamedParameter(null))
 					->set('claimed_by_worker_id', $retry->createNamedParameter(null, IQueryBuilder::PARAM_INT))
 					->set('claimed_at', $retry->createNamedParameter(null))
@@ -148,6 +162,13 @@ class SettlementService
 	}
 
 	public function recordEmptySource(string $path, ?int $fileId, ?int $size, ?string $etag): void
+	{
+		$this->atomically(function () use ($path, $fileId, $size, $etag): void {
+			$this->recordEmptySourceNow($path, $fileId, $size, $etag);
+		});
+	}
+
+	private function recordEmptySourceNow(string $path, ?int $fileId, ?int $size, ?string $etag): void
 	{
 		// The zero-byte verdict goes to the ledger too, not only to the job
 		// row: retention will purge the job row, and the file is still zero
@@ -194,6 +215,13 @@ class SettlementService
 	}
 
 	public function recordQueuedTwice(string $path, int $fileId, ?int $size, ?string $etag): void
+	{
+		$this->atomically(function () use ($path, $fileId, $size, $etag): void {
+			$this->recordQueuedTwiceNow($path, $fileId, $size, $etag);
+		});
+	}
+
+	private function recordQueuedTwiceNow(string $path, int $fileId, ?int $size, ?string $etag): void
 	{
 		$this->ledger->writeLedger($fileId, $path, $size, $etag, self::STATUS_ERROR, 'error_queued_twice_for_same_bytes', null, null, null);
 
@@ -310,6 +338,29 @@ class SettlementService
 					}
 				}
 			}
+		}
+	}
+
+	/**
+	 * Run a settle step as one transaction. Every write in this class is a
+	 * database write, so "all or nothing" costs nothing and buys the one
+	 * property the tables must hold: one outcome, one answer everywhere.
+	 *
+	 * @template T
+	 * @param callable(): T $fn
+	 * @return T
+	 */
+	private function atomically(callable $fn): mixed
+	{
+		$this->db->beginTransaction();
+		try {
+			$out = $fn();
+			$this->db->commit();
+
+			return $out;
+		} catch (\Throwable $e) {
+			$this->db->rollBack();
+			throw $e;
 		}
 	}
 }

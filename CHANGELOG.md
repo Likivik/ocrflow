@@ -7,6 +7,25 @@ written.
 
 ### Fixed
 
+- **The daily cap is a budget, not a gate.** It used to be `used >= cap →
+  reject`, then queue anyway: 195 of 200 spent, one click queued 200 more. The
+  budget now grants what the day still allows, and gives back what was granted
+  but never queued.
+- **The counter cannot lose writes.** It lived in `oc_preferences`, written
+  read-modify-write — two tabs both passed the gate and one write clobbered
+  the other. `ocrflow_spend (uid, day, used)` with one conditional
+  `used = used + n WHERE used + n <= cap`: the database serialises the
+  increment. `DailyBudget` is the one owner of the money.
+- **"The settle transaction" is a transaction.** `SettlementService` wrote
+  three tables in separate autocommits; a crash in between left `ocrflow_jobs`
+  and `ocrflow_files` disagreeing. One begin/commit/rollBack per outcome now;
+  a rollback leaves the job claimed and lease recovery requeues it.
+- **Attempts are counted once.** The claim counts the try; the retry path
+  counted it again, so a retryable failure ran twice and the row then claimed
+  three attempts. Three real tries now, and the label is honest.
+
+### Fixed
+
 - **"Files to process" no longer freezes at 1.** The panel saved the *clamped*
   number — what the count forced — as the user's preference, so a single file
   left on one day meant "1" forever after. It remembers the number that was

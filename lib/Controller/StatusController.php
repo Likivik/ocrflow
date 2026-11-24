@@ -9,6 +9,7 @@ namespace OCA\OcrFlow\Controller;
 
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\BackgroundJob\ScanJob;
+use OCA\OcrFlow\Storage\DailyBudget;
 use OCA\OcrFlow\Storage\EnqueueService;
 use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Report\CategoryRow;
@@ -39,9 +40,6 @@ class StatusController extends OCSController
 {
 	/** Files one click takes when the panel says nothing. */
 	private const DEFAULT_PROCESS_LIMIT = 25;
-
-	/** The most one click may take, whatever the admin set. */
-	private const MAX_PROCESS_FILES = 200;
 	public function __construct(
 		string $appName,
 		IRequest $request,
@@ -52,6 +50,7 @@ class StatusController extends OCSController
 		private AccessGate $access,
 		private EnginePolicy $engine,
 		private PanelReport $panelReport,
+		private DailyBudget $budget,
 		private ?RetryPolicy $retryPolicy = null,
 		private ?IConfig $config = null,
 	) {
@@ -81,9 +80,9 @@ class StatusController extends OCSController
 			// month says a file costs.
 			'process' => [
 				'batch_size' => $this->batchSizePreference(),
-				'max_files' => $this->processMaxFiles(),
-				'daily_used' => $this->dailyUsed($this->uid()),
-				'daily_cap' => $this->dailyCap(),
+				'max_files' => $this->budget->perClickCap(),
+				'daily_used' => $this->budget->used($this->uid()),
+				'daily_cap' => $this->budget->cap(),
 				'estimate' => $this->panelReport->pageStatsFor($this->uid()),
 			],
 			// Whether the instance will do OCR at all. The sidebar can say
@@ -266,7 +265,7 @@ class StatusController extends OCSController
 			return self::DEFAULT_PROCESS_LIMIT;
 		}
 		$raw = trim((string) $this->config->getUserValue($this->uid(), Application::APP_ID, 'process_batch_size', (string) self::DEFAULT_PROCESS_LIMIT));
-		return ctype_digit($raw) && (int) $raw > 0 ? min((int) $raw, $this->processMaxFiles()) : self::DEFAULT_PROCESS_LIMIT;
+		return ctype_digit($raw) && (int) $raw > 0 ? min((int) $raw, $this->budget->perClickCap()) : self::DEFAULT_PROCESS_LIMIT;
 	}
 
 	/**
@@ -297,33 +296,35 @@ class StatusController extends OCSController
 			], Http::STATUS_CONFLICT);
 		}
 
-		$cap = $this->processMaxFiles();
+		// The budget owns the arithmetic: what one click may take is its
+		// answer, clamped to what the day still allows. The old code compared
+		// a counter here and queued past the cap; the grant cannot.
+		$cap = $this->budget->perClickCap();
 		$raw = $this->request->getParam('limit');
 		$limit = $raw === null ? min(self::DEFAULT_PROCESS_LIMIT, $cap) : (int) $raw;
 		$limit = max(1, min($limit, $cap));
 
 		$uid = $user->getUID();
-		$dailyCap = $this->dailyCap();
-		$used = $this->dailyUsed($uid);
-		if ($used >= $dailyCap) {
+		$grant = $this->budget->reserve($uid, $limit);
+		if ($grant['granted'] === 0) {
 			return new DataResponse([
-				'message' => sprintf('Daily limit reached: %d files.', $dailyCap),
+				'message' => sprintf('Daily limit reached: %d files.', $grant['cap']),
 			], Http::STATUS_TOO_MANY_REQUESTS);
 		}
 
-		$result = $this->enqueue->enqueueNeverProcessed($uid, $limit, $this->engine->engineForJob());
-		if ($result['queued'] > 0) {
-			$this->setDailyUsed($uid, $used + $result['queued']);
-		}
+		$result = $this->enqueue->enqueueNeverProcessed($uid, $grant['granted'], $this->engine->engineForJob());
+		// What was granted but never queued is not spending: give it back,
+		// so the day's number counts files that actually went.
+		$this->budget->refund($uid, $grant['granted'] - $result['queued']);
 
 		return new DataResponse([
 			'queued' => $result['queued'],
 			'refused' => $result['refused'],
 			'skipped_young' => $result['young'],
 			'remaining' => $result['remaining'],
-			'limit' => $limit,
-			'daily_used' => $used + $result['queued'],
-			'daily_cap' => $dailyCap,
+			'limit' => $grant['granted'],
+			'daily_used' => $grant['used'],
+			'daily_cap' => $grant['cap'],
 		]);
 	}
 
@@ -341,48 +342,10 @@ class StatusController extends OCSController
 			return new DataResponse(['message' => 'CSRF check failed'], Http::STATUS_PRECONDITION_FAILED);
 		}
 
-		$size = max(1, min((int) ($this->request->getParam('size') ?? self::DEFAULT_PROCESS_LIMIT), $this->processMaxFiles()));
+		$size = max(1, min((int) ($this->request->getParam('size') ?? self::DEFAULT_PROCESS_LIMIT), $this->budget->perClickCap()));
 		$this->config?->setUserValue($this->uid(), Application::APP_ID, 'process_batch_size', (string) $size);
 
 		return new DataResponse(['size' => $size]);
-	}
-
-	/**
-	 * How many files one click may take: the admin's ceiling, then ours.
-	 */
-	private function processMaxFiles(): int
-	{
-		$raw = trim((string) $this->config?->getAppValue(Application::APP_ID, 'process_max_files', (string) self::MAX_PROCESS_FILES));
-		return ctype_digit($raw) && (int) $raw > 0 ? min((int) $raw, self::MAX_PROCESS_FILES) : self::MAX_PROCESS_FILES;
-	}
-
-	/**
-	 * Files per user per day. A trial budget is finite; a button is easy to press.
-	 */
-	private function dailyCap(): int
-	{
-		$raw = trim((string) $this->config?->getAppValue(Application::APP_ID, 'process_daily_cap', (string) self::MAX_PROCESS_FILES));
-		return ctype_digit($raw) && (int) $raw > 0 ? (int) $raw : self::MAX_PROCESS_FILES;
-	}
-
-	private function dailyUsed(string $uid): int
-	{
-		if ($this->config === null) {
-			return 0;
-		}
-		// A counter without a date is a counter from some other day. Comparing
-		// the day is what makes "today" mean today across restarts.
-		if ($this->config->getUserValue($uid, Application::APP_ID, 'process_daily_date', '') !== gmdate('Y-m-d')) {
-			return 0;
-		}
-		$raw = trim((string) $this->config->getUserValue($uid, Application::APP_ID, 'process_daily_used', '0'));
-		return ctype_digit($raw) ? (int) $raw : 0;
-	}
-
-	private function setDailyUsed(string $uid, int $used): void
-	{
-		$this->config?->setUserValue($uid, Application::APP_ID, 'process_daily_used', (string) max(0, $used));
-		$this->config?->setUserValue($uid, Application::APP_ID, 'process_daily_date', gmdate('Y-m-d'));
 	}
 
 	/**
