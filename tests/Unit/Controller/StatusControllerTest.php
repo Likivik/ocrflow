@@ -67,6 +67,7 @@ class StatusControllerTest extends TestCase
             new AccessGate($config, $groups),
             new EnginePolicy($config),
             $this->panelReport(),
+            new \OCA\OcrFlow\Tests\Unit\Storage\StoreBudget($this->createMock(\OCP\IDBConnection::class)),
         );
     }
 

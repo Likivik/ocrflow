@@ -41,6 +41,13 @@ class StatusProcessTest extends TestCase
 	private bool $configured = true;
 	private array $userValues = [];
 
+	private ?\OCA\OcrFlow\Tests\Unit\Storage\StoreBudget $budget = null;
+
+	private function budget(): \OCA\OcrFlow\Tests\Unit\Storage\StoreBudget
+	{
+		return $this->budget ??= new \OCA\OcrFlow\Tests\Unit\Storage\StoreBudget($this->createMock(\OCP\IDBConnection::class));
+	}
+
 	private function controller(array $queued = ['queued' => 2, 'refused' => 0, 'remaining' => 1, 'young' => 0]): StatusController
 	{
 		$config = $this->createMock(IConfig::class);
@@ -78,7 +85,7 @@ class StatusProcessTest extends TestCase
 			'read_by_engine' => [], 'no_text_by_engine' => [],
 		]);
 
-		return new StatusController('ocrflow', $request, $this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $enqueue, $this->createMock(IJobList::class), $session, $access, $engine, $panelReport, null, $config);
+		return new StatusController('ocrflow', $request, $this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $enqueue, $this->createMock(IJobList::class), $session, $access, $engine, $panelReport, $this->budget(), null, $config);
 	}
 
 	public function testARequestWithoutACSRFTokenNeverSpends(): void
@@ -119,6 +126,7 @@ class StatusProcessTest extends TestCase
 			'ocrflow', $request, $this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class), $this->createMock(IJobList::class),
 			$session, new AccessGate($config, $groupManager), new EnginePolicy($config),
 			$this->createMock(PanelReport::class),
+			$this->budget(),
 		);
 
 		$this->expectException(OCSForbiddenException::class);
@@ -134,24 +142,42 @@ class StatusProcessTest extends TestCase
 		$this->assertSame('No OCR engine is configured', $response->getData()['message']);
 	}
 
-	public function testTheLimitIsClampedOnBothEnds(): void
+	public function testZeroIsNotARequestItIsATypo(): void
 	{
 		$this->params = ['limit' => 0];
 		$data = $this->controller()->process()->getData();
-		$this->assertSame(1, $data['limit'], 'zero files is not a request, it is a typo');
 
+		$this->assertSame(1, $data['limit']);
+	}
+
+	public function testOneClickCannotOutrunABatch(): void
+	{
+		// One test, one click: two clicks in one day are two spends, and the
+		// second would meet the first's grant — the budget doing its job.
 		$this->params = ['limit' => 10000];
 		$data = $this->controller()->process()->getData();
-		$this->assertSame(200, $data['limit'], 'one click cannot outrun a batch');
+
+		$this->assertSame(200, $data['limit']);
 	}
 
 	public function testTheDailyAllowanceStopsTheButton(): void
 	{
-		$this->userValues = ['process_daily_date' => gmdate('Y-m-d'), 'process_daily_used' => '200'];
+		$this->budget()->setUsed('alice', 200);
 		$response = $this->controller()->process();
 
 		$this->assertSame(Http::STATUS_TOO_MANY_REQUESTS, $response->getStatus());
 		$this->assertSame('Daily limit reached: 200 files.', $response->getData()['message']);
+	}
+
+	public function testTheDailyCapIsABudgetNotAGate(): void
+	{
+		// 195 of 200 spent: the click may take only the five that are left.
+		$this->budget()->setUsed('alice', 195);
+		$this->params = ['limit' => 25];
+		$data = $this->controller()->process()->getData();
+
+		$this->assertSame(5, $data['limit'], 'the grant is what the day still allows');
+		$this->assertSame(200, $data['daily_used']);
 	}
 
 	public function testTheSessionUidAndTheEngineAreWhatGetQueued(): void
@@ -163,7 +189,7 @@ class StatusProcessTest extends TestCase
 		$this->assertSame(1, $data['remaining']);
 		$this->assertSame(5, $data['limit']);
 		$this->assertSame('alice', $data['uid'] ?? 'alice');
-		$this->assertSame('2', $this->userValues['process_daily_used'], 'the day counter grew by what was queued');
+		$this->assertSame(2, $this->budget()->used('alice'), 'the day counter grew by what the click was granted');
 	}
 
 	public function testTheBatchSizeIsRememberedAndClamped(): void
