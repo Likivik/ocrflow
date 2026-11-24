@@ -11,6 +11,9 @@ use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Db\Job;
 use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Storage\SettlementService;
+use OCA\OcrFlow\Service\UserScope;
+use OCA\OcrFlow\Service\SpendPolicy;
+use OCA\OcrFlow\Storage\SpendJournal;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\PublicPage;
@@ -51,6 +54,11 @@ class QueueController extends OCSController
 		// Optional so every existing caller (and every existing test) keeps
 		// working: the policy is derivable from the config we already hold.
 		private ?SlotsPolicy $slots = null,
+		// The spend journal is the only writer of spend state: the claim
+		// books the run before the worker may spend, and every give-back
+		// path releases it.
+		private ?SpendJournal $spend = null,
+		private ?SpendPolicy $spendPolicy = null,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -458,7 +466,36 @@ class QueueController extends OCSController
 		if ($job === null) {
 			return new DataResponse(null, Http::STATUS_NO_CONTENT);
 		}
+
+		// The run is booked before the worker may spend it. Money leaves when
+		// the engine runs, so the gate is here — not at the button. "No budget"
+		// is its own answer: the worker sleeps and asks again, the job stays
+		// queued, and nothing is spent.
+		if (!$this->bookRun($job)) {
+			$this->jobStore->release($job->getId(), (string) $job->getClaimToken());
+			return new DataResponse([
+				'wait' => 'budget',
+				'message' => 'today\'s page budget is spent; sleep and claim again later',
+			], Http::STATUS_OK);
+		}
+
 		return new DataResponse($job->toApi());
+	}
+
+	/**
+	 * Book the run against its owner's day. A row whose owner cannot be named
+	 * is booked under `unknown` rather than for free: an unbooked run is a
+	 * spend nobody sees.
+	 */
+	private function bookRun(\OCA\OcrFlow\Db\Job $job): bool
+	{
+		if ($this->spend === null) {
+			return true;
+		}
+		$uid = UserScope::ownerOf($job->getPath()) ?? 'unknown';
+		$estimate = $this->spendPolicy?->estimatePages($job->getSize()) ?? 1;
+
+		return $this->spend->reserveForRun($uid, $job->getId(), $job->getAttempts(), $estimate);
 	}
 
 	/**
@@ -825,6 +862,11 @@ class QueueController extends OCSController
 		}
 		$token = (string) $this->request->getHeader(Application::CLAIM_HEADER);
 		$released = $this->jobStore->release($id, $token);
+		// A claim given back is a run that never spent: the day gets its
+		// units back the moment the run is not going to happen.
+		if ($released) {
+			$this->spend?->releaseForRun($id, (int) $job->getAttempts());
+		}
 		return new DataResponse(
 			['id' => $id, 'released' => $released],
 			$released ? Http::STATUS_OK : Http::STATUS_CONFLICT,

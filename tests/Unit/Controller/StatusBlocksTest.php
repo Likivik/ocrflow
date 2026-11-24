@@ -55,7 +55,8 @@ class StatusBlocksTest extends TestCase
 			new AccessGate($config, $this->createMock(IGroupManager::class)),
 			new EnginePolicy($config),
 			$panelReport,
-			new \OCA\OcrFlow\Tests\Unit\Storage\StoreBudget($this->createMock(\OCP\IDBConnection::class)),
+			new \OCA\OcrFlow\Tests\Unit\Storage\StoreJournal($this->createMock(\OCP\IDBConnection::class), 2000),
+			new \OCA\OcrFlow\Service\SpendPolicy(null),
 			new RetryPolicy(),
 		);
 	}

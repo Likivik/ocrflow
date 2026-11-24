@@ -55,8 +55,15 @@ class MineController extends OCSController
 		$limit = (int) ($this->request->getParam('limit') ?? 50);
 		$limit = max(1, min($limit, self::MAX_LIMIT));
 		$offset = max(0, (int) ($this->request->getParam('offset') ?? 0));
+		// The chip and the search are server-side: a filter that only hides
+		// rows client-side makes the chips count a page while the heading
+		// counts the world.
+		$bucket = $this->request->getParam('bucket');
+		$bucket = is_string($bucket) && $bucket !== '' ? $bucket : null;
+		$q = $this->request->getParam('q');
+		$q = is_string($q) && $q !== '' ? $q : null;
 
-		return new DataResponse($this->mine->list($uid, $limit, $offset));
+		return new DataResponse($this->mine->list($uid, $limit, $offset, $bucket, $q));
 	}
 
 	/**

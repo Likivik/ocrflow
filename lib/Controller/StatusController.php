@@ -9,7 +9,8 @@ namespace OCA\OcrFlow\Controller;
 
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\BackgroundJob\ScanJob;
-use OCA\OcrFlow\Storage\DailyBudget;
+use OCA\OcrFlow\Service\SpendPolicy;
+use OCA\OcrFlow\Storage\SpendJournal;
 use OCA\OcrFlow\Storage\EnqueueService;
 use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Report\CategoryRow;
@@ -50,7 +51,10 @@ class StatusController extends OCSController
 		private AccessGate $access,
 		private EnginePolicy $engine,
 		private PanelReport $panelReport,
-		private DailyBudget $budget,
+		// Money is booked per run at claim (SpendJournal); the request path
+		// only queues and reports. The old click-counter is gone.
+		private SpendJournal $spend,
+		private SpendPolicy $spendPolicy,
 		private ?RetryPolicy $retryPolicy = null,
 		private ?IConfig $config = null,
 	) {
@@ -80,9 +84,9 @@ class StatusController extends OCSController
 			// month says a file costs.
 			'process' => [
 				'batch_size' => $this->batchSizePreference(),
-				'max_files' => $this->budget->perClickCap(),
-				'daily_used' => $this->budget->used($this->uid()),
-				'daily_cap' => $this->budget->cap(),
+				'max_files' => $this->spendPolicy->perClickCap(),
+				'daily_units' => $this->spend->todayUnits($this->uid()),
+				'daily_cap_pages' => $this->spendPolicy->capPages(),
 				'estimate' => $this->panelReport->pageStatsFor($this->uid()),
 			],
 			// Whether the instance will do OCR at all. The sidebar can say
@@ -265,7 +269,7 @@ class StatusController extends OCSController
 			return self::DEFAULT_PROCESS_LIMIT;
 		}
 		$raw = trim((string) $this->config->getUserValue($this->uid(), Application::APP_ID, 'process_batch_size', (string) self::DEFAULT_PROCESS_LIMIT));
-		return ctype_digit($raw) && (int) $raw > 0 ? min((int) $raw, $this->budget->perClickCap()) : self::DEFAULT_PROCESS_LIMIT;
+		return ctype_digit($raw) && (int) $raw > 0 ? min((int) $raw, $this->spendPolicy->perClickCap()) : self::DEFAULT_PROCESS_LIMIT;
 	}
 
 	/**
@@ -296,35 +300,26 @@ class StatusController extends OCSController
 			], Http::STATUS_CONFLICT);
 		}
 
-		// The budget owns the arithmetic: what one click may take is its
-		// answer, clamped to what the day still allows. The old code compared
-		// a counter here and queued past the cap; the grant cannot.
-		$cap = $this->budget->perClickCap();
+		// Queuing is free: a click queues. The money is booked per run when
+		// the worker CLAIMS it (see SpendJournal), so the daily cap lives
+		// where the engine runs, not here. One honest number in the answer:
+		// what the journal says this user has spent today, in pages.
+		$cap = $this->spendPolicy->perClickCap();
 		$raw = $this->request->getParam('limit');
 		$limit = $raw === null ? min(self::DEFAULT_PROCESS_LIMIT, $cap) : (int) $raw;
 		$limit = max(1, min($limit, $cap));
 
 		$uid = $user->getUID();
-		$grant = $this->budget->reserve($uid, $limit);
-		if ($grant['granted'] === 0) {
-			return new DataResponse([
-				'message' => sprintf('Daily limit reached: %d files.', $grant['cap']),
-			], Http::STATUS_TOO_MANY_REQUESTS);
-		}
-
-		$result = $this->enqueue->enqueueNeverProcessed($uid, $grant['granted'], $this->engine->engineForJob());
-		// What was granted but never queued is not spending: give it back,
-		// so the day's number counts files that actually went.
-		$this->budget->refund($uid, $grant['granted'] - $result['queued']);
+		$result = $this->enqueue->enqueueNeverProcessed($uid, $limit, $this->engine->engineForJob());
 
 		return new DataResponse([
 			'queued' => $result['queued'],
 			'refused' => $result['refused'],
 			'skipped_young' => $result['young'],
 			'remaining' => $result['remaining'],
-			'limit' => $grant['granted'],
-			'daily_used' => $grant['used'],
-			'daily_cap' => $grant['cap'],
+			'limit' => $limit,
+			'daily_units' => $this->spend->todayUnits($uid),
+			'daily_cap_pages' => $this->spendPolicy->capPages(),
 		]);
 	}
 
@@ -342,7 +337,7 @@ class StatusController extends OCSController
 			return new DataResponse(['message' => 'CSRF check failed'], Http::STATUS_PRECONDITION_FAILED);
 		}
 
-		$size = max(1, min((int) ($this->request->getParam('size') ?? self::DEFAULT_PROCESS_LIMIT), $this->budget->perClickCap()));
+		$size = max(1, min((int) ($this->request->getParam('size') ?? self::DEFAULT_PROCESS_LIMIT), $this->spendPolicy->perClickCap()));
 		$this->config?->setUserValue($this->uid(), Application::APP_ID, 'process_batch_size', (string) $size);
 
 		return new DataResponse(['size' => $size]);

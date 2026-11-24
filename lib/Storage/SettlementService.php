@@ -31,7 +31,7 @@ class SettlementService
 	private const STATUS_DONE = JobStore::STATUS_DONE;
 
 	/** Attempts after which a retryable failure stays failed. */
-	private const MAX_ATTEMPTS = 3;
+	private const MAX_ATTEMPTS = JobStore::ATTEMPTS_CEILING;
 
 	private const JOBS = 'ocrflow_jobs';
 	private const STAGE_EVENTS = 'ocrflow_stage_events';
@@ -44,6 +44,9 @@ class SettlementService
 		private RetryPolicy $retryPolicy,
 		private ?LoggerInterface $logger = null,
 		private ?StageEvents $stageEvents = null,
+		// The run's booking is settled here, inside the same transaction as
+		// its outcome: a rollback drops both.
+		private ?SpendJournal $spend = null,
 	) {
 	}
 
@@ -58,6 +61,37 @@ class SettlementService
 		// back, the job stays claimed and lease recovery requeues it: no
 		// partial answer survives.
 		return $this->atomically(fn (): bool => $this->finishNow($id, $result, $claimToken));
+	}
+
+	/**
+	 * The worker died mid-run: there is no try left and no report to settle.
+	 * This is the recovery path's verdict — `error_worker_died` — written the
+	 * same way every other verdict is written: the job row, the ledger row and
+	 * the spend booking together. `pages` stays unknown, so the books keep the
+	 * booking's estimate: the engine may have read its pages before the
+	 * worker went.
+	 */
+	public function recordWorkerDied(\OCA\OcrFlow\Db\Job $job): bool
+	{
+		return $this->finish($job->getId(), [
+			'status' => self::STATUS_ERROR,
+			'reason' => 'the worker died before it could report a result',
+			'reason_code' => 'error_worker_died',
+			'retryable' => false,
+		], (string) $job->getClaimToken());
+	}
+
+	/**
+	 * The run is done: the books record the pages the engine really read.
+	 * Zero is a real number — an empty file was read and cost nothing, and a
+	 * book that rounds it up to one page is a book that lies by rounding.
+	 */
+	private function settleRun(\OCA\OcrFlow\Db\Job $job, ?int $pages): void
+	{
+		if ($this->spend === null) {
+			return;
+		}
+		$this->spend->settleForRun($job->getId(), $job->getAttempts(), max(0, $pages));
 	}
 
 	private function finishNow(int $id, array $result, string $claimToken): bool
@@ -101,6 +135,7 @@ class SettlementService
 		$updated = $qb->executeStatement() === 1;
 
 		if ($updated) {
+			$this->settleRun($job, isset($result['pages']) ? (int) $result['pages'] : null);
 			$this->ledger->recordFile($job, $status, $result);
 			// The stage events are part of the same outcome as the job row:
 			// they are written only when the guarded UPDATE actually

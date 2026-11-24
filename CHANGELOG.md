@@ -5,7 +5,34 @@ written.
 
 ## Unreleased
 
+### Added
+
+- **Spend journal: one row per paid engine run.** Reserved when the worker
+  claims the job, settled with the pages the engine really read, released when
+  a run dies before spending — the books conserve every unit. `(job_id,
+  attempts)` is unique, so one run can never be booked twice. The stopgap
+  `ocrflow_spend` counter is gone.
+- **`error_worker_died` (36th code).** A worker that dies mid-run used to loop
+  claim → die → requeue for ever, invisible in every block and paying the
+  engine each cycle. Runs at the attempts ceiling now settle as a verdict in
+  both `ocrflow_jobs` and `ocrflow_files`; `forceRequeue` stays the manual
+  escape.
+- **Show more, real chips, a real search.** The attention list pages past row
+  50, the chips and the search run on the server (`bucket`, `q`), and the
+  heading, the chips and "shown" all come from one answer — every number is
+  derivable from the rows. `src/lib/worklist.js` + vitest pin the paging math.
+
+### Changed
+
+- **The daily cap is where the money leaves.** The claim books the run and
+  answers `wait: budget` when the day is spent (the worker sleeps, no attempt
+  is burned); the button only queues, and the panel shows "{units} of {cap}
+  pages today" instead of disabling on a click-counter. New knob
+  `spend_daily_cap_pages` (default 2000 pages); `process_daily_cap` is the
+  one-release fallback.
+
 ### Fixed
+
 
 - **The daily cap is a budget, not a gate.** It used to be `used >= cap →
   reject`, then queue anyway: 195 of 200 spent, one click queued 200 more. The

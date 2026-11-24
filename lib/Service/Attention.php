@@ -72,15 +72,15 @@ class Attention
 	 *
 	 * @return array{rows: list<array{id: int, path: string, code: string, label: string, fix: string, error: ?string, attempts: int, finished_at: ?int}>, total: int, cap: int}
 	 */
-	public function list(int $limit, int $offset = 0, ?string $code = null, string $verdict = RetryPolicy::VERDICT_ACTIONABLE, ?string $pathPrefix = null): array
+	public function list(int $limit, int $offset = 0, ?string $code = null, string $verdict = RetryPolicy::VERDICT_ACTIONABLE, ?string $pathPrefix = null, ?string $search = null): array
 	{
 		$spellings = $this->spellings($code, $verdict);
-		$total = $this->fetchTotal($spellings, $pathPrefix);
+		$total = $this->fetchTotal($spellings, $pathPrefix, $search);
 		if ($offset >= $total || $limit <= 0) {
 			return ['rows' => [], 'total' => $total, 'cap' => $this->cap()];
 		}
 		$rows = [];
-		foreach ($this->fetchRows($limit, $offset, $spellings, $pathPrefix) as $row) {
+		foreach ($this->fetchRows($limit, $offset, $spellings, $pathPrefix, $search) as $row) {
 			// The SQL LIKE is a coarse pre-filter on an indexed column; THIS
 			// is the authority on whose row it is. A LIKE quirk (an escaping
 			// difference between database engines) can therefore only
@@ -342,6 +342,12 @@ class Attention
 	 * the match to other users' paths — in LIKE those are wildcards, and a
 	 * scope that a wildcard can widen is not a scope.
 	 */
+	/** `%`, `_` and `\` belong to LIKE; a search for `100%` is a search for `100%`. */
+	private function escapeLike(string $value): string
+	{
+		return addcslashes($value, '\\%_');
+	}
+
 	private function pathPredicate(IQueryBuilder $qb, string $pathPrefix): string
 	{
 		$escaped = $this->db === null
@@ -354,7 +360,7 @@ class Attention
 	 * @param list<string> $spellings
 	 * @return list<array<string, mixed>>
 	 */
-	protected function fetchRows(int $limit, int $offset, array $spellings, ?string $pathPrefix = null): array
+	protected function fetchRows(int $limit, int $offset, array $spellings, ?string $pathPrefix = null, ?string $search = null): array
 	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('id', 'file_id', 'path', 'reason_code', 'reason', 'error', 'attempts', 'finished_at')
@@ -367,13 +373,18 @@ class Attention
 		if ($pathPrefix !== null && $pathPrefix !== '') {
 			$qb->andWhere($this->pathPredicate($qb, $pathPrefix));
 		}
+		if ($search !== null && $search !== '') {
+			// The search filters the same rows the count counts: a search that
+			// only hides rows client-side makes every number on the screen lie.
+			$qb->andWhere($qb->expr()->like('path', $qb->createNamedParameter('%' . $this->escapeLike($search) . '%')));
+		}
 		return $qb->executeQuery()->fetchAll();
 	}
 
 	/**
 	 * @param list<string> $spellings
 	 */
-	protected function fetchTotal(array $spellings, ?string $pathPrefix = null): int
+	protected function fetchTotal(array $spellings, ?string $pathPrefix = null, ?string $search = null): int
 	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->selectAlias($qb->createFunction('COUNT(*)'), 'total')
@@ -381,6 +392,11 @@ class Attention
 			->where($this->predicate($qb, $spellings));
 		if ($pathPrefix !== null && $pathPrefix !== '') {
 			$qb->andWhere($this->pathPredicate($qb, $pathPrefix));
+		}
+		if ($search !== null && $search !== '') {
+			// The search filters the same rows the count counts: a search that
+			// only hides rows client-side makes every number on the screen lie.
+			$qb->andWhere($qb->expr()->like('path', $qb->createNamedParameter('%' . $this->escapeLike($search) . '%')));
 		}
 		$row = $qb->executeQuery()->fetch();
 		return $row === false ? 0 : (int) ($row['total'] ?? 0);

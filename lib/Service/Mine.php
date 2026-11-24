@@ -69,54 +69,101 @@ class Mine
 	 *
 	 * @return array{rows: list<array<string, mixed>>, total: int, cap: int}
 	 */
-	public function list(string $uid, int $limit, int $offset = 0): array
+	public function list(string $uid, int $limit, int $offset = 0, ?string $bucket = null, ?string $search = null): array
 	{
 		$prefix = UserScope::prefixFor($uid);
 		if ($prefix === '') {
-			return ['rows' => [], 'total' => 0, 'cap' => $this->attention->cap()];
+			return ['rows' => [], 'total' => 0, 'counts' => ['all' => 0, 'needs_fix' => 0, 'redo' => 0], 'cap' => $this->attention->cap()];
 		}
 
 		$limit = max(1, $limit);
 		$offset = max(0, $offset);
-		// Both origins are asked for enough rows to page the merged list;
-		// neither is asked for the whole archive.
+		// Each side is asked for enough rows to page the merged list; the
+		// global top (offset+limit) cannot contain a row outside a side's own
+		// top (offset+limit), so this is exact, not a guess.
 		$span = min($limit + $offset, self::MAX_ROWS);
 
-		$rows = [];
-		// Actionable, not needs_fix: the list must contain the rows a retry
-		// can help, or the Retry button has nowhere to appear. `retryable` is
-		// then answered per row by the same policy the endpoint enforces.
-		foreach ($this->attention->list($span, 0, null, RetryPolicy::VERDICT_ACTIONABLE, $prefix)['rows'] as $row) {
-			$rows[] = $this->row($row, 'job', $this->policy()->isRetryable((string) ($row['code'] ?? '')));
+		$jobRows = [];
+		$jobResult = $this->attention->list($span, 0, null, RetryPolicy::VERDICT_ACTIONABLE, $prefix, $search);
+		foreach ($jobResult['rows'] as $row) {
+			// Actionable, not needs_fix: the list must contain the rows a retry
+			// can help, or the Retry button has nowhere to appear.
+			$jobRows[] = $this->row($row, 'job', $this->policy()->isRetryable((string) ($row['code'] ?? '')));
 		}
-		foreach ($this->outcomes->list('redo', $span, 0, null, $prefix)['rows'] as $row) {
+
+		$redoRows = [];
+		$redoResult = $this->outcomes->list('redo', $span, 0, null, $prefix, $search);
+		foreach ($redoResult['rows'] as $row) {
 			$origin = is_string($row['origin'] ?? null) ? $row['origin'] : 'ledger';
 			// A stashed result is a decision (apply / discard), not a retry:
 			// the button would re-bill a file whose conflict is still open.
-			$rows[] = $this->row($row, $origin, $origin !== 'stash');
+			$redoRows[] = $this->row($row, $origin, $origin !== 'stash');
 		}
 
-		$rows = array_values(array_filter(
-			$rows,
-			static fn (array $row): bool => UserScope::owns((string) $row['path'], $prefix),
-		));
+		// The ownership predicate lives in the two queries (each side owns its
+		// WHERE); no post-filter here — a row the count counted but the list
+		// dropped is exactly the two-doors disease this replaces.
+		$page = self::page(
+			$jobRows,
+			(int) $jobResult['total'],
+			$redoRows,
+			(int) $redoResult['total'],
+			$bucket,
+			$offset,
+			$limit,
+		);
+
+		return $page + ['cap' => $this->attention->cap()];
+	}
+
+	/**
+	 * The pure core: merge two ordered sides, count them, page them.
+	 *
+	 * Everything the section shows is derivable from this one answer: the
+	 * heading is `total`, the chips are `counts`, and the union of the pages
+	 * is the list — the same rows the totals were taken over. The order is
+	 * total (finished_at, id, origin), so a row cannot fall between two pages
+	 * or appear on both.
+	 *
+	 * @param list<array<string, mixed>> $jobRows the needs_fix side, already ordered
+	 * @param list<array<string, mixed>> $redoRows the redo side, already ordered
+	 * @return array{rows: list<array<string, mixed>>, total: int, counts: array{all: int, needs_fix: int, redo: int}}
+	 */
+	public static function page(array $jobRows, int $jobTotal, array $redoRows, int $redoTotal, ?string $bucket, int $offset, int $limit): array
+	{
+		$wantJob = $bucket !== 'redo';
+		$wantRedo = $bucket !== 'needs_fix';
+
+		$rows = [];
+		if ($wantJob) {
+			$rows = array_merge($rows, $jobRows);
+		}
+		if ($wantRedo) {
+			$rows = array_merge($rows, $redoRows);
+		}
 
 		usort($rows, static function (array $a, array $b): int {
 			$fa = (int) ($a['finished_at'] ?? 0);
 			$fb = (int) ($b['finished_at'] ?? 0);
-			if ($fa === $fb) {
-				return (int) $b['id'] <=> (int) $a['id'];
-			}
-			return $fb <=> $fa;
+			$ia = (int) ($a['id'] ?? 0);
+			$ib = (int) ($b['id'] ?? 0);
+			$oa = (string) ($a['origin'] ?? '');
+			$ob = (string) ($b['origin'] ?? '');
+
+			return ($fb <=> $fa) ?: ($ib <=> $ia) ?: strcmp($oa, $ob);
 		});
 
-		$total = count($rows);
 		return [
 			'rows' => array_slice($rows, $offset, $limit),
-			'total' => $total,
-			'cap' => $this->attention->cap(),
+			'total' => ($wantJob ? $jobTotal : 0) + ($wantRedo ? $redoTotal : 0),
+			'counts' => [
+				'all' => $jobTotal + $redoTotal,
+				'needs_fix' => $jobTotal,
+				'redo' => $redoTotal,
+			],
 		];
 	}
+
 
 	/**
 	 * Retry the ids the caller named — the ones that are theirs, and only

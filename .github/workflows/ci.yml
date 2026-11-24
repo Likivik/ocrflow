@@ -170,6 +170,8 @@ jobs:
           cache: npm
       - name: Install
         run: npm ci --no-audit --no-fund
+      - name: JS unit tests
+        run: npm test
       - name: Build
         run: npm run build
       # The bundle is committed so installing the app needs no node. That makes a

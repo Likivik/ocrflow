@@ -40,7 +40,7 @@
 			<!-- Two different nothings: an empty worklist is good news, an empty
 			     filter is not the same answer and must not be dressed as one. -->
 			<p v-else-if="!mineRows.length" class="ocrflow-panel__empty">
-				{{ t('Nothing of yours needs attention.') }}
+				{{ mineFiltered ? t('No files match this filter.') : t('Nothing of yours needs attention.') }}
 			</p>
 			<template v-else>
 				<div class="ocrflow-panel__filters">
@@ -69,7 +69,7 @@
 						{{ t('Select all shown ({count})', { count: visibleRows.length }) }}
 					</NcCheckboxRadioSwitch>
 					<span class="ocrflow-panel__list-count">
-						{{ t('{shown} of {total} shown', { shown: visibleRows.length, total: mineRows.length }) }}
+						{{ t('{shown} of {total} shown', { shown: mineRows.length, total: mineTotal }) }}
 					</span>
 				</div>
 
@@ -107,6 +107,14 @@
 					</NcButton>
 					<NcButton variant="error" :disabled="mineBusy" @click="askDeleteSelected">
 						{{ t('Delete {count}', { count: selectedCount }) }}
+					</NcButton>
+				</div>
+				<!-- Paging, not truncation: the rows past the first page used to
+				     be unreachable — a list with no door past row 50 hides its
+				     own work. -->
+				<div v-if="mineNextOffset !== null" class="ocrflow-panel__more">
+					<NcButton variant="tertiary" :disabled="mineBusy" @click="loadMore">
+						{{ t('Show more') }}
 					</NcButton>
 				</div>
 			</template>
@@ -217,6 +225,7 @@
 </template>
 
 <script>
+import { mergePages, nextOffset, pageQuery } from './lib/worklist.js'
 import axios from '@nextcloud/axios'
 import { t as translate } from '@nextcloud/l10n'
 import BlockRows from './components/BlockRows.vue'
@@ -266,8 +275,11 @@ export default {
 			processInfo: {
 				batch_size: 25,
 				max_files: 200,
-				daily_used: 0,
-				daily_cap: 200,
+				// Pages spent today, from the journal: the money is booked per
+				// run at claim, so this is the day's real number, not a count
+				// of button presses.
+				daily_units: 0,
+				daily_cap_pages: 2000,
 				estimate: { avg_pages: null, samples: 0, per_minute: null },
 			},
 			batchSize: 25,
@@ -276,17 +288,20 @@ export default {
 			batchSaveTimer: null,
 			batchLoaded: false,
 			mineRows: [],
-			// The server's total, because mineRows is one capped page.
+			// The server's total and chip counts: every number on the section
+			// comes from one server answer, never from counting the page.
 			mineTotal: 0,
+			mineCounts: { all: 0, needs_fix: 0, redo: 0 },
+			mineNextOffset: null,
+			searchTimer: null,
 			mineLoaded: false,
 			mineError: '',
 			mineBusy: false,
 			mineMessage: '',
 			retrying: '',
-			// Filters are client-side over the loaded rows: the endpoint is a
-			// worklist, not a query engine, and a chip that re-queries would
-			// make a 200-row page feel like a search box.
-			// Collapsed by default; the heading still shows the count.
+			// The chip and the search ride to the server (bucket, q): a filter
+			// over loaded rows would count a page while the heading counts the
+			// world. Collapsed by default; the heading still shows the count.
 			attentionOpen: false,
 			activeFilter: 'all',
 			pathQuery: '',
@@ -304,22 +319,18 @@ export default {
 			return BUCKETS.map((bucket) => ({
 				...bucket,
 				label: this.t(bucket.label),
-				count: bucket.id === 'all'
-					? this.mineRows.length
-					: this.mineRows.filter((row) => this.bucketFor(row) === bucket.id).length,
+				// The server's counts, over the world — not over the page.
+				count: Number(this.mineCounts?.[bucket.id]) || 0,
 			}))
 		},
+		mineFiltered() {
+			return this.activeFilter !== 'all' || this.pathQuery.trim() !== ''
+		},
 		visibleRows() {
-			const query = this.pathQuery.trim().toLowerCase()
-			return this.mineRows.filter((row) => {
-				if (this.activeFilter !== 'all' && this.bucketFor(row) !== this.activeFilter) {
-					return false
-				}
-				if (query === '') {
-					return true
-				}
-				return `${row.path} ${this.shortPath(row.path)}`.toLowerCase().includes(query)
-			})
+			// Already filtered and ordered by the server: what is loaded is
+			// what matches. Client-side filtering here would let the chips and
+			// the heading disagree again.
+			return this.mineRows
 		},
 		selectedRows() {
 			return this.mineRows.filter((row) => this.selected.includes(this.rowKey(row)))
@@ -378,25 +389,28 @@ export default {
 			return n === 1 ? this.t('Process 1 file') : this.t('Process {count} files', { count: n })
 		},
 		processDisabled() {
+		// The day's cap does NOT disable this button: queuing is free, and
+		// the claim refuses the run where money would leave. Disabling here
+		// would describe a gate the request path no longer has.
 			return this.processing
 				|| !this.engineConfigured
 				|| this.processEffective < 1
-				|| this.processInfo.daily_used >= this.processInfo.daily_cap
 		},
 		processReason() {
 			if (!this.engineConfigured) {
 				return this.t('No OCR engine is configured')
-			}
-			if (this.processInfo.daily_used >= this.processInfo.daily_cap) {
-				return this.t('Daily limit reached: {count} files.', { count: this.processInfo.daily_cap })
 			}
 			return ''
 		},
 		processEstimate() {
 			const estimate = this.processInfo.estimate || {}
 			const n = this.processEffective
+			const spend = this.t('{units} of {cap} pages today', {
+				units: Number(this.processInfo.daily_units) || 0,
+				cap: Number(this.processInfo.daily_cap_pages) || 0,
+			})
 			if (estimate.avg_pages === null || estimate.avg_pages === undefined) {
-				return this.t('No page estimate yet.')
+				return this.t('No page estimate yet.') + ' · ' + spend
 			}
 			const pages = Math.max(1, Math.round(estimate.avg_pages * n))
 			let text = this.t('About {pages} pages', { pages })
@@ -404,7 +418,18 @@ export default {
 				const minutes = Math.max(1, Math.round(n / estimate.per_minute))
 				text += ' · ' + this.t('about {minutes} min', { minutes })
 			}
-			return text
+			return text + ' · ' + spend
+		},
+	},
+	watch: {
+		// The search goes to the server, so it waits until typing pauses:
+		// one query per keystroke is a 200-row fetch per letter.
+		pathQuery() {
+			window.clearTimeout(this.searchTimer)
+			this.searchTimer = window.setTimeout(() => this.loadMine({ quiet: true }), 400)
+		},
+		activeFilter() {
+			this.loadMine({ quiet: true })
 		},
 	},
 	mounted() {
@@ -512,36 +537,61 @@ export default {
 			}
 			return this.t('{count} d ago', { count: Math.floor(hours / 24) })
 		},
-		async loadMine() {
-			this.mineBusy = true
-			this.mineError = ''
+		async loadMine({ append = false, quiet = false } = {}) {
+			if (!quiet) {
+				this.mineBusy = true
+				this.mineError = ''
+			}
 			try {
-				const { data } = await axios.get(`${BASE}/mine`, { headers: { 'OCS-APIRequest': 'true' } })
-				const rows = data?.ocs?.data?.rows
+				const query = pageQuery({
+					limit: 50,
+					offset: append ? (this.mineNextOffset ?? 0) : 0,
+					bucket: this.activeFilter,
+					q: this.pathQuery.trim(),
+				})
+				const { data } = await axios.get(`${BASE}/mine?${query}`, { headers: { 'OCS-APIRequest': 'true' } })
+				const answer = data?.ocs?.data ?? {}
+				const rows = answer.rows
 				// A malformed answer must not render as "nothing needs
 				// attention" — that would be a lie in the shape of a clean
 				// bill of health.
 				if (!Array.isArray(rows)) {
 					throw new Error('unexpected answer')
 				}
-				const total = Number(data?.ocs?.data?.total)
-				this.mineRows = rows
-				this.mineTotal = Number.isFinite(total) ? total : rows.length
-				// A selection that survived a reload would point at rows the
-				// user can no longer see.
-				const keys = new Set(rows.map((row) => this.rowKey(row)))
-				this.selected = this.selected.filter((key) => keys.has(key))
+				const total = Number(answer.total)
+				this.mineRows = append ? mergePages(this.mineRows, rows) : rows
+				this.mineTotal = Number.isFinite(total) ? total : this.mineRows.length
+				this.mineCounts = answer.counts ?? this.mineCounts
+				this.mineNextOffset = nextOffset(this.mineRows.length, this.mineTotal)
+				if (!append) {
+					// A selection that survived a reload would point at rows the
+					// user can no longer see. A quiet poll keeps it: the user
+					// may be mid-selection and the rows only change under them.
+					const keys = new Set(this.mineRows.map((row) => this.rowKey(row)))
+					this.selected = this.selected.filter((key) => keys.has(key))
+				}
 				this.mineLoaded = true
 			} catch (e) {
+				if (quiet) {
+					// A poll is not the user pressing Refresh: a blip keeps the
+					// last known rows and says nothing.
+					return
+				}
 				// Keep the last known rows out of sight: a stale row next to
 				// an error reads like it is still true.
 				this.mineRows = []
+				this.mineNextOffset = null
 				this.selected = []
 				this.mineMessage = ''
 				this.mineError = e?.response?.status ?? e?.message ?? 'unknown error'
 			} finally {
-				this.mineBusy = false
+				if (!quiet) {
+					this.mineBusy = false
+				}
 			}
+		},
+		async loadMore() {
+			await this.loadMine({ append: true })
 		},
 		async retry(row) {
 			this.retrying = this.rowKey(row)
@@ -677,8 +727,11 @@ export default {
 				if (status === 409) {
 					this.processMessage = this.t('No OCR engine is configured')
 				} else if (status === 429) {
-					this.processMessage = this.t('Daily limit reached: {count} files.', {
-						count: e?.response?.data?.ocs?.data?.message ?? this.processInfo.daily_cap,
+					// The button path no longer enforces the day (the claim
+					// does), so a 429 here is the server saying "later" —
+					// show what it said rather than a limit that moved.
+					this.processMessage = this.t('Could not queue: {reason}', {
+						reason: e?.response?.data?.ocs?.data?.message ?? String(status),
 					})
 				} else if (status === 403) {
 					this.processMessage = this.t('OCR is not enabled for your account.')
@@ -775,6 +828,12 @@ export default {
 			} catch (e) {
 				// A poll is not the user pressing Refresh: a failed one keeps
 				// the last good numbers and says nothing.
+			}
+			// The list moves when the numbers do: a heading that ticks down
+			// over a frozen list is the third way this section used to lie.
+			// Only while it is open — a collapsed section is not watching.
+			if (this.attentionOpen) {
+				await this.loadMine({ quiet: true })
 			}
 		},
 		async refresh() {

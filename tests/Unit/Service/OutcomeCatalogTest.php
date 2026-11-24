@@ -11,7 +11,7 @@ use OCA\OcrFlow\Service\OutcomeCatalog;
 use PHPUnit\Framework\TestCase;
 
 /**
- * [unit] The one vocabulary: 35 codes, one sentence each, one label each.
+ * [unit] The one vocabulary: 36 codes, one sentence each, one label each.
  *
  * A row label is not a sentence. The panel prints these in a column next to a
  * count. The long text explains the code and belongs in a tooltip; the short
@@ -27,7 +27,7 @@ class OutcomeCatalogTest extends TestCase
 	public function testEveryCodeHasAShortFormThatIsARowLabel(): void
 	{
 		$codes = OutcomeCatalog::codes();
-		$this->assertCount(35, $codes, 'the vocabulary is the list this test promises over');
+		$this->assertCount(36, $codes, 'the vocabulary is the list this test promises over');
 
 		foreach ($codes as $code) {
 			$entry = OutcomeCatalog::entry($code);

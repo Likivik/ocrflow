@@ -181,7 +181,11 @@ class QueueRecoveryTest extends TestCase
 		$bound = $this->queryParams === [] ? [] : $this->queryParams[0];
 		$ints = array_values(array_filter($bound, static fn ($v) => is_int($v)));
 		$this->assertNotEmpty($ints, 'the lease cutoff must be bound as an integer epoch');
-		$this->assertEqualsWithDelta(time() - 90, $ints[0], 5, 'the cutoff is the lease window the caller passed');
+		// The cutoff is one of the bound ints (the attempts ceiling is bound
+		// too); it is the one that is an epoch, not a small count.
+		$epochs = array_values(array_filter($ints, static fn ($v): bool => $v > 1000000000));
+		$this->assertNotEmpty($epochs, 'the lease cutoff must be bound as an integer epoch');
+		$this->assertEqualsWithDelta(time() - 90, $epochs[0], 5, 'the cutoff is the lease window the caller passed');
 	}
 
 	public function testTheRequeueOnlyTouchesClaimedRows(): void
