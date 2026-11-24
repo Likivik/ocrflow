@@ -710,9 +710,12 @@ export default {
 					this.batchSize = clamped
 				}
 				try {
+					// Save the ask, not the clamp: the clamp is what the count
+					// forced today, and remembering it froze the field at 1 the
+					// next time many files were back.
 					await axios.post(
 						`${BASE}/process/limit`,
-						{ size: Math.min(Number(this.batchSize) || 1, this.processFieldMax) },
+						{ size: wanted },
 						{ headers: { 'OCS-APIRequest': 'true' } },
 					)
 				} catch (e) {
@@ -734,7 +737,7 @@ export default {
 				if (!this.batchLoaded) {
 					// 25 by default — or the smaller stored ask — but never
 					// more than the files that actually need processing.
-					this.batchSize = Math.min(25, Number(process.batch_size) || 25, this.processFieldMax)
+					this.batchSize = Math.min(Number(process.batch_size) || 25, this.processFieldMax)
 					this.batchLoaded = true
 				}
 			}
