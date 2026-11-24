@@ -90,6 +90,15 @@ class OutcomeCatalog
 		],
 
 		// -- wait --------------------------------------------------------------
+		// The recovery path's verdict: a worker died mid-run and the attempts
+		// ceiling is reached. Not the file's fault — the sentence must not
+		// blame the file — and not retryable without a human.
+		'error_worker_died' => [
+			'verdict' => 'needs_fix',
+			'text' => 'The worker died before the result arrived.',
+			'short' => 'Worker died mid-run',
+			'actor' => 'engine',
+		],
 		'error_app_answered_5xx' => [
 			'verdict' => 'wait',
 			'text' => 'The Nextcloud app failed with a server error while the worker was talking to it.',

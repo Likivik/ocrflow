@@ -27,6 +27,9 @@ use OCP\IDBConnection;
  */
 class JobStore
 {
+	/** The one attempts ceiling: graceful failures and dead workers share it. */
+	public const ATTEMPTS_CEILING = 3;
+
 	public const STATUS_QUEUED = 'queued';
 	public const STATUS_CLAIMED = 'claimed';
 	public const STATUS_DONE = 'done';
@@ -225,6 +228,40 @@ class JobStore
 	}
 
 	/**
+	 * Claimed runs at the attempts ceiling whose holder is gone. They are not
+	 * requeued — there is no try left — and the caller must settle them as
+	 * `error_worker_died`: a silent drop would be a block nobody can see.
+	 *
+	 * @return list<array{id: int, attempts: int}>
+	 * @throws Exception
+	 */
+	public function doomedClaimedIds(int $heartbeatStaleSeconds = self::CLAIM_LEASE_SECONDS): array
+	{
+		$now = time();
+		$leaseCutoff = $now - max(1, $heartbeatStaleSeconds);
+		$hardCutoff = $now - self::CLAIM_HARD_CAP_SECONDS;
+		$select = $this->db->getQueryBuilder();
+		$select->select('j.id')->addSelect('j.attempts')
+			->from(self::JOBS, 'j')
+			->leftJoin('j', 'ocrflow_workers', 'w', $select->expr()->eq('w.id', 'j.claimed_by_worker_id'))
+			->where($select->expr()->eq('j.status', $select->createNamedParameter(self::STATUS_CLAIMED)))
+			->andWhere($select->expr()->gte('j.attempts', $select->createNamedParameter(self::ATTEMPTS_CEILING, IQueryBuilder::PARAM_INT)))
+			->andWhere($select->expr()->orX(
+				$select->expr()->isNull('j.claim_expires_at'),
+				$select->expr()->lt('j.claim_expires_at', $select->createNamedParameter($leaseCutoff, IQueryBuilder::PARAM_INT)),
+				$select->expr()->isNull('j.claimed_by_worker_id'),
+				$select->expr()->isNull('w.id'),
+				$select->expr()->lt('j.claimed_at', $select->createNamedParameter($hardCutoff, IQueryBuilder::PARAM_INT)),
+			));
+		$doomed = [];
+		foreach ($select->executeQuery()->fetchAll() as $row) {
+			$doomed[] = ['id' => (int) $row['id'], 'attempts' => (int) ($row['attempts'] ?? 0)];
+		}
+
+		return $doomed;
+	}
+
+	/**
 	 * Put a claimed job back in the queue — evidence-based recovery.
 	 *
 	 * The OLD rule was a blind timer (`claimed_at` older than N seconds),
@@ -237,7 +274,10 @@ class JobStore
 	 * @param int $heartbeatStaleSeconds how stale a worker's heartbeat may be
 	 * @throws Exception
 	 */
-	public function requeueStale(int $heartbeatStaleSeconds = self::CLAIM_LEASE_SECONDS): int
+	/**
+	 * @param array<int, array{id: int, attempts: int}>|null $requeuedIds what moved, so the caller can release each run's spend booking
+	 */
+	public function requeueStale(int $heartbeatStaleSeconds = self::CLAIM_LEASE_SECONDS, ?array &$requeuedIds = null): int
 	{
 		$now = time();
 		$leaseCutoff = $now - max(1, $heartbeatStaleSeconds);
@@ -247,6 +287,10 @@ class JobStore
 			->from(self::JOBS, 'j')
 			->leftJoin('j', 'ocrflow_workers', 'w', $select->expr()->eq('w.id', 'j.claimed_by_worker_id'))
 			->where($select->expr()->eq('j.status', $select->createNamedParameter(self::STATUS_CLAIMED)))
+			// Runs at the attempts ceiling are not requeued: there is no try
+			// left. The caller settles them — a requeue loop with no ceiling
+			// is a spend leak and an invisible block.
+			->andWhere($select->expr()->lt('j.attempts', $select->createNamedParameter(self::ATTEMPTS_CEILING, IQueryBuilder::PARAM_INT)))
 			->andWhere($select->expr()->orX(
 				// The lease is the primary rule. A pre-lease row (NULL) never
 				// promised a renewal, so it counts as expired — that is what
@@ -260,8 +304,10 @@ class JobStore
 				$select->expr()->lt('j.claimed_at', $select->createNamedParameter($hardCutoff, IQueryBuilder::PARAM_INT)),
 			));
 		$ids = [];
+		$pairs = [];
 		foreach ($select->executeQuery()->fetchAll() as $row) {
 			$ids[] = (int) $row['id'];
+			$pairs[(int) $row['id']] = ['id' => (int) $row['id'], 'attempts' => (int) ($row['attempts'] ?? 0)];
 		}
 		if ($ids === []) {
 			return 0;
@@ -280,6 +326,10 @@ class JobStore
 				->andWhere($qb->expr()->in('id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
 			$released += $qb->executeStatement();
 		}
+		if ($requeuedIds !== null) {
+			$requeuedIds = array_values(array_intersect_key($pairs, array_flip($ids)));
+		}
+
 		return $released;
 	}
 

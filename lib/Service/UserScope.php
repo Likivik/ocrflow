@@ -49,6 +49,21 @@ final class UserScope
 	 * are not. The trailing slash in the prefix is what makes that true, so
 	 * a prefix without it is refused rather than widened.
 	 */
+	/**
+	 * Who owns a stored job path. The shape is `<uid>/files/<rel>` — the same
+	 * rule `prefixFor()` writes. Null when the row is not shaped that way; a
+	 * row nobody can name is a row nobody can meter.
+	 */
+	public static function ownerOf(string $path): ?string
+	{
+		$parts = explode('/', ltrim($path, '/'), 3);
+		if (count($parts) !== 3 || $parts[0] === '' || $parts[1] !== 'files' || $parts[2] === '') {
+			return null;
+		}
+
+		return $parts[0];
+	}
+
 	public static function owns(string $path, string $prefix): bool
 	{
 		if ($prefix === '' || !str_ends_with($prefix, self::FILES)) {

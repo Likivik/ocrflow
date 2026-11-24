@@ -7,7 +7,8 @@
   "scripts": {
     "build": "webpack --node-env production",
     "dev": "webpack --node-env development --watch",
-    "check": "webpack --node-env production"
+    "check": "webpack --node-env production",
+    "test": "vitest run"
   },
   "dependencies": {
     "@nextcloud/axios": "^2.5.0",
@@ -23,6 +24,7 @@
     "sass": "^1.108.2",
     "sass-loader": "^16.0.8",
     "terser-webpack-plugin": "^5.6.1",
+    "vitest": "^3.2.4",
     "webpack": "^5.112.2",
     "webpack-cli": "^6.0.1"
   }

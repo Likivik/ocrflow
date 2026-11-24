@@ -41,11 +41,18 @@ class StatusProcessTest extends TestCase
 	private bool $configured = true;
 	private array $userValues = [];
 
-	private ?\OCA\OcrFlow\Tests\Unit\Storage\StoreBudget $budget = null;
+	private ?\OCA\OcrFlow\Tests\Unit\Storage\StoreJournal $journal = null;
 
-	private function budget(): \OCA\OcrFlow\Tests\Unit\Storage\StoreBudget
+	private function journal(): \OCA\OcrFlow\Tests\Unit\Storage\StoreJournal
 	{
-		return $this->budget ??= new \OCA\OcrFlow\Tests\Unit\Storage\StoreBudget($this->createMock(\OCP\IDBConnection::class));
+		return $this->journal ??= new \OCA\OcrFlow\Tests\Unit\Storage\StoreJournal($this->createMock(\OCP\IDBConnection::class), 2000);
+	}
+
+	/** Book one settled run — what the claim gate does before the engine runs. */
+	private function bookSpent(string $uid, int $jobId, int $pages): void
+	{
+		$this->journal()->reserveForRun($uid, $jobId, 1, $pages);
+		$this->journal()->settleForRun($jobId, 1, $pages);
 	}
 
 	private function controller(array $queued = ['queued' => 2, 'refused' => 0, 'remaining' => 1, 'young' => 0]): StatusController
@@ -85,7 +92,7 @@ class StatusProcessTest extends TestCase
 			'read_by_engine' => [], 'no_text_by_engine' => [],
 		]);
 
-		return new StatusController('ocrflow', $request, $this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $enqueue, $this->createMock(IJobList::class), $session, $access, $engine, $panelReport, $this->budget(), null, $config);
+		return new StatusController('ocrflow', $request, $this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $enqueue, $this->createMock(IJobList::class), $session, $access, $engine, $panelReport, $this->journal(), new \OCA\OcrFlow\Service\SpendPolicy(null), null, $config);
 	}
 
 	public function testARequestWithoutACSRFTokenNeverSpends(): void
@@ -126,7 +133,7 @@ class StatusProcessTest extends TestCase
 			'ocrflow', $request, $this->createMock(\OCA\OcrFlow\Storage\JobStore::class), $this->createMock(\OCA\OcrFlow\Storage\EnqueueService::class), $this->createMock(IJobList::class),
 			$session, new AccessGate($config, $groupManager), new EnginePolicy($config),
 			$this->createMock(PanelReport::class),
-			$this->budget(),
+			$this->journal(), new \OCA\OcrFlow\Service\SpendPolicy(null),
 		);
 
 		$this->expectException(OCSForbiddenException::class);
@@ -152,32 +159,41 @@ class StatusProcessTest extends TestCase
 
 	public function testOneClickCannotOutrunABatch(): void
 	{
-		// One test, one click: two clicks in one day are two spends, and the
-		// second would meet the first's grant — the budget doing its job.
+		// One test, one click: the click only queues, so the button's bound is
+		// the per-click cap — the day's cap is enforced at claim.
 		$this->params = ['limit' => 10000];
 		$data = $this->controller()->process()->getData();
 
 		$this->assertSame(200, $data['limit']);
 	}
 
-	public function testTheDailyAllowanceStopsTheButton(): void
+	public function testTheButtonQueuesTheGateIsAtClaim(): void
 	{
-		$this->budget()->setUsed('alice', 200);
+		// A spent day does not stop the button: queuing is free, and the
+		// claim refuses the run where money would leave. The answer reports
+		// what the journal says, so the panel can say so too.
+		$this->bookSpent('alice', 1, 200);
 		$response = $this->controller()->process();
 
-		$this->assertSame(Http::STATUS_TOO_MANY_REQUESTS, $response->getStatus());
-		$this->assertSame('Daily limit reached: 200 files.', $response->getData()['message']);
+		$this->assertSame(Http::STATUS_OK, $response->getStatus());
+		$data = $response->getData();
+		$this->assertSame(2, $data['queued']);
+		$this->assertSame(200, $data['daily_units'], 'the day is spent and the answer says so');
+		$this->assertSame(2000, $data['daily_cap_pages']);
 	}
 
-	public function testTheDailyCapIsABudgetNotAGate(): void
+	public function testThePayloadBooksWhatTheJournalSays(): void
 	{
-		// 195 of 200 spent: the click may take only the five that are left.
-		$this->budget()->setUsed('alice', 195);
+		// 195 pages spent of a 2000-page day: the click still queues what the
+		// per-click cap allows — the day's remainder is the claim's business —
+		// and the payload reports the journal, not a request-path counter.
+		$this->bookSpent('alice', 1, 195);
 		$this->params = ['limit' => 25];
 		$data = $this->controller()->process()->getData();
 
-		$this->assertSame(5, $data['limit'], 'the grant is what the day still allows');
-		$this->assertSame(200, $data['daily_used']);
+		$this->assertSame(25, $data['limit'], 'queuing is free: no grant arithmetic in the request');
+		$this->assertSame(195, $data['daily_units']);
+		$this->assertSame(2000, $data['daily_cap_pages']);
 	}
 
 	public function testTheSessionUidAndTheEngineAreWhatGetQueued(): void
@@ -189,7 +205,7 @@ class StatusProcessTest extends TestCase
 		$this->assertSame(1, $data['remaining']);
 		$this->assertSame(5, $data['limit']);
 		$this->assertSame('alice', $data['uid'] ?? 'alice');
-		$this->assertSame(2, $this->budget()->used('alice'), 'the day counter grew by what the click was granted');
+		$this->assertSame(0, $this->journal()->todayUnits('alice'), 'a click queues nothing: the day is booked at claim');
 	}
 
 	public function testTheBatchSizeIsRememberedAndClamped(): void

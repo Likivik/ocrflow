@@ -9,6 +9,8 @@ namespace OCA\OcrFlow\BackgroundJob;
 
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\SettlementService;
+use OCA\OcrFlow\Storage\SpendJournal;
 use OCA\OcrFlow\Db\WorkerRegistry;
 use OCA\OcrFlow\Service\PendingResults;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -67,6 +69,10 @@ class ReconcileJob extends TimedJob
 		private ILockingProvider $locks,
 		private WorkerRegistry $workers,
 		private PendingResults $pendingResults,
+		// Recovery is a coordinator, not a store: it settles what died and
+		// releases what came back, through the services that own those rules.
+		private ?SettlementService $settlement = null,
+		private ?SpendJournal $spend = null,
 	) {
 		parent::__construct($time);
 		$this->setInterval(300);
@@ -78,10 +84,30 @@ class ReconcileJob extends TimedJob
 		// renewing it. The worker's liveness is not evidence of ownership — a
 		// claim whose report was lost to a 502 belonged to a perfectly healthy
 		// worker and could never be recovered by a heartbeat rule.
-		$requeued = $this->jobs->requeueStale(JobStore::CLAIM_LEASE_SECONDS);
+		$requeuedIds = [];
+		$requeued = $this->jobs->requeueStale(JobStore::CLAIM_LEASE_SECONDS, $requeuedIds);
 		if ($requeued > 0) {
 			$this->logger->info('ocrflow: requeued ' . $requeued . ' claim(s) whose lease expired');
 		}
+		// A requeued run is over — a later claim is a new run with its own
+		// booking. The dead one releases its units back to the day.
+		foreach ($requeuedIds as $pair) {
+			$this->spend?->releaseForRun($pair['id'], $pair['attempts']);
+		}
+
+		// Runs at the attempts ceiling: no try left, so they are settled as
+		// `error_worker_died` — a verdict in both tables, never a silent drop.
+		foreach ($this->jobs->doomedClaimedIds(JobStore::CLAIM_LEASE_SECONDS) as $pair) {
+			$job = $this->jobs->getById($pair['id']);
+			if ($job !== null && $this->settlement?->recordWorkerDied($job)) {
+				$this->logger->warning('ocrflow: job ' . $pair['id'] . ' settled error_worker_died (attempts ceiling, holder gone)');
+			}
+		}
+
+		// The safety nets: bookings whose release never ran, and books nobody
+		// needs any more.
+		$this->spend?->sweep();
+		$this->spend?->purge();
 
 		// Same tick, same job: prune the registry rows the claims above just
 		// relied on. No new scheduler for either.

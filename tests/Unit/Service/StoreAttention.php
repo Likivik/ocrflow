@@ -250,16 +250,34 @@ class StoreAttention extends Attention
 		return $rows;
 	}
 
-	protected function fetchRows(int $limit, int $offset, array $spellings, ?string $pathPrefix = null): array
+	protected function fetchRows(int $limit, int $offset, array $spellings, ?string $pathPrefix = null, ?string $search = null): array
 	{
 		$this->rowCalls[] = ['limit' => $limit, 'offset' => $offset, 'spellings' => $spellings, 'prefix' => $pathPrefix];
-		return array_slice($this->matching($spellings, $pathPrefix), $offset, $limit);
+		return array_slice($this->searching($this->matching($spellings, $pathPrefix), $search), $offset, $limit);
 	}
 
-	protected function fetchTotal(array $spellings, ?string $pathPrefix = null): int
+	protected function fetchTotal(array $spellings, ?string $pathPrefix = null, ?string $search = null): int
 	{
 		$this->totalCalls[] = $pathPrefix;
-		return count($this->matching($spellings, $pathPrefix));
+		return count($this->searching($this->matching($spellings, $pathPrefix), $search));
+	}
+
+	/**
+	 * Same rule as production's LIKE: the search filters the rows the count
+	 * counts.
+	 *
+	 * @param list<array<string, mixed>> $rows
+	 * @return list<array<string, mixed>>
+	 */
+	private function searching(array $rows, ?string $search): array
+	{
+		if ($search === null || $search === '') {
+			return $rows;
+		}
+		return array_values(array_filter(
+			$rows,
+			static fn (array $row): bool => str_contains((string) ($row['path'] ?? ''), $search),
+		));
 	}
 
 	protected function fetchIds(int $limit, array $spellings): array

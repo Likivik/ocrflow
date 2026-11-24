@@ -87,7 +87,7 @@ class Outcomes
 	 * @param list<string> $ids file ids (the redo selection)
 	 * @return array{rows: list<array<string, mixed>>, total: int, cap: int}
 	 */
-	public function list(string $verdict, int $limit, int $offset = 0, ?string $code = null, ?string $pathPrefix = null): array
+	public function list(string $verdict, int $limit, int $offset = 0, ?string $code = null, ?string $pathPrefix = null, ?string $search = null): array
 	{
 		if (!in_array($verdict, self::TABS, true)) {
 			return ['rows' => [], 'total' => 0, 'cap' => $this->attention->cap()];
@@ -104,7 +104,7 @@ class Outcomes
 			return $result;
 		}
 
-		$rows = $this->classified($verdict, $code, $pathPrefix);
+		$rows = $this->classified($verdict, $code, $pathPrefix, $search);
 		$total = count($rows);
 		if ($offset >= $total || $limit <= 0) {
 			return ['rows' => [], 'total' => $total, 'cap' => $this->attention->cap()];
@@ -323,7 +323,7 @@ class Outcomes
 	 *
 	 * @return list<array<string, mixed>>
 	 */
-	private function classified(string $verdict, ?string $code = null, ?string $pathPrefix = null): array
+	private function classified(string $verdict, ?string $code = null, ?string $pathPrefix = null, ?string $search = null): array
 	{
 		$ledgerRows = $this->fetchLedgerRows();
 
@@ -350,6 +350,16 @@ class Outcomes
 				continue;
 			}
 			$rows[] = $mapped;
+		}
+
+		if ($search !== null && $search !== '') {
+			// The ledger's verdicts are classified in PHP, so the search is a
+			// PHP filter — but it runs BEFORE the count and the slice, which is
+			// what keeps total, chips and rows saying the same thing.
+			$rows = array_values(array_filter(
+				$rows,
+				static fn (array $row): bool => str_contains((string) ($row['path'] ?? ''), $search),
+			));
 		}
 
 		if (!$settledVerdict) {

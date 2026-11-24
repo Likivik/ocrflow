@@ -18,6 +18,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from typing import Any
 from . import quota_gate
 from . import slots as slots_mod
 from .config import env_float, env_int, env_str
-from .queue_client import ClaimStale, Job, QueueClient, QueueProtocolError
+from .queue_client import BudgetWait, ClaimStale, Job, QueueClient, QueueProtocolError
 from .quota_gate import QuotaGate
 from .readiness import report_configured_engine
 from .stage_events import StageCollector, collector_scope, reason_code_for, verdict_code
@@ -71,6 +72,10 @@ def classify_failure(exc: BaseException) -> str:
         if 500 <= status < 600:
             return "app_5xx"
     return _classify_by_text(exc)
+
+
+# How long a worker waits when the day's page budget is spent.
+BUDGET_WAIT_SECONDS = 60
 
 
 def _classify_by_text(exc: BaseException) -> str:
@@ -226,6 +231,11 @@ def run_once(
     if gate is not None and gate.check().blocked:
         return False
     job = client.claim()
+    if isinstance(job, BudgetWait):
+        # The day is spent. Sleep and ask again later: the job stays queued,
+        # no attempt is burned, and no page can be spent past the cap.
+        time.sleep(BUDGET_WAIT_SECONDS)
+        return False
     if job is None:
         return False
 

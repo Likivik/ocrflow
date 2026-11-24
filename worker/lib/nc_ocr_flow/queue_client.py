@@ -147,6 +147,15 @@ class Job:
             raise QueueProtocolError(f"claim returned a job we cannot read: {data!r}") from exc
 
 
+class BudgetWait:
+    """The day's page budget is spent. Sleep and claim again later.
+
+    Not an error and not an empty queue: the work exists, the money does not
+    (yet). A worker that treats this as "retry now" burns a request per loop
+    tick all day; a worker that treats it as "give up" drops the day's rest.
+    """
+
+
 class QueueClient:
     def __init__(
         self,
@@ -171,13 +180,21 @@ class QueueClient:
 
     # -- worker plane ----------------------------------------------------
 
-    def claim(self) -> Job | None:
-        """Ask for one job. ``None`` means the queue is empty, not that we failed."""
+    def claim(self) -> Job | BudgetWait | None:
+        """Ask for one job.
+
+        ``None`` means the queue is empty, not that we failed. ``BudgetWait``
+        means the day's page budget is spent: the job was given back and the
+        only right move is to sleep and ask again later.
+        """
         headers = {WORKER_ID_HEADER: str(self.worker_id)} if self.worker_id is not None else None
         response = self._post("queue/next", extra_headers=headers)
         if response.status_code == 204:
             return None
-        return Job.from_api(self._data(response))
+        payload = self._data(response)
+        if isinstance(payload, dict) and payload.get("wait") == "budget":
+            return BudgetWait()
+        return Job.from_api(payload)
 
     def register(self, version: str | None = None) -> int:
         """Register in the app's worker registry; answer our row id.
