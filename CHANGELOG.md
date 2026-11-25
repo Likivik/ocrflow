@@ -5,6 +5,13 @@ written.
 
 ## Unreleased
 
+### Fixed
+
+- **The panel's buttons update everything they touch.** Retry and Delete now
+  move the queue numbers at once instead of waiting for the 5 s poll, and a
+  chip click or a search that fails says so — it used to keep the old rows
+  standing under the new filter.
+
 ### Added
 
 - **Spend journal: one row per paid engine run.** Reserved when the worker
