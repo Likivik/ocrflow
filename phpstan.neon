@@ -13,4 +13,7 @@ parameters:
 		- vendor/autoload.php
 	scanDirectories:
 		- vendor/nextcloud/ocp
+		# One foreign symbol the app calls (files_lock's LockService): the OCP
+		# stubs do not carry it, and a wrong signature here is a real bug.
+		- stubs
 	treatPhpDocTypesAsCertain: false

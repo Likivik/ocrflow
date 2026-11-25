@@ -47,6 +47,8 @@ class SettlementService
 		// The run's booking is settled here, inside the same transaction as
 		// its outcome: a rollback drops both.
 		private ?SpendJournal $spend = null,
+		// The files_lock door, optional like the rest: a settle must never
+		// fail because a lock was already gone.
 	) {
 	}
 

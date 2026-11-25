@@ -35,11 +35,15 @@ use Psr\Log\LoggerInterface;
  * it a user's credentials would let a compromised container read every file that
  * user can read, which is more than it needs.
  */
+use OCA\OcrFlow\Service\Locks;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\SlotsPolicy;
 
 class QueueController extends OCSController
 {
+	/** How many locked candidates a single claim call may walk past. */
+	private const CLAIM_SKIP_TRIES = 5;
+
 	public function __construct(
 		string $appName,
 		IRequest $request,
@@ -59,6 +63,9 @@ class QueueController extends OCSController
 		// path releases it.
 		private ?SpendJournal $spend = null,
 		private ?SpendPolicy $spendPolicy = null,
+		// The files_lock door: optional so every existing test keeps working,
+		// null-safe at each call site.
+		private ?Locks $locks = null,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -462,8 +469,26 @@ class QueueController extends OCSController
 			return $denied;
 		}
 
-		$job = $this->jobStore->claim($this->workerName(), $this->workerId());
+		// A file being edited right now is not work. The claim loop skips such
+		// a job (its row stays `queued`: no attempt is burned) and lets the
+		// next candidate have the turn; all-locked answers "nothing to do".
+		$skip = [];
+		$job = null;
+		for ($try = 0; $try < self::CLAIM_SKIP_TRIES; $try++) {
+			$candidate = $this->jobStore->claim($this->workerName(), $this->workerId(), $skip);
+			if ($candidate === null) {
+				break;
+			}
+			if ($this->locks?->isLocked($candidate->getFileId()) === true) {
+				$skip[] = (int) $candidate->getId();
+				$this->jobStore->release($candidate->getId(), (string) $candidate->getClaimToken());
+				continue;
+			}
+			$job = $candidate;
+			break;
+		}
 		if ($job === null) {
+			// Nothing claimable: empty queue, or every candidate is locked.
 			return new DataResponse(null, Http::STATUS_NO_CONTENT);
 		}
 
