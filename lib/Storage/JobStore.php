@@ -132,7 +132,13 @@ class JobStore
 	 *
 	 * @throws Exception
 	 */
-	public function claim(string $worker, ?int $workerId = null): ?Job
+	/**
+	 * @param int[] $skipIds rows this claim request must not consider — a file
+	 *                       being edited is not work, and its job keeps its
+	 *                       place in the queue: skipping it here burns no
+	 *                       attempt, it just lets the next candidate run.
+	 */
+	public function claim(string $worker, ?int $workerId = null, array $skipIds = []): ?Job
 	{
 		for ($try = 0; $try < self::MAX_CLAIM_TRIES; $try++) {
 			$qb = $this->db->getQueryBuilder();
@@ -140,6 +146,12 @@ class JobStore
 				->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_QUEUED)))
 				->orderBy('id', 'ASC')
 				->setMaxResults(1);
+			if ($skipIds !== []) {
+				$qb->andWhere($qb->expr()->notIn('id', $qb->createNamedParameter(
+					array_map('intval', $skipIds),
+					\Doctrine\DBAL\Connection::PARAM_INT_ARRAY,
+				)));
+			}
 			$row = $qb->executeQuery()->fetch();
 			if ($row === false) {
 				return null;

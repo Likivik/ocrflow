@@ -1297,6 +1297,28 @@ case "$(occ ocrflow:errors --code=error_file_broken)" in
 esac
 ok "corrupted xref -> queued like any PDF, not broken (the reader repairs it)"
 
+echo "== files_lock: the claim gate's read works, and a held lock moves the etag"
+# Two facts the claim gate stands on, neither of which a unit test can reach.
+# 1. `LockService::getLockFromFileId()` answers "locked" for a live lock.
+# 2. Taking a lock rewrites the file's etag (`propagateEtag()`), which is why
+#    this app reads locks instead of holding one: a held lock would invalidate
+#    the etag snapshot the write ladder compares against, and every result
+#    would be stashed. The smoke saw exactly that when the claim took a lock.
+occ app:enable files_lock >/tmp/ocrflow-files-lock.log 2>&1 \
+  || { tail -5 /tmp/ocrflow-files-lock.log; fail "files_lock ships with the server and must enable"; }
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary 'lock probe' \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/lock-probe.txt" || fail "WebDAV upload of lock-probe.txt failed"
+$ENGINE cp "${APP_DIR}/tests/integration/files-lock-probe.php" "$NAME:/tmp/files-lock-probe.php" \
+  || fail "could not copy the lock probe into the instance"
+probe=$($ENGINE exec -u www-data "$NAME" php /tmp/files-lock-probe.php "$ADMIN_USER" lock-probe.txt 2>&1) \
+  || { echo "$probe"; fail "the lock probe crashed"; }
+echo "$probe"
+for expected in '"available":true' '"query_before":false' '"query_while_locked":true' \
+                '"etag_changed":true' '"query_after_unlock":false'; do
+  case "$probe" in *"$expected"*) ;; *) fail "lock probe lacked ${expected}" ;; esac
+done
+ok "a live lock is visible to the read query, and taking one moves the etag (so we read, not hold)"
+
 echo "== report: the aggregate report equals the id-list arithmetic, on a real database"
 # Twice now a report change passed unit tests and PHPStan and died on the real
 # query builder: `func()->avg()` does not exist, and neither does `expr()->not()`.

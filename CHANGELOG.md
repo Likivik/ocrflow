@@ -5,6 +5,15 @@ written.
 
 ## Unreleased
 
+### Added
+
+- **A file being edited is not OCR'd under the editor's hands.** While a file
+  is locked (an Office/Text session, a manual lock), the claim skips it: the
+  row stays `queued`, no attempt is burned, and the queue keeps moving. The app
+  takes no locks of its own — `files_lock` rewrites the file's etag when it
+  locks, which would defeat the etag ladder that protects the write. Without
+  `files_lock` installed, nothing changes.
+
 ### Fixed
 
 - **The panel's buttons update everything they touch.** Retry and Delete now
