@@ -426,10 +426,13 @@ export default {
 		// one query per keystroke is a 200-row fetch per letter.
 		pathQuery() {
 			window.clearTimeout(this.searchTimer)
-			this.searchTimer = window.setTimeout(() => this.loadMine({ quiet: true }), 400)
+			// Loud, not quiet: a chip or a search is the user asking, and a
+			// failed ask must not leave the old rows standing under a new
+			// filter. Quiet is for the poll only.
+			this.searchTimer = window.setTimeout(() => this.loadMine(), 400)
 		},
 		activeFilter() {
-			this.loadMine({ quiet: true })
+			this.loadMine()
 		},
 	},
 	mounted() {
@@ -627,6 +630,9 @@ export default {
 					this.mineMessage = this.t('Queued for another attempt.')
 				}
 				await this.loadMine()
+				// A retry re-enters the queue: the queue numbers move now,
+				// not on the next poll tick.
+				await this.refresh()
 			} catch (e) {
 				this.mineError = e?.response?.status ?? e?.message ?? 'unknown error'
 			}
@@ -687,6 +693,8 @@ export default {
 				}
 				this.selected = []
 				await this.loadMine()
+				// A delete takes rows out of the queue world too.
+				await this.refresh()
 			} catch (e) {
 				this.mineError = e?.response?.status ?? e?.message ?? 'unknown error'
 			} finally {
