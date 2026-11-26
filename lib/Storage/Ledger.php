@@ -382,7 +382,54 @@ class Ledger
 			$result['engine'] ?? null,
 			$result['engine_version'] ?? null,
 			$result['stamp_version'] ?? null,
+			// What the file looks like after the run, so "already processed?"
+			// can be answered without trusting an etag a lock moves on purpose.
+			// The hash of the file as the run leaves it. A write path passes the
+			// hash of the bytes it wrote; every other terminal leaves the source
+			// untouched, so the source hash IS the aftermath.
+			isset($result['settled_sha256']) && is_string($result['settled_sha256'])
+				? $result['settled_sha256']
+				: $job->getSourceSha256(),
+			isset($result['settled_under_lock'])
+				? (bool) $result['settled_under_lock']
+				: ($job->getRunEtag() !== null),
+			isset($result['settled_mtime']) ? (int) $result['settled_mtime'] : null,
 		);
+	}
+
+	/**
+	 * The ledger's latest row for a file, whatever etag it carries.
+	 *
+	 * The enqueue check needs a version's *aftermath* — hash, size, mtime and
+	 * whether the run held a lock — not just "the row for this etag". A lock
+	 * bump leaves the file on an etag no row mentions, and this is where that
+	 * gap is closed.
+	 *
+	 * @return array{etag: ?string, status: string, reason: ?string, size: ?int,
+	 *               mtime: ?int, settled_sha256: ?string, settled_under_lock: ?bool}|null
+	 */
+	public function identityFor(int $fileId): ?array
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('etag', 'status', 'reason', 'size', 'mtime', 'settled_sha256', 'settled_under_lock')
+			->from(self::FILES)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->orderBy('updated_at', 'DESC')
+			->setMaxResults(1);
+		$row = $qb->executeQuery()->fetch();
+		if ($row === false) {
+			return null;
+		}
+
+		return [
+			'etag' => isset($row['etag']) && is_string($row['etag']) ? $row['etag'] : null,
+			'status' => (string) $row['status'],
+			'reason' => isset($row['reason']) && is_string($row['reason']) ? $row['reason'] : null,
+			'size' => isset($row['size']) ? (int) $row['size'] : null,
+			'mtime' => isset($row['mtime']) ? (int) $row['mtime'] : null,
+			'settled_sha256' => isset($row['settled_sha256']) && is_string($row['settled_sha256']) ? $row['settled_sha256'] : null,
+			'settled_under_lock' => isset($row['settled_under_lock']) ? (bool) $row['settled_under_lock'] : null,
+		];
 	}
 
 	public function writeLedger(
@@ -395,6 +442,9 @@ class Ledger
 		?string $engine,
 		?string $engineVersion,
 		?string $stampVersion,
+		?string $settledSha256 = null,
+		?bool $settledUnderLock = null,
+		?int $mtime = null,
 		bool $settle = false,
 	): void {
 		$qb = $this->db->getQueryBuilder();
@@ -422,6 +472,22 @@ class Ledger
 			$stampVersion = is_string($existing['stamp_version'] ?? null) ? $existing['stamp_version'] : $stampVersion;
 		}
 
+		// A finish that carries no reason code must not erase the verdict the
+		// write already recorded. This is independent of the etag rule above:
+		// when the finish's etag equals the row's (our own write's etag), that
+		// block does not run, and the row would lose its reason — a settled file
+		// becomes an unexplained row the outcomes reader can only class as done.
+		// Unconditional on the spelling: a finish with no reason code simply
+		// does not get to erase one. Dropping the `in_array` guard also removes
+		// the dependency on how the policy spells a canonical code — that
+		// dependency is what let this slip through the first time.
+		if ($exists && !$settle && $reason === null
+			&& is_string($existing['reason'] ?? null)
+			&& $existing['reason'] !== ''
+		) {
+			$reason = $existing['reason'];
+		}
+
 		// Parameters belong to the builder that created them. Binding them on the
 		// SELECT builder and executing the INSERT/UPDATE on another raises
 		// "Named parameter dcValue2 does not have a bound value" at run time —
@@ -440,6 +506,11 @@ class Ledger
 			'path' => $w->createNamedParameter($path),
 			'size' => $w->createNamedParameter($size, IQueryBuilder::PARAM_INT),
 			'etag' => $w->createNamedParameter($etag),
+			'settled_sha256' => $w->createNamedParameter($settledSha256),
+			'settled_under_lock' => $settledUnderLock === null
+				? $w->createNamedParameter(null)
+				: $w->createNamedParameter($settledUnderLock, IQueryBuilder::PARAM_BOOL),
+			'mtime' => $w->createNamedParameter($mtime, IQueryBuilder::PARAM_INT),
 			'updated_at' => $w->createNamedParameter(time(), IQueryBuilder::PARAM_INT),
 		];
 		if ($exists) {

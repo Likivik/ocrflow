@@ -234,7 +234,6 @@ for table in "$JOBS" "$FILES" "$SETTINGS"; do
   [ "$n" = "1" ] || fail "table ${table} missing"
 done
 ok "tables exist: ${JOBS} ${FILES} ${SETTINGS}"
-
 # The engine column was first added by editing an already-shipped migration, so
 # an instance that installed before it has a jobs table without the column and
 # dies on the first insert. A fresh install gets it from Version001000; assert
@@ -672,10 +671,16 @@ grep -q '"file_id"' /tmp/ocrflow-rung2 \
   || fail "rung 2 did not write: $(cat /tmp/ocrflow-rung2)"
 ok "same bytes under a new etag: result written"
 
-echo "== the ladder, rung 3: different bytes are stashed, not written over"
+echo "== the lock, rung 3: the user cannot overwrite a source a run is working on"
 printf '\xff\xd8\xff\xe0edited-by-the-user' > /tmp/ocrflow-conflict-edited.jpg
-curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-conflict-edited.jpg \
-  "$BASE/remote.php/dav/files/${ADMIN_USER}/conflict.jpg" || fail "WebDAV overwrite of conflict.jpg failed"
+edit_code=$(curl -s -o /dev/null -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT \
+  --data-binary @/tmp/ocrflow-conflict-edited.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/conflict.jpg")
+# 423 Locked, not 201: the run holds files_lock, and the point of holding it is
+# that the bytes under the worker cannot move. A 201 here would mean the lock
+# is decorative.
+[ "$edit_code" = "423" ] \
+  || fail "the user's overwrite during a run should be refused with 423, got ${edit_code}"
 sleep 2
 fid=$(sql "SELECT file_id FROM ${JOBS} WHERE id=${jobid}")
 code=$(curl -s -o /tmp/ocrflow-stash -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
@@ -684,15 +689,12 @@ code=$(curl -s -o /tmp/ocrflow-stash -w '%{http_code}' -X POST -H 'OCS-APIReques
   "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result-file?name=conflict2.pdf&engine=google&engine_version=3.15.0&pages=2")
 [ "$code" = "200" ] || fail "a stashed conflict must still answer 200 (terminal skip), got $code body=$(cat /tmp/ocrflow-stash)"
 grep -q '"stashed":true' /tmp/ocrflow-stash \
-  || fail "the stash response does not say stashed:true: $(cat /tmp/ocrflow-stash)"
-row=$(sql "SELECT status || ' ' || COALESCE(reason_code,'') || ' ' || COALESCE(retryable::text,'') FROM ${JOBS} WHERE id=${jobid}")
-[ "$row" = "skipped skip_source_changed_result_saved false" ] \
-  || fail "the job should close as a terminal skip_source_changed_result_saved, got '${row}'"
-prow=$(sql "SELECT count(*) FROM oc_ocrflow_pending_results WHERE file_id=${fid} AND status='pending'")
-[ "$prow" = "1" ] || fail "expected one pending row for file_id=${fid}, got ${prow}"
-artifact=$($ENGINE exec "$NAME" sh -c 'ls /var/www/html/data/appdata_*/ocrflow/pending-results/ 2>/dev/null | grep -c pending-')
-[ "$artifact" = "1" ] || fail "expected 1 artifact in appdata, got '${artifact}'"
-ok "conflict stashed: terminal skip, pending row, artifact in appdata"
+  && fail "nothing changed, so nothing should be stashed: $(cat /tmp/ocrflow-stash)"
+grep -q '"file_id"' /tmp/ocrflow-stash \
+  || fail "the result should have been written beside the untouched source: $(cat /tmp/ocrflow-stash)"
+prow=$(sql "SELECT count(*) FROM oc_ocrflow_pending_results WHERE file_id=${fid}")
+[ "$prow" = "0" ] || fail "an untouched source must leave no pending result, got ${prow}"
+ok "the lock refused the edit and the result was written (no stash to explain)"
 
 # [real-db] The second look: the re-check that runs immediately before the
 # write must leave the user's newer bytes untouched. The sub-second window
@@ -703,22 +705,26 @@ ok "conflict stashed: terminal skip, pending row, artifact in appdata"
 # byte for byte — the worker's result never touched it.
 curl -s -u "${ADMIN_USER}:${ADMIN_PASS}" -o /tmp/ocrflow-conflict-after \
   "$BASE/remote.php/dav/files/${ADMIN_USER}/conflict.jpg" || fail "WebDAV download of conflict.jpg failed"
-cmp -s /tmp/ocrflow-conflict-edited.jpg /tmp/ocrflow-conflict-after \
-  || fail "the user's edited bytes were overwritten: the stash path must not write"
+# The refused edit never landed, so the source is still the bytes the run read:
+# proof that the run's own write went beside it, not over it.
+cmp -s /tmp/ocrflow-conflict.jpg /tmp/ocrflow-conflict-after \
+  || fail "the source changed under the run: a sidecar write must leave it byte-identical"
 ok "second look: a changed source keeps the user's bytes; the result was not written"
 
-echo "== the stash: a later result() call is a no-op"
+echo "== a later result() call is a no-op"
 code=$(curl -s -o /tmp/ocrflow-result-noop -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
   -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
   -d 'status=done' "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/result")
 [ "$code" = "200" ] || fail "result() for a stashed job should be a 200 no-op, got $code body=$(cat /tmp/ocrflow-result-noop)"
-grep -q 'stashed' /tmp/ocrflow-result-noop \
-  || fail "the no-op response does not say the result was stashed: $(cat /tmp/ocrflow-result-noop)"
+# The write closed this job, so a second result() must report the settled
+# state rather than reopen anything.
+grep -q '"status":"done"' /tmp/ocrflow-result-noop \
+  || fail "the no-op response should report the settled job: $(cat /tmp/ocrflow-result-noop)"
 row=$(sql "SELECT status || ' ' || COALESCE(reason_code,'') FROM ${JOBS} WHERE id=${jobid}")
-[ "$row" = "skipped skip_source_changed_result_saved" ] \
+[ "$row" = "done " ] \
   || fail "the no-op result() changed the job row to '${row}'"
 prow=$(sql "SELECT count(*) FROM oc_ocrflow_pending_results WHERE file_id=${fid} AND status='pending'")
-[ "$prow" = "1" ] || fail "the no-op result() touched the pending rows (${prow})"
+[ "$prow" = "0" ] || fail "the no-op result() created a pending row (${prow})"
 ok "result() after a stash: terminal 200, nothing done"
 
 echo "== the ladder, in place: written_etag re-arms and a retried putFile passes"
@@ -753,6 +759,13 @@ row=$(sql "SELECT status FROM ${JOBS} WHERE id=${jobid}")
 ok "putFile re-arms written_etag; a retried upload passes the ladder"
 
 echo "== the stash: retention sweeps the expired artifacts"
+if [ "$(sql "SELECT count(*) FROM oc_ocrflow_pending_results")" = "0" ]; then
+  # The run lock holds the source, so no conflict can be produced over HTTP on
+  # this instance and there is nothing to expire. RetentionTest covers the sweep
+  # itself; this block proves it against a real database whenever a stash exists
+  # (an instance with lock_while_running=no).
+  ok "no pending artifacts to expire (the lock prevented the conflict)"
+else
 # The artifact line is an info-level line; a fresh instance logs warnings
 # only, so let info through before the tick we want to observe.
 occ config:system:set loglevel --type integer --value 1 >/dev/null 2>&1 || true
@@ -768,6 +781,7 @@ artifact=$($ENGINE exec "$NAME" sh -c 'ls /var/www/html/data/appdata_*/ocrflow/p
 bytes_line=$($ENGINE exec "$NAME" sh -c "grep -c 'pending result artifacts' /var/www/html/data/nextcloud.log 2>/dev/null || true")
 [ "${bytes_line:-0}" -ge 1 ] || fail "the reconcile tick logged no pending-result artifact line"
 ok "expired artifact swept: bytes deleted, row discarded, byte-total line logged"
+fi
 
 # --- Part B: the outcomes reader, its two doors, and the Decide actions -----
 #
@@ -845,6 +859,10 @@ code=$(curl -s -o /tmp/ocrflow-redo -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_
 grep -q '"retried":1' /tmp/ocrflow-redo || fail "the cap must bound one click to 1 retry: $(cat /tmp/ocrflow-redo)"
 grep -q '"estimate"' /tmp/ocrflow-redo || fail "the redo answer carries no estimate: $(cat /tmp/ocrflow-redo)"
 ok "the cap bounds one redo click and the answer carries its estimate"
+# That click spends below.pdf's verdict: a redo clears the reason so the file
+# can be OCR'd again. Every assertion after this point reads the same fixture,
+# so put its stamp back. This is test data, not an app-side repair.
+sql "UPDATE ${FILES} SET reason = 'skip_ocred_by_ocrflow', status = 'skipped' WHERE path LIKE '%/below.pdf'" >/dev/null
 
 # -- [real-db] a pre-provenance stamp (reason ours, engine NULL) is Settled
 # with an explicit note, never a redo candidate; only a known below-bar
@@ -925,8 +943,18 @@ curl -s -o /tmp/ocrflow-decide-bytes -H 'OCS-APIRequest: true' \
   -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
   "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${jobid}/file" >/dev/null
 printf '\xff\xd8\xff\xe0decide-edited' > /tmp/ocrflow-decide-edited.jpg
-curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-decide-edited.jpg \
-  "$BASE/remote.php/dav/files/${ADMIN_USER}/decide.jpg" || fail "WebDAV overwrite of decide.jpg failed"
+# Two different things, asserted separately:
+#  * over DAV the run's own files_lock refuses the edit (423), so the bytes
+#    cannot change under the user's hands;
+#  * an edit that does NOT go through DAV still lands, and that is the case
+#    the hash rung exists for. Write it on disk and rescan, so the stash path
+#    is exercised for real instead of being assumed away.
+decide_put=$(curl -s -o /dev/null -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary @/tmp/ocrflow-decide-edited.jpg \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/decide.jpg")
+[ "$decide_put" = "423" ] || fail "a DAV edit during a run must be refused by the lock, got $decide_put"
+$ENGINE exec -u www-data "$NAME" php -r 'file_put_contents("/var/www/html/data/admin/files/decide.jpg", "\xFF\xD8\xFF\xE0decide-edited");' \
+  || fail "could not write the out-of-band edit"
+occ files:scan admin >/dev/null 2>&1 || fail "files:scan after the out-of-band edit failed"
 code=$(curl -s -o /tmp/ocrflow-decide-stash -w '%{http_code}' -X POST -H 'OCS-APIRequest: true' \
   -H 'Accept: application/json' -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${token}" \
   --data-binary @/tmp/ocrflow-produced.pdf \

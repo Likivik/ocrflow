@@ -183,6 +183,88 @@ class JobStore
 	}
 
 	/**
+	 * The queued ids, oldest first, as candidates for one claim request.
+	 *
+	 * The claim gate walks this list instead of pulling one row at a time: a
+	 * file being edited must not consume the claim, and a fixed skip loop of
+	 * five would let six locked files hide the whole queue behind them.
+	 *
+	 * @return int[]
+	 */
+	public function queuedIds(int $limit = 50): array
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('id')->from(self::JOBS)
+			->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_QUEUED)))
+			->orderBy('id', 'ASC')
+			->setMaxResults(max(1, $limit));
+		$rows = $qb->executeQuery()->fetchAll();
+
+		return array_map(static fn (array $row): int => (int) $row['id'], $rows);
+	}
+
+	/**
+	 * Claim one specific row. Same token minting as `claim()`, but the caller
+	 * has already chosen the id — the lock gate decides which candidate runs.
+	 */
+	public function claimById(int $id, string $worker, ?int $workerId = null): ?Job
+	{
+		$token = bin2hex(random_bytes(32));
+		$up = $this->db->getQueryBuilder();
+		$up->update(self::JOBS)
+			->set('status', $up->createNamedParameter(self::STATUS_CLAIMED))
+			->set('claim_token', $up->createNamedParameter($token))
+			->set('claimed_by_worker_id', $up->createNamedParameter($workerId, IQueryBuilder::PARAM_INT))
+			->set('claimed_at', $up->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
+			->set('claim_expires_at', $up->createNamedParameter(time() + self::CLAIM_LEASE_SECONDS, IQueryBuilder::PARAM_INT))
+			->set('attempts', $up->createFunction('attempts + 1'))
+			->where($up->expr()->eq('id', $up->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
+			->andWhere($up->expr()->eq('status', $up->createNamedParameter(self::STATUS_QUEUED)));
+		if ($up->executeStatement() !== 1) {
+			return null;
+		}
+
+		return $this->getById($id);
+	}
+
+	/**
+	 * Record the etag the run works against (read after the lock was taken).
+	 * Guarded by the claim token: a stale worker cannot move another's baseline.
+	 */
+	public function setRunEtag(int $id, string $claimToken, ?string $etag): bool
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->update(self::JOBS)
+			->set('run_etag', $qb->createNamedParameter($etag))
+			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
+			->andWhere($qb->expr()->eq('claim_token', $qb->createNamedParameter($claimToken)));
+
+		return $qb->executeStatement() === 1;
+	}
+
+	/**
+	 * Does this file already have work in flight, whatever its etag says?
+	 *
+	 * A lock moves the file's etag mid-run, so an exact-etag dedupe sees an
+	 * unknown version and would enqueue a duplicate for a file that is being
+	 * OCR'd right now — billed twice, written twice.
+	 */
+	public function activeForFile(int $fileId): bool
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('id')->from(self::JOBS)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->in('status', $qb->createNamedParameter(
+				[self::STATUS_QUEUED, self::STATUS_CLAIMED],
+				\Doctrine\DBAL\Connection::PARAM_STR_ARRAY,
+			)))
+			->setMaxResults(1);
+
+		return $qb->executeQuery()->fetch() !== false;
+	}
+
+	/**
 	 * Extend the lease on a claim this worker still holds.
 	 *
 	 * False means the lease is gone — requeued by recovery, settled elsewhere,

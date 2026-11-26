@@ -99,7 +99,8 @@ class QueueControllerTest extends TestCase
     {
         $jobStore = $this->createMock(JobStore::class);
         $settlement = $this->createMock(SettlementService::class);
-        $jobStore->expects($this->once())->method('claim')->willReturn(null);
+        $jobStore->method('queuedIds')->willReturn([]);
+        $jobStore->expects($this->never())->method('claimById');
 
         $response = $this->controller('s3cret', 's3cret', $jobStore, $settlement)->claim();
 

@@ -35,6 +35,9 @@ class EnqueueService
 		private ?EnginePolicy $enginePolicy = null,
 		private ?Batch $batchService = null,
 		private ?LoggerInterface $logger = null,
+		// Only used by the identity ladder's hash tier. Last argument on
+		// purpose: positional callers keep working.
+		private ?\OCA\OcrFlow\Service\FileExchange $exchange = null,
 	) {
 	}
 
@@ -63,6 +66,13 @@ class EnqueueService
 		}
 
 		if ($fileId !== null) {
+			// Tier 0: work already in flight for this file, whatever the etag
+			// says. A run holds the file locked and its lock has already moved
+			// the etag, so an exact-etag dedupe would see an unknown version
+			// and enqueue a duplicate — billed twice, written twice.
+			if ($this->jobs->activeForFile($fileId)) {
+				return null;
+			}
 			if ($this->jobs->jobForVersion($fileId, $etag) !== null) {
 				return null;
 			}
@@ -128,6 +138,48 @@ class EnqueueService
 			return null;
 		}
 
+		// Tier 3: the etag moved but the bytes may not have. A lock bump, a
+		// metadata-only rewrite, a re-upload of identical bytes — all of them
+		// leave `settled_sha256` equal to what is on disk. Comparing content
+		// is the only answer that survives an etag nobody controls.
+		if ($fileId !== null && $this->exchange !== null) {
+			$identity = $this->ledger->identityFor($fileId);
+			if ($identity !== null && is_string($identity['settled_sha256']) && $identity['settled_sha256'] !== '') {
+				$owner = \OCA\OcrFlow\Service\UserScope::ownerOf($path);
+				$current = null;
+				if ($owner !== null) {
+					$marker = $owner . '/files/';
+					$pos = strpos($path, $marker);
+					if ($pos !== false) {
+						$current = $this->exchange->contentSha256($owner, substr($path, $pos + strlen($marker)));
+					}
+				}
+				if ($current !== null && hash_equals($identity['settled_sha256'], $current)) {
+					$this->logger?->info('ocrflow: loop_guard_tripped', [
+						'file_id' => $fileId,
+						'tier' => $identity['settled_under_lock'] === true ? 2 : 3,
+					]);
+					return null;
+				}
+			}
+		}
+
+		// The baseline the write ladder compares against: the hash of the bytes
+		// as they are *now*, recorded with the version that names them. Hashing
+		// later — at claim, or when the worker downloads — measures whatever is
+		// on disk at that moment, which is not the version this job is about.
+		$sourceHash = null;
+		if ($fileId !== null && $this->exchange !== null) {
+			$owner = \OCA\OcrFlow\Service\UserScope::ownerOf($path);
+			if ($owner !== null) {
+				$marker = $owner . '/files/';
+				$pos = strpos($path, $marker);
+				if ($pos !== false) {
+					$sourceHash = $this->exchange->contentSha256($owner, substr($path, $pos + strlen($marker)));
+				}
+			}
+		}
+
 		$qb = $this->db->getQueryBuilder();
 		$qb->insert(self::JOBS)
 			->values([
@@ -141,6 +193,7 @@ class EnqueueService
 				// images leave the server. Stamped here so a policy change does not
 				// alter a job that is already queued.
 				'engine' => $qb->createNamedParameter($engine),
+				'source_sha256' => $qb->createNamedParameter($sourceHash),
 			]);
 		try {
 			$qb->executeStatement();

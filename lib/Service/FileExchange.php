@@ -57,6 +57,19 @@ class FileExchange
 		];
 	}
 
+	private function hashQuietly(string $owner, string $relative): ?string
+	{
+		try {
+			return $this->contentSha256($owner, $relative);
+		} catch (\Throwable $e) {
+			// Degraded by design: null means "no hash", and the ledger treats
+			// a missing hash as "no identity fact" — the etag rungs still
+			// decide. A storage that refuses a second read must not turn a
+			// successful write into a failed request.
+			return null;
+		}
+	}
+
 	/**
 	 * Overwrite an existing file (the OCR-in-place case).
 	 *
@@ -71,10 +84,17 @@ class FileExchange
 			throw new NotFoundException('not a file: ' . $relative);
 		}
 		$node->putContent($body);
+		// The hash of the bytes now on disk, not of the request body: the
+		// storage may transform them, and the ledger's identity check must
+		// compare like with like.
 		return [
 			'size' => $node->getSize(),
 			'etag' => (string) $node->getEtag(),
 			'file_id' => (int) $node->getId(),
+			'mtime' => (int) $node->getMTime(),
+			// Best-effort: the bytes are already written, and a storage that
+			// refuses a second read must not turn a good write into a failure.
+			'sha256' => $this->hashQuietly($owner, $relative),
 		];
 	}
 

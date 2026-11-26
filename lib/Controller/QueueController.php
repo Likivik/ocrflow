@@ -41,8 +41,8 @@ use OCA\OcrFlow\Service\SlotsPolicy;
 
 class QueueController extends OCSController
 {
-	/** How many locked candidates a single claim call may walk past. */
-	private const CLAIM_SKIP_TRIES = 5;
+	/** How many candidates one claim request may consider. */
+	private const CLAIM_CANDIDATES = 50;
 
 	public function __construct(
 		string $appName,
@@ -197,7 +197,7 @@ class QueueController extends OCSController
 			// The ladder, before the write: an unchanged etag or identical
 			// bytes may pass; a genuinely changed source must not be written
 			// over — its result is stashed for the owner to decide on.
-			if ($this->writeConflict($job, $owner, $relative)) {
+			if ($this->writeConflict($job)) {
 				return $this->stashConflict($id, $job, $body);
 			}
 			// Second look, immediately before the bytes move. The ladder above
@@ -214,10 +214,16 @@ class QueueController extends OCSController
 			// the final milliseconds between this check and replace() below;
 			// a write landing inside that residue can still slip through, and
 			// the file versions remain the backstop for it.
-			if ($this->writeConflict($job, $owner, $relative)) {
+			if ($this->writeConflict($job)) {
 				return $this->stashConflict($id, $job, $body);
 			}
-			$written = $this->files->replace($owner, $relative, $body);
+			// Our own write must pass the wrapper our own lock armed: inside
+			// the app's lock scope it is the owner's work, outside it our own
+			// lock would refuse it.
+			$lockNode = $this->locks?->nodeFor($job->getFileId());
+			$written = $lockNode !== null && $this->locks !== null
+				? $this->locks->runInScope($lockNode, fn (): array => $this->files->replace($owner, $relative, $body))
+				: $this->files->replace($owner, $relative, $body);
 		} catch (NotFoundException) {
 			// Degraded result, by design: the file was moved or deleted while
 			// the worker held the job. A 404 tells the worker the bytes have
@@ -256,6 +262,8 @@ class QueueController extends OCSController
 					$written['etag'],
 					$this->nullableString('engine') ?? $job->getEngine(),
 					$this->nullableString('engine_version'),
+					isset($written['sha256']) ? (string) $written['sha256'] : null,
+					isset($written['mtime']) ? (int) $written['mtime'] : null,
 				);
 			} catch (\Throwable $e) {
 				$this->logger->warning('ocrflow: job ' . $id . ' wrote back but the ledger settle failed: ' . $e->getMessage());
@@ -304,7 +312,7 @@ class QueueController extends OCSController
 		// may pass; a genuinely changed source must not receive the result
 		// beside the newer version — its bytes are stashed for the owner to
 		// decide on, and nothing is trashed.
-		if ($this->writeConflict($job, $owner, $relative)) {
+		if ($this->writeConflict($job)) {
 			$body = fopen('php://input', 'rb');
 			if ($body === false) {
 				return new DataResponse(['message' => 'cannot read the request body'], Http::STATUS_INTERNAL_SERVER_ERROR);
@@ -345,7 +353,7 @@ class QueueController extends OCSController
 			// atomic etag-conditional write, so this narrows the window to the
 			// final milliseconds rather than closing it; the file versions
 			// remain the backstop for that residue.
-			if ($this->writeConflict($job, $owner, $relative)) {
+			if ($this->writeConflict($job)) {
 				return $this->stashConflict($id, $job, $body);
 			}
 			$stored = $this->files->createBeside($owner, $relative, $requested, $body);
@@ -472,24 +480,44 @@ class QueueController extends OCSController
 		// A file being edited right now is not work. The claim loop skips such
 		// a job (its row stays `queued`: no attempt is burned) and lets the
 		// next candidate have the turn; all-locked answers "nothing to do".
-		$skip = [];
+		// The gate walks a batch of candidates: claim the row first, then take
+		// the lock. Locking first would let two workers "take" the same file
+		// (an existing own lock EXTENDS instead of throwing), and the loser's
+		// compensation would delete the lock the winner relies on.
 		$job = null;
-		for ($try = 0; $try < self::CLAIM_SKIP_TRIES; $try++) {
-			$candidate = $this->jobStore->claim($this->workerName(), $this->workerId(), $skip);
+		$node = null;
+		foreach ($this->jobStore->queuedIds(self::CLAIM_CANDIDATES) as $candidateId) {
+			$candidate = $this->jobStore->claimById($candidateId, $this->workerName(), $this->workerId());
 			if ($candidate === null) {
-				break;
+				continue;   // someone else got it between the list and the update
 			}
-			if ($this->locks?->isLocked($candidate->getFileId()) === true) {
-				$skip[] = (int) $candidate->getId();
-				$this->jobStore->release($candidate->getId(), (string) $candidate->getClaimToken());
+			$candidateNode = $this->locks?->nodeFor($candidate->getFileId());
+			if ($candidateNode !== null && $this->locks !== null && !$this->locks->lockForRun($candidateNode)) {
+				// Someone is in the file: give the claim straight back. The row
+				// stays queued, no attempt is spent, the next candidate runs.
+				$this->jobStore->release((int) $candidate->getId(), (string) $candidate->getClaimToken());
 				continue;
 			}
 			$job = $candidate;
+			$node = $candidateNode;
 			break;
 		}
 		if ($job === null) {
-			// Nothing claimable: empty queue, or every candidate is locked.
+			// Nothing claimable: empty queue, or every candidate is being edited.
 			return new DataResponse(null, Http::STATUS_NO_CONTENT);
+		}
+
+		// The baseline the write ladder compares against: the etag AFTER the
+		// lock, because taking a lock rewrites the file's etag. A failed
+		// bookkeeping write releases both — no lock may outlive its claim.
+		if ($node !== null && $this->locks !== null) {
+			$split = self::splitPath((string) $job->getPath());
+			$runEtag = $split !== null ? $this->locks->freshEtag($split[0], $split[1]) : null;
+			if ($runEtag === null || !$this->jobStore->setRunEtag((int) $job->getId(), (string) $job->getClaimToken(), $runEtag)) {
+				$this->locks->releaseForRun($node);
+				$this->jobStore->release((int) $job->getId(), (string) $job->getClaimToken());
+				return new DataResponse(['message' => 'claim bookkeeping failed'], Http::STATUS_INTERNAL_SERVER_ERROR);
+			}
 		}
 
 		// The run is booked before the worker may spend it. Money leaves when
@@ -497,6 +525,9 @@ class QueueController extends OCSController
 		// is its own answer: the worker sleeps and asks again, the job stays
 		// queued, and nothing is spent.
 		if (!$this->bookRun($job)) {
+			if ($node !== null) {
+				$this->locks?->releaseForRun($node);
+			}
 			$this->jobStore->release($job->getId(), (string) $job->getClaimToken());
 			return new DataResponse([
 				'wait' => 'budget',
@@ -703,7 +734,15 @@ class QueueController extends OCSController
 		}
 
 		try {
-			$this->files->trashSource($owner, $relative);
+			// The source is under OUR run lock. Outside the app's lock scope
+			// the wrapper refuses this delete — our own lock would stop our own
+			// cleanup. Inside it, the delete is the owner's work, as it is.
+			$lockNode = $this->locks?->nodeFor($job->getFileId());
+			if ($lockNode !== null && $this->locks !== null) {
+				$this->locks->runInScope($lockNode, fn () => $this->files->trashSource($owner, $relative));
+			} else {
+				$this->files->trashSource($owner, $relative);
+			}
 		} catch (\Throwable $e) {
 			$this->logger->warning('ocrflow: job ' . $id . ' succeeded but the source image could not be moved to the trash: ' . $e->getMessage());
 		}
@@ -736,27 +775,47 @@ class QueueController extends OCSController
 	 * a source that is gone (null current etag — the write path reports
 	 * the 404), keeps the write.
 	 */
-	private function writeConflict(Job $job, string $owner, string $relative): bool
+	private function writeConflict(Job $job): bool
 	{
-		$jobEtag = $job->getEtag();
+		// The guard is about ONE file: the source the run was based on. The
+		// caller's target may be a fresh sidecar (`name=out.pdf`) that has no
+		// etag and no history — guarding that answers "no conflict" for the
+		// very write it must protect.
+		$split = self::splitPath((string) $job->getPath());
+		if ($split === null) {
+
+			return false;
+		}
+		[$owner, $relative] = $split;
+
+		// The baseline the run reads against: the etag AFTER the run lock was
+		// taken. Taking a lock rewrites the file's etag, so the intake etag is
+		// already stale by the time the worker asks to write — comparing it
+		// would stash every single result.
+		$jobEtag = $job->getRunEtag() ?? $job->getEtag();
 		if ($jobEtag === null || $jobEtag === '') {
+
 			return false;
 		}
 		$current = $this->files->currentEtag($owner, $relative);
 		if ($current === null || $current === $jobEtag) {
+
 			return false;
 		}
 		$written = $job->getWrittenEtag();
 		if ($written !== null && $written !== '' && $current === $written) {
+
 			return false;
 		}
 		$sourceHash = $job->getSourceSha256();
 		if ($sourceHash !== null && $sourceHash !== '') {
 			$currentHash = $this->files->contentSha256($owner, $relative);
 			if ($currentHash !== null && hash_equals($sourceHash, $currentHash)) {
+
 				return false;
 			}
 		}
+
 		return true;
 	}
 
@@ -891,6 +950,10 @@ class QueueController extends OCSController
 		// units back the moment the run is not going to happen.
 		if ($released) {
 			$this->spend?->releaseForRun($id, (int) $job->getAttempts());
+			// The run is not going to happen: the file must not stay locked.
+			if ($job->getFileId() !== null) {
+				$this->locks?->releaseById($job->getFileId());
+			}
 		}
 		return new DataResponse(
 			['id' => $id, 'released' => $released],

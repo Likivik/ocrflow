@@ -73,6 +73,9 @@ class ReconcileJob extends TimedJob
 		// releases what came back, through the services that own those rules.
 		private ?SettlementService $settlement = null,
 		private ?SpendJournal $spend = null,
+		// The other $locks above is the cron mutex. This one owns files_lock:
+		// a requeued run is over, so its source must not stay locked.
+		private ?\OCA\OcrFlow\Service\Locks $fileLocks = null,
 	) {
 		parent::__construct($time);
 		$this->setInterval(300);
@@ -93,6 +96,10 @@ class ReconcileJob extends TimedJob
 		// booking. The dead one releases its units back to the day.
 		foreach ($requeuedIds as $pair) {
 			$this->spend?->releaseForRun($pair['id'], $pair['attempts']);
+			$job = $this->jobs->getById($pair['id']);
+			if ($job?->getFileId() !== null) {
+				$this->fileLocks?->releaseById($job->getFileId());
+			}
 		}
 
 		// Runs at the attempts ceiling: no try left, so they are settled as

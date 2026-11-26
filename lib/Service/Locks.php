@@ -7,34 +7,49 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Service;
 
+use OCP\Files\IRootFolder;
+use OCP\Files\Lock\ILock;
 use OCP\Files\Lock\ILockManager;
+use OCP\Files\Lock\LockContext;
+use OCP\Files\Node;
+use OCP\IConfig;
 use Psr\Log\LoggerInterface;
 
 /**
- * Read-only view of `files_lock`: is this file being edited right now?
+ * The one owner of every `files_lock` touch: the run lock and the reads that
+ * answer "is someone else in this file?".
  *
- * Why read-only, and why not "hold a lock while the run works": taking a
- * files_lock lock **rewrites the file's etag** — `LockService::lock()` ends
- * with `propagateEtag()`, which sets `etag = uniqid()` in the file cache. The
- * write ladder compares the etag recorded at intake against the file's etag at
- * write-back, so our own lock makes every result look like a conflict and push
- * it to the stash (proven: the integration smoke turned every result-file into
- * `stashed:true` until the claim-time lock was removed). Holding a longer lock
- * therefore needs an etag baseline captured after the lock and a stash-key
- * review — a separate change.
+ * Two facts shape this class (both verified on 34.0.5):
+ *  - taking a lock **rewrites the file's etag** (`propagateEtag()`), and so does
+ *    releasing it — the write ladder therefore compares against `run_etag`,
+ *    captured after the lock, and falls back to the source hash;
+ *  - a TYPE_APP lock is checked against the *lock scope*, not the user, so our
+ *    own write passes inside `runInScope()` and every other writer — the
+ *    owner included — is refused while the lock stands.
  *
- * What is safe today is the question a claim needs answered: "is someone else
- * in this file?" — a read, no etag touched.
- *
- * Without `files_lock` every answer is "not locked": the app behaves exactly as
- * it did before.
+ * The lock is a conflict-avoider, never the correctness gate: without
+ * `files_lock`, or when a call fails, the run proceeds and the ladder decides.
  */
 final class Locks
 {
+	/** The owner string recorded on the lock row. */
+	public const OWNER = 'ocrflow';
+
+	/** Config flag: hold the file while a run works. */
+	public const FLAG = 'lock_while_running';
+
 	public function __construct(
 		private ILockManager $lockManager,
+		private IRootFolder $rootFolder,
+		private IConfig $config,
 		private LoggerInterface $logger,
 	) {
+	}
+
+	/** Is the feature on? Operator switch, off means 0.1.65 behaviour. */
+	public function flagged(): bool
+	{
+		return $this->config->getAppValue('ocrflow', self::FLAG, 'yes') !== 'no';
 	}
 
 	/**
@@ -44,8 +59,7 @@ final class Locks
 	public function available(): bool
 	{
 		try {
-			return $this->lockManager->isLockProviderAvailable()
-				&& class_exists(\OCA\FilesLock\Service\LockService::class);
+			return $this->lockManager->isLockProviderAvailable();
 		} catch (\Throwable $e) {
 			$this->logger->warning('ocrflow: lock provider lookup failed: ' . $e->getMessage());
 
@@ -53,34 +67,105 @@ final class Locks
 		}
 	}
 
-	/**
-	 * Is anyone holding a lock on this file right now?
-	 *
-	 * A read: `files_lock` exposes no public query, so this asks its service
-	 * directly, guarded by `available()`. A lock of any owner counts — a user's
-	 * manual lock, an Office/Text session, another app's run. This app holds no
-	 * locks of its own, so there is nothing of ours to exclude.
-	 */
-	public function isLocked(?int $fileId): bool
+	/** The node a job points at, or null when the row has no file id or the file is gone. */
+	public function nodeFor(?int $fileId): ?Node
 	{
-		if ($fileId === null || !$this->available()) {
-			return false;
+		if ($fileId === null) {
+			return null;
 		}
 		try {
-			$lock = \OCP\Server::get(\OCA\FilesLock\Service\LockService::class)
-				->getLockFromFileId($fileId);
-		} catch (\OCA\FilesLock\Exceptions\LockNotFoundException $e) {
-			// Not a degradation: "no lock row" IS the answer — nobody holds
-			// this file right now, so the claim may proceed untouched.
+			$nodes = $this->rootFolder->getById($fileId);
+
+			return $nodes[0] ?? null;
+		} catch (\Throwable $e) {
+			$this->logger->info('ocrflow: no node for a lock: ' . $e->getMessage());
+
+			return null;
+		}
+	}
+
+	/**
+	 * Take (or extend) the run lock.
+	 *
+	 * @return bool true when the run may proceed — we hold the lock, the
+	 *              feature is off, or locking is unavailable/broken; false only
+	 *              when someone else holds the file: a real "being edited" answer
+	 */
+	public function lockForRun(Node $node): bool
+	{
+		if (!$this->flagged() || !$this->available()) {
+			return true;
+		}
+		try {
+			$this->lockManager->lock(new LockContext($node, ILock::TYPE_APP, self::OWNER));
+			$this->logger->info('ocrflow: lock_acquired', ['file_id' => $node->getId()]);
+
+			return true;
+		} catch (\OCP\Files\Lock\OwnerLockedException|\OCP\Lock\LockedException $e) {
+			$this->logger->info('ocrflow: lock_skipped', ['file_id' => $node->getId()]);
+
 			return false;
 		} catch (\Throwable $e) {
-			// Never let a lock lookup stop the queue: "not locked" is the
-			// pre-lock behaviour, and the write ladder still protects the file.
-			$this->logger->info('ocrflow: lock lookup failed, treating as unlocked: ' . $e->getMessage());
+			// A lock glitch must never stop the queue: proceed and let the
+			// ladder protect the write.
+			$this->logger->warning('ocrflow: could not lock a file for the run: ' . $e->getMessage());
 
+			return true;
+		}
+	}
+
+	/** Release the run lock. Idempotent, never throws. */
+	public function releaseForRun(Node $node): void
+	{
+		if (!$this->available()) {
+			return;
+		}
+		try {
+			$this->lockManager->unlock(new LockContext($node, ILock::TYPE_APP, self::OWNER));
+			$this->logger->info('ocrflow: lock_released', ['file_id' => $node->getId()]);
+		} catch (\Throwable $e) {
+			$this->logger->info('ocrflow: nothing to unlock: ' . $e->getMessage());
+		}
+	}
+
+	/** Release by file id when the node cannot be resolved (file moved or gone). */
+	public function releaseById(int $fileId): bool
+	{
+		$node = $this->nodeFor($fileId);
+		if ($node === null) {
 			return false;
 		}
+		$this->releaseForRun($node);
 
-		return $lock !== null;
+		return true;
+	}
+
+	/** The etag of the file as it stands now — a re-resolved node, never a cached one. */
+	public function freshEtag(string $owner, string $relative): ?string
+	{
+		try {
+			return (string) $this->rootFolder->getUserFolder($owner)->get($relative)->getEtag();
+		} catch (\Throwable $e) {
+			$this->logger->info('ocrflow: no etag for ' . $owner . '/' . $relative . ': ' . $e->getMessage());
+
+			return null;
+		}
+	}
+
+	/** Run our own write inside the app's lock scope, so the wrapper lets it through. */
+	public function runInScope(Node $node, callable $fn): mixed
+	{
+		if (!$this->flagged() || !$this->available()) {
+			return $fn();
+		}
+		$result = null;
+		$this->lockManager->runInScope(
+			new LockContext($node, ILock::TYPE_APP, self::OWNER),
+			static function () use ($fn, &$result): void {
+				$result = $fn();
+			},
+		);
+
+		return $result;
 	}
 }
