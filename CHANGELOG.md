@@ -7,12 +7,19 @@ written.
 
 ### Added
 
-- **A file being edited is not OCR'd under the editor's hands.** While a file
-  is locked (an Office/Text session, a manual lock), the claim skips it: the
-  row stays `queued`, no attempt is burned, and the queue keeps moving. The app
-  takes no locks of its own — `files_lock` rewrites the file's etag when it
-  locks, which would defeat the etag ladder that protects the write. Without
-  `files_lock` installed, nothing changes.
+- **A file being edited is not OCR'd under the editor's hands.** A file locked
+  by someone else (an Office/Text session, a manual lock) is skipped at claim:
+  the row stays `queued`, no attempt is burned, and the next candidate is
+  claimed in the same request. A run that does start holds its own
+  `files_lock` for the whole run and releases it on settle, on graceful
+  release and in the stale sweep — an edit over WebDAV is refused with 423
+  instead of landing under the worker. Without `files_lock`, nothing changes.
+- **Changed bytes, not changed etags, decide a write conflict.** Locking and
+  unlocking both rewrite the etag, so an etag mismatch alone no longer stashes
+  a result. The run's baseline is the etag after its own lock was taken, and
+  the decider is the source's SHA-256, captured at enqueue: identical bytes are
+  written back, different bytes are stashed. An edit that bypasses WebDAV is
+  still caught.
 
 ### Fixed
 

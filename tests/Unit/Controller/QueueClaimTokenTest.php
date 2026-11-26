@@ -256,8 +256,9 @@ class QueueClaimTokenTest extends TestCase
 
 	public function testClaimPassesTheRegisteredWorkerIdToTheQueue(): void
 	{
-		$this->jobStore->expects($this->once())->method('claim')
-			->with('w-1', 11)
+		$this->jobStore->method('queuedIds')->willReturn([5]);
+		$this->jobStore->expects($this->once())->method('claimById')
+			->with(5, 'w-1', 11)
 			->willReturn($this->claimedJob('tok-abc'));
 		$this->headers[Application::WORKER_HEADER] = 'w-1';
 		$this->headers[Application::WORKER_ID_HEADER] = '11';

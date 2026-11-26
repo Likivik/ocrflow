@@ -49,6 +49,7 @@ class SettlementService
 		private ?SpendJournal $spend = null,
 		// The files_lock door, optional like the rest: a settle must never
 		// fail because a lock was already gone.
+		private ?\OCA\OcrFlow\Service\Locks $locks = null,
 	) {
 	}
 
@@ -62,7 +63,15 @@ class SettlementService
 		// exact disagreement this class exists to prevent. If it rolls
 		// back, the job stays claimed and lease recovery requeues it: no
 		// partial answer survives.
-		return $this->atomically(fn (): bool => $this->finishNow($id, $result, $claimToken));
+		try {
+			return $this->atomically(fn (): bool => $this->finishNow($id, $result, $claimToken));
+		} finally {
+			// The run is over however it ended: the file must not stay locked.
+			$settled = $this->jobs->getById($id);
+			if ($settled?->getFileId() !== null) {
+				$this->locks?->releaseById($settled->getFileId());
+			}
+		}
 	}
 
 	/**
@@ -182,8 +191,30 @@ class SettlementService
 		?string $etag,
 		?string $engine,
 		?string $engineVersion,
+		?string $sha256 = null,
+		?int $mtime = null,
 	): void {
-		$this->ledger->writeLedger($fileId, $path, $size, $etag, self::STATUS_SKIPPED, 'skip_ocred_by_ocrflow', $engine, $engineVersion, null, settle: true);
+		// `settle: true` — these facts describe the bytes ON DISK now, and the
+		// hash is the identity the enqueue check trusts when the lock's own
+		// etag bump has moved the file past the etag recorded here.
+		$this->ledger->writeLedger(
+			$fileId,
+			$path,
+			$size,
+			$etag,
+			self::STATUS_SKIPPED,
+			'skip_ocred_by_ocrflow',
+			$engine,
+			$engineVersion,
+			null,
+			settledSha256: $sha256,
+			// NOT under our lock's etag churn: this row describes a file the run
+			// created, and nothing locked it. The flag exists for sources whose
+			// etag our lock moved.
+			settledUnderLock: false,
+			mtime: $mtime,
+			settle: true,
+		);
 	}
 
 	public function recordDecision(int $jobId, string $reasonCode): void

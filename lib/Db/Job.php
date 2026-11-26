@@ -31,6 +31,8 @@ use OCP\AppFramework\Db\Entity;
  * @method ?string getEtag()
  * @method ?string getSourceSha256()
  * @method ?string getWrittenEtag()
+ * @method ?string getRunEtag()
+ * @method void setRunEtag(?string $runEtag)
  * @method ?int getPages()
  * @method ?int getChars()
  * @method ?string getError()
@@ -41,6 +43,8 @@ use OCP\AppFramework\Db\Entity;
  */
 class Job extends Entity
 {
+	protected ?string $runEtag = null;
+
 	protected ?int $fileId = null;
 	protected string $path = '';
 	protected string $status = 'queued';
