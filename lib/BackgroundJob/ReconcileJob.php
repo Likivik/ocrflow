@@ -98,7 +98,7 @@ class ReconcileJob extends TimedJob
 			$this->spend?->releaseForRun($pair['id'], $pair['attempts']);
 			$job = $this->jobs->getById($pair['id']);
 			if ($job?->getFileId() !== null) {
-				$this->fileLocks?->releaseById($job->getFileId());
+				$this->fileLocks?->releaseById($job->getFileId(), $pair['claim_token']);
 			}
 		}
 

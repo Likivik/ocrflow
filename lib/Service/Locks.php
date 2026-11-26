@@ -32,7 +32,7 @@ use Psr\Log\LoggerInterface;
  */
 final class Locks
 {
-	/** The owner string recorded on the lock row. */
+	/** The owner prefix recorded on the lock row. */
 	public const OWNER = 'ocrflow';
 
 	/** Config flag: hold the file while a run works. */
@@ -91,13 +91,13 @@ final class Locks
 	 *              feature is off, or locking is unavailable/broken; false only
 	 *              when someone else holds the file: a real "being edited" answer
 	 */
-	public function lockForRun(Node $node): bool
+	public function lockForRun(Node $node, string $claimToken): bool
 	{
 		if (!$this->flagged() || !$this->available()) {
 			return true;
 		}
 		try {
-			$this->lockManager->lock(new LockContext($node, ILock::TYPE_APP, self::OWNER));
+			$this->lockManager->lock($this->context($node, $claimToken));
 			$this->logger->info('ocrflow: lock_acquired', ['file_id' => $node->getId()]);
 
 			return true;
@@ -115,13 +115,13 @@ final class Locks
 	}
 
 	/** Release the run lock. Idempotent, never throws. */
-	public function releaseForRun(Node $node): void
+	public function releaseForRun(Node $node, string $claimToken): void
 	{
 		if (!$this->available()) {
 			return;
 		}
 		try {
-			$this->lockManager->unlock(new LockContext($node, ILock::TYPE_APP, self::OWNER));
+			$this->lockManager->unlock($this->context($node, $claimToken));
 			$this->logger->info('ocrflow: lock_released', ['file_id' => $node->getId()]);
 		} catch (\Throwable $e) {
 			$this->logger->info('ocrflow: nothing to unlock: ' . $e->getMessage());
@@ -129,13 +129,13 @@ final class Locks
 	}
 
 	/** Release by file id when the node cannot be resolved (file moved or gone). */
-	public function releaseById(int $fileId): bool
+	public function releaseById(int $fileId, string $claimToken): bool
 	{
 		$node = $this->nodeFor($fileId);
 		if ($node === null) {
 			return false;
 		}
-		$this->releaseForRun($node);
+		$this->releaseForRun($node, $claimToken);
 
 		return true;
 	}
@@ -153,19 +153,25 @@ final class Locks
 	}
 
 	/** Run our own write inside the app's lock scope, so the wrapper lets it through. */
-	public function runInScope(Node $node, callable $fn): mixed
+	public function runInScope(Node $node, string $claimToken, callable $fn): mixed
 	{
 		if (!$this->flagged() || !$this->available()) {
 			return $fn();
 		}
 		$result = null;
 		$this->lockManager->runInScope(
-			new LockContext($node, ILock::TYPE_APP, self::OWNER),
+			$this->context($node, $claimToken),
 			static function () use ($fn, &$result): void {
 				$result = $fn();
 			},
 		);
 
 		return $result;
+	}
+
+	/** A stable, non-secret owner identity for exactly one claim. */
+	private function context(Node $node, string $claimToken): LockContext
+	{
+		return new LockContext($node, ILock::TYPE_APP, self::OWNER . ':' . hash('sha256', $claimToken));
 	}
 }

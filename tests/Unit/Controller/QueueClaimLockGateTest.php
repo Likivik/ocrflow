@@ -7,6 +7,8 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Controller;
 
+require_once __DIR__ . '/../BackgroundJob/oc_hooks_emitter.php';
+
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Job;
@@ -117,8 +119,9 @@ class QueueClaimLockGateTest extends TestCase
 	 * listed in $refused and admits every other one.
 	 *
 	 * @param list<int> $refused
+	 * @param array<int, string> $paths
 	 */
-	private function locks(array $refused): Locks
+	private function locks(array $refused, array $paths = []): Locks
 	{
 		$manager = $this->createMock(ILockManager::class);
 		$manager->method('isLockProviderAvailable')->willReturn(true);
@@ -133,9 +136,10 @@ class QueueClaimLockGateTest extends TestCase
 		});
 
 		$root = $this->createMock(IRootFolder::class);
-		$root->method('getById')->willReturnCallback(function (int $fileId): array {
+		$root->method('getById')->willReturnCallback(function (int $fileId) use ($paths): array {
 			$node = $this->createMock(Node::class);
 			$node->method('getId')->willReturn($fileId);
+			$node->method('getPath')->willReturn($paths[$fileId] ?? '');
 
 			return [$node];
 		});
@@ -244,6 +248,18 @@ class QueueClaimLockGateTest extends TestCase
 		$this->controller($this->locks(refused: [11]))->claim();
 	}
 
+	public function testALockRefusalReturnsTheAttemptToTheQueue(): void
+	{
+		$this->jobStore->method('queuedIds')->willReturn([1, 2]);
+
+		$this->jobStore->expects($this->once())->method('release')
+			->with(1, 'tok-1', true)
+			->willReturn(true);
+		$this->spend->method('reserveForRun')->willReturn(true);
+
+		$this->controller($this->locks(refused: [11]))->claim();
+	}
+
 	public function testAQueueOfOnlyLockedFilesAnswersNothingToDo(): void
 	{
 		$this->jobStore->method('queuedIds')->willReturn([1]);
@@ -268,5 +284,20 @@ class QueueClaimLockGateTest extends TestCase
 			->willReturn(true);
 
 		$this->controller($this->locks(refused: [11]))->claim();
+	}
+
+	public function testARenamedFileIsClaimedAtItsCurrentPath(): void
+	{
+		$this->jobStore->method('queuedIds')->willReturn([1]);
+		$currentPath = '/u/files/renamed.pdf';
+
+		$this->jobStore->expects($this->once())->method('setRunEtag')
+			->with(1, 'tok-1', 'run-etag', $currentPath)
+			->willReturn(true);
+		$this->spend->method('reserveForRun')->willReturn(true);
+
+		$response = $this->controller($this->locks([], [11 => $currentPath]))->claim();
+
+		$this->assertSame($currentPath, $response->getData()['path']);
 	}
 }

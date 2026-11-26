@@ -7,6 +7,8 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Service;
 
+require_once __DIR__ . '/../BackgroundJob/oc_hooks_emitter.php';
+
 use OCA\OcrFlow\AppInfo\Application;
 use OCA\OcrFlow\BackgroundJob\ReconcileJob;
 use OCA\OcrFlow\Controller\QueueController;
@@ -41,11 +43,14 @@ class LockReleaseTest extends TestCase
 {
 	/** @var list<int> */
 	private array $released = [];
+	/** @var list<string> */
+	private array $unlockOwners = [];
 	private bool $nodeExists = true;
 
 	protected function setUp(): void
 	{
 		$this->released = [];
+		$this->unlockOwners = [];
 		$this->nodeExists = true;
 	}
 
@@ -55,6 +60,7 @@ class LockReleaseTest extends TestCase
 		$manager->method('isLockProviderAvailable')->willReturn(true);
 		$manager->method('unlock')->willReturnCallback(function (LockContext $context): ILock {
 			$this->released[] = (int) $context->getNode()->getId();
+			$this->unlockOwners[] = $context->getOwner();
 			return $this->createMock(ILock::class);
 		});
 
@@ -133,6 +139,19 @@ class LockReleaseTest extends TestCase
 
 		$this->assertTrue($settlement->finish(9, ['status' => 'done'], 'tok'));
 		$this->assertSame([7], $this->released);
+	}
+
+	public function testEachClaimReleasesOnlyItsOwnLockIdentity(): void
+	{
+		$settlement = $this->settlement($this->job(), $this->createMock(Ledger::class), $this->locks());
+
+		$settlement->finish(9, ['status' => 'done'], 'old-claim');
+		$settlement->finish(9, ['status' => 'done'], 'new-claim');
+
+		$this->assertCount(2, $this->unlockOwners);
+		$this->assertNotSame($this->unlockOwners[0], $this->unlockOwners[1]);
+		$this->assertStringNotContainsString('old-claim', $this->unlockOwners[0]);
+		$this->assertStringNotContainsString('new-claim', $this->unlockOwners[1]);
 	}
 
 	public function testAFailedSettleStillReleasesItsLock(): void
@@ -226,8 +245,8 @@ class LockReleaseTest extends TestCase
 	{
 		$job = $this->job();
 		$jobs = $this->createMock(JobStore::class);
-		$jobs->method('requeueStale')->willReturnCallback(function (int $lease, array &$ids): int {
-			$ids = [['id' => 9, 'attempts' => 1]];
+		$jobs->method('requeueStale')->willReturnCallback(function (int $seconds, ?array &$pairs): int {
+			$pairs = [9 => ['id' => 9, 'attempts' => 1, 'claim_token' => 'stale-claim']];
 			return 1;
 		});
 		$jobs->method('doomedClaimedIds')->willReturn([]);
