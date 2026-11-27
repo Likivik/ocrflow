@@ -26,6 +26,8 @@ use OCP\AppFramework\Db\Entity;
  * @method ?string getEngine()
  * @method ?string getClaimToken()
  * @method ?int getClaimedByWorkerId()
+ * @method int getClaimRevision()
+ * @method void setClaimRevision(int $revision)
  * @method int getAttempts()
  * @method ?int getSize()
  * @method ?string getEtag()
@@ -54,6 +56,7 @@ class Job extends Entity
 	protected ?string $engine = null;
 	protected ?string $claimToken = null;
 	protected ?int $claimedByWorkerId = null;
+	protected int $claimRevision = 0;
 	protected int $attempts = 0;
 	protected ?int $size = null;
 	protected ?string $etag = null;
@@ -84,6 +87,7 @@ class Job extends Entity
 		$this->addType('claimedAt', 'integer');
 		$this->addType('finishedAt', 'integer');
 		$this->addType('claimedByWorkerId', 'integer');
+		$this->addType('claimRevision', 'integer');
 		$this->addType('force', 'boolean');
 	}
 
@@ -129,6 +133,7 @@ class Job extends Entity
 		$job->setEngine($row['engine'] === null ? null : (string) $row['engine']);
 		$job->setClaimToken(isset($row['claim_token']) && $row['claim_token'] !== null ? (string) $row['claim_token'] : null);
 		$job->setClaimedByWorkerId(isset($row['claimed_by_worker_id']) && $row['claimed_by_worker_id'] !== null ? (int) $row['claimed_by_worker_id'] : null);
+		$job->setClaimRevision((int) ($row['claim_revision'] ?? 0));
 		$job->setAttempts((int) ($row['attempts'] ?? 0));
 		$job->setSize($row['size'] === null ? null : (int) $row['size']);
 		$job->setEtag($row['etag'] === null ? null : (string) $row['etag']);

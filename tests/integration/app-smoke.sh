@@ -448,6 +448,36 @@ for expected in '"claim_attempts":1' '"released":true' '"release_attempts":0' '"
 done
 ok "an unused claim returns attempts=1 to attempts=0 and stays queued"
 
+echo "== file observations are durable and claims fence supersession"
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary 'state probe' \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/state.pdf" || fail "state fixture upload failed"
+sleep 2
+$ENGINE cp "${APP_DIR}/tests/integration/state-machine-probe.php" "$NAME:/tmp/state-machine-probe.php" \
+  || fail "could not copy the state probe"
+state_probe=$($ENGINE exec -u www-data "$NAME" php /tmp/state-machine-probe.php "$ADMIN_USER" state.pdf 2>&1) \
+  || { echo "$state_probe"; fail "the state probe crashed"; }
+echo "$state_probe"
+for expected in \
+  '"revision_grew":true' \
+  '"stale_cas_refused":true' \
+  '"current_cas_deleted":true' \
+  '"pending_cleared":true' \
+  '"drained":true' \
+  '"pending_consumed":true' \
+  '"queued":true' \
+  '"superseded_before_claim":true' \
+  '"requeued":true' \
+  '"claimed":true' \
+  '"claim_revision_one":true' \
+  '"supersede_refused_while_claimed":true' \
+  '"claim_survived":true' \
+  '"renewed":true' \
+  '"claim_revision_two":true' \
+  '"leftover_pending":false'; do
+  case "$state_probe" in *"$expected"*) ;; *) fail "state probe lacked ${expected}" ;; esac
+done
+ok "durable observations drain once, and a claim survives supersession"
+
 echo "== a dead worker's claim is taken back, and the attempt is counted"
 id=$(sql "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
 # A claim with no registered holder (the curl claim sent no worker id) is
@@ -1083,10 +1113,16 @@ $ENGINE exec -e OC_PASS=carol-pass-123 -u www-data "$NAME" php occ user:add --pa
 # about the READER's scoping, not about the worker that would produce the rows.
 # Bob's row carries a `wait` code on purpose: Retry is offered only where
 # `isRetryable()` says another attempt can help, and a damaged file is refused.
-sql "INSERT INTO ${JOBS} (file_id, path, status, reason, reason_code, attempts, etag, created_at, finished_at) VALUES (980000001, '/bob/files/mine-bob.pdf', 'error', 'error_provider_timed_out', 'error_provider_timed_out', 2, 'mine-bob', 1700000000, 1700000000)" >/dev/null
+# Bob's file is real: the retry path resolves the file id again, so a
+# fabricated id would test a deleted file, not a retry. Upload it, then turn
+# the job the listener queued into the failed row this section is about.
+curl -s -o /dev/null -u "bob:bob-pass-123" -X PUT --data-binary 'mine bob' \
+  "$BASE/remote.php/dav/files/bob/mine-bob.pdf" || fail "bob's mine fixture upload failed"
+sleep 2
+bob_job=$(sql "SELECT id FROM ${JOBS} WHERE path = '/bob/files/mine-bob.pdf' ORDER BY id DESC LIMIT 1")
+[ -n "$bob_job" ] || fail "bob's mine fixture produced no job"
+sql "UPDATE ${JOBS} SET status='error', reason='error_provider_timed_out', reason_code='error_provider_timed_out', attempts=2, etag='mine-bob', finished_at=1700000000 WHERE id=${bob_job}" >/dev/null
 sql "INSERT INTO ${JOBS} (file_id, path, status, reason, reason_code, attempts, etag, created_at, finished_at) VALUES (980000002, '/carol/files/mine-carol.pdf', 'error', 'error_file_broken', 'error_file_broken', 2, 'mine-carol', 1700000001, 1700000001)" >/dev/null
-bob_job=$(sql "SELECT id FROM ${JOBS} WHERE path = '/bob/files/mine-bob.pdf'")
-[ -n "$bob_job" ] || fail "the bob fixture row was not inserted"
 
 code=$(curl -s -o /tmp/ocrflow-mine-bob -w '%{http_code}' -u "bob:bob-pass-123" \
   -H 'OCS-APIRequest: true' -H 'Accept: application/json' \

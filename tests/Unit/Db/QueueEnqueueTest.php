@@ -60,6 +60,7 @@ class QueueEnqueueTest extends TestCase
         $qb->method('expr')->willReturn($expr);
         $qb->method('executeQuery')->willReturn($empty);
         $qb->method('insert')->willReturnSelf();
+        $qb->method('delete')->willReturnSelf();
         $qb->method('values')->willReturnSelf();
         $qb->method('createNamedParameter')->willReturn('?');
         $qb->method('executeStatement')->willReturn(1);

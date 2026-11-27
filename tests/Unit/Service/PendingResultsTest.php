@@ -231,9 +231,10 @@ class RecordingPendingResults extends PendingResults
 		return $this->expired;
 	}
 
-	protected function discardRow(int $id): void
+	protected function discardRow(int $id): bool
 	{
 		$this->discarded[] = $id;
+		return true;
 	}
 
 	protected function artifactPaths(): array

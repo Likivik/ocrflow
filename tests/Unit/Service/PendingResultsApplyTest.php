@@ -7,6 +7,8 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Service;
 
+require_once __DIR__ . '/../BackgroundJob/oc_hooks_emitter.php';
+
 use OCA\OcrFlow\Service\PendingResults;
 use OCP\App\IAppManager;
 use OCP\Files\AppData\IAppDataFactory;
@@ -18,6 +20,8 @@ use OCP\Files\SimpleFS\ISimpleFolder;
 use OCP\IConfig;
 use OCP\IDBConnection;
 use OCP\Files\IRootFolder;
+use OCP\Lock\ILockingProvider;
+use OCP\Lock\LockedException;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 
@@ -46,9 +50,11 @@ class PendingResultsApplyTest extends TestCase
 	private ISimpleFolder $appFolder;
 	private bool $versioningEnabled = false;
 	private bool $artifactDeleted = false;
+	private ILockingProvider $locker;
 
 	protected function setUp(): void
 	{
+		$this->locker = $this->createMock(ILockingProvider::class);
 		$this->pending = new TestPendingResults(
 			self::ROW_ID,
 			self::FILE_ID,
@@ -57,6 +63,7 @@ class PendingResultsApplyTest extends TestCase
 			$this->logger(),
 			$this->rootFolder(),
 			$this->appManager(),
+			$this->locker,
 		);
 	}
 
@@ -214,6 +221,30 @@ class PendingResultsApplyTest extends TestCase
 		$this->assertSame('refused', $this->pending->discard(self::ROW_ID)['status']);
 		$this->assertSame('applied', $this->pending->rowStatus);
 	}
+
+	public function testApplyAndDiscardShareOneDecisionLock(): void
+	{
+		$this->versioningEnabled = true;
+		$this->locker->expects($this->exactly(2))->method('acquireLock')
+			->with('ocrflow/pending-result/7', ILockingProvider::LOCK_EXCLUSIVE);
+		$this->locker->expects($this->exactly(2))->method('releaseLock')
+			->with('ocrflow/pending-result/7', ILockingProvider::LOCK_EXCLUSIVE);
+
+		$this->pending->apply(self::ROW_ID);
+		$this->pending->discard(self::ROW_ID);
+	}
+
+	public function testACompetingDecisionDoesNotTouchTheFile(): void
+	{
+		$this->versioningEnabled = true;
+		$this->locker->method('acquireLock')->willThrowException(new LockedException('busy'));
+
+		$result = $this->pending->apply(self::ROW_ID);
+
+		$this->assertSame('refused', $result['status']);
+		$this->assertSame('', $this->files, 'the loser must not write the artifact');
+		$this->assertSame('pending', $this->pending->rowStatus);
+	}
 }
 
 /**
@@ -233,6 +264,7 @@ class TestPendingResults extends PendingResults
 		LoggerInterface $logger,
 		private \OCP\Files\IRootFolder $rootFolder,
 		private IAppManager $appManager,
+		ILockingProvider $locker,
 	) {
 		parent::__construct(
 			null,
@@ -241,6 +273,7 @@ class TestPendingResults extends PendingResults
 			$logger,
 			null,
 			null,
+			$locker,
 		);
 	}
 
@@ -262,14 +295,16 @@ class TestPendingResults extends PendingResults
 		];
 	}
 
-	protected function markRow(int $id, string $status): void
+	protected function markRow(int $id, string $status): bool
 	{
 		$this->rowStatus = $status;
+		return true;
 	}
 
-	protected function discardRow(int $id): void
+	protected function discardRow(int $id): bool
 	{
 		$this->rowStatus = 'discarded';
+		return true;
 	}
 
 	protected function nodeForFile(int $fileId): ?\OCP\Files\File

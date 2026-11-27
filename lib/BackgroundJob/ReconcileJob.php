@@ -8,6 +8,8 @@ declare(strict_types=1);
 namespace OCA\OcrFlow\BackgroundJob;
 
 use OCA\OcrFlow\AppInfo\Application;
+use OCA\OcrFlow\Service\EnginePolicy;
+use OCA\OcrFlow\Storage\EnqueueService;
 use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Storage\SettlementService;
 use OCA\OcrFlow\Storage\SpendJournal;
@@ -76,6 +78,9 @@ class ReconcileJob extends TimedJob
 		// The other $locks above is the cron mutex. This one owns files_lock:
 		// a requeued run is over, so its source must not stay locked.
 		private ?\OCA\OcrFlow\Service\Locks $fileLocks = null,
+		// Durable file observations and the engine used to queue them.
+		private ?EnqueueService $pendingQueue = null,
+		private ?EnginePolicy $enginePolicy = null,
 	) {
 		parent::__construct($time);
 		$this->setInterval(300);
@@ -104,10 +109,22 @@ class ReconcileJob extends TimedJob
 
 		// Runs at the attempts ceiling: no try left, so they are settled as
 		// `error_worker_died` — a verdict in both tables, never a silent drop.
-		foreach ($this->jobs->doomedClaimedIds(JobStore::CLAIM_LEASE_SECONDS) as $pair) {
-			$job = $this->jobs->getById($pair['id']);
-			if ($job !== null && $this->settlement?->recordWorkerDied($job)) {
-				$this->logger->warning('ocrflow: job ' . $pair['id'] . ' settled error_worker_died (attempts ceiling, holder gone)');
+		foreach ($this->jobs->doomedClaims(JobStore::CLAIM_LEASE_SECONDS) as $job) {
+			if ($this->settlement?->recordWorkerDied($job)) {
+				$this->logger->warning('ocrflow: job ' . $job->getId() . ' settled error_worker_died (attempts ceiling, holder gone)');
+			}
+		}
+
+		// Durable observations that waited behind a claim, or arrived just
+		// before a crash, get a bounded chance to become queued work.
+		if ($this->pendingQueue !== null && $this->enginePolicy !== null) {
+			$engine = $this->enginePolicy->engineForJob();
+			if ($engine !== null) {
+				$drained = $this->pendingQueue->drainPendingBatch(500, $engine);
+				if (($drained['drained'] + $drained['deferred'] + $drained['refused']) > 0) {
+					$this->logger->info('ocrflow: pending observations drained=' . $drained['drained']
+						. ' deferred=' . $drained['deferred'] . ' refused=' . $drained['refused']);
+				}
 			}
 		}
 
