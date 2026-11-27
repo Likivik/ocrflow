@@ -3,6 +3,28 @@
 Newest first. Dates are the day the change landed on `main`, not the day it was
 written.
 
+## 0.1.68 — 2026-11-27
+
+### Added
+
+- **An upload survives a crash before it is queued.** The latest file
+  observation is stored durably before any queue decision. Reconcile drains
+  those observations in bounded batches, resolves the file's current path, and
+  consumes only the revision it read.
+- **Apply, Discard and expiry share one decision lock per artifact.** Exactly
+  one decision wins; a competing caller is refused before it touches the file
+  or the row.
+
+### Fixed
+
+- **A renewed claim cannot be recovered from an old snapshot.** Recovery and
+  doomed-run settlement now match the exact `claim_token` and `claim_revision`
+  they judged stale. Pre-registry claims with a NULL token are matched as NULL,
+  not as the empty string.
+- **New work no longer deletes a live claim.** Supersession removes only queued
+  rows. A claimed run settles first; the durable observation becomes the next
+  run.
+
 ## Unreleased
 
 ### Added

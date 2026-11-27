@@ -111,6 +111,13 @@ class QueueSettledEnqueueTest extends TestCase
 				return $qb;
 			}
 		);
+		$qb->method('delete')->willReturnCallback(
+			function (string $name) use (&$table, &$mode, &$qb): IQueryBuilder {
+				$table = $name;
+				$mode = 'delete';
+				return $qb;
+			}
+		);
 		$qb->method('values')->willReturnCallback(
 			function (array $row) use (&$values, &$params, &$qb): IQueryBuilder {
 				foreach ($row as $column => $placeholder) {

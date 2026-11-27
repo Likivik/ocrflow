@@ -166,6 +166,7 @@ class JobStore
 			$up->update(self::JOBS)
 				->set('status', $up->createNamedParameter(self::STATUS_CLAIMED))
 				->set('claim_token', $up->createNamedParameter($token))
+				->set('claim_revision', $up->createNamedParameter(1, IQueryBuilder::PARAM_INT))
 				->set('claimed_by_worker_id', $up->createNamedParameter($workerId, IQueryBuilder::PARAM_INT))
 				->set('claimed_at', $up->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
 				// The lease starts now and is renewed while the worker works;
@@ -214,6 +215,7 @@ class JobStore
 		$up->update(self::JOBS)
 			->set('status', $up->createNamedParameter(self::STATUS_CLAIMED))
 			->set('claim_token', $up->createNamedParameter($token))
+			->set('claim_revision', $up->createNamedParameter(1, IQueryBuilder::PARAM_INT))
 			->set('claimed_by_worker_id', $up->createNamedParameter($workerId, IQueryBuilder::PARAM_INT))
 			->set('claimed_at', $up->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
 			->set('claim_expires_at', $up->createNamedParameter(time() + self::CLAIM_LEASE_SECONDS, IQueryBuilder::PARAM_INT))
@@ -245,6 +247,38 @@ class JobStore
 			->andWhere($qb->expr()->eq('claim_token', $qb->createNamedParameter($claimToken)));
 
 		return $qb->executeStatement() === 1;
+	}
+
+	/**
+	 * Is a worker currently running this file?
+	 *
+	 * Queued rows do not block an observation: the latest version supersedes
+	 * unclaimed work before its first attempt. A claimed row, however, owns the
+	 * file until it settles.
+	 */
+	public function claimedForFile(int $fileId): bool
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('id')->from(self::JOBS)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
+			->setMaxResults(1);
+
+		return $qb->executeQuery()->fetch() !== false;
+	}
+
+	/**
+	 * Delete unclaimed work for a file before the latest observed version is
+	 * queued. The status predicate is the race fence: if a worker claimed the
+	 * row first, nothing is deleted and the pending observation waits.
+	 */
+	public function supersedeQueued(int $fileId): int
+	{
+		$qb = $this->db->getQueryBuilder();
+		$qb->delete(self::JOBS)
+			->where($qb->expr()->eq('file_id', $qb->createNamedParameter($fileId, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_QUEUED)));
+		return $qb->executeStatement();
 	}
 
 	/**
@@ -281,6 +315,7 @@ class JobStore
 		$qb = $this->db->getQueryBuilder();
 		$qb->update(self::JOBS)
 			->set('claim_expires_at', $qb->createNamedParameter(time() + self::CLAIM_LEASE_SECONDS, IQueryBuilder::PARAM_INT))
+			->set('claim_revision', $qb->createFunction('claim_revision + 1'))
 			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
 			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
 			->andWhere($qb->expr()->eq('claim_token', $qb->createNamedParameter($claimToken)));
@@ -333,16 +368,16 @@ class JobStore
 	 * requeued — there is no try left — and the caller must settle them as
 	 * `error_worker_died`: a silent drop would be a block nobody can see.
 	 *
-	 * @return list<array{id: int, attempts: int}>
+	 * @return list<\OCA\OcrFlow\Db\Job>
 	 * @throws Exception
 	 */
-	public function doomedClaimedIds(int $heartbeatStaleSeconds = self::CLAIM_LEASE_SECONDS): array
+	public function doomedClaims(int $heartbeatStaleSeconds = self::CLAIM_LEASE_SECONDS): array
 	{
 		$now = time();
 		$leaseCutoff = $now - max(1, $heartbeatStaleSeconds);
 		$hardCutoff = $now - self::CLAIM_HARD_CAP_SECONDS;
 		$select = $this->db->getQueryBuilder();
-		$select->select('j.id')->addSelect('j.attempts')
+		$select->select('j.*')
 			->from(self::JOBS, 'j')
 			->leftJoin('j', 'ocrflow_workers', 'w', $select->expr()->eq('w.id', 'j.claimed_by_worker_id'))
 			->where($select->expr()->eq('j.status', $select->createNamedParameter(self::STATUS_CLAIMED)))
@@ -356,7 +391,7 @@ class JobStore
 			));
 		$doomed = [];
 		foreach ($select->executeQuery()->fetchAll() as $row) {
-			$doomed[] = ['id' => (int) $row['id'], 'attempts' => (int) ($row['attempts'] ?? 0)];
+			$doomed[] = \OCA\OcrFlow\Db\Job::fromRow($row);
 		}
 
 		return $doomed;
@@ -384,7 +419,7 @@ class JobStore
 		$leaseCutoff = $now - max(1, $heartbeatStaleSeconds);
 		$hardCutoff = $now - self::CLAIM_HARD_CAP_SECONDS;
 		$select = $this->db->getQueryBuilder();
-		$select->select('j.id', 'j.attempts', 'j.claim_token')
+		$select->select('j.id', 'j.attempts', 'j.claim_token', 'j.claim_revision')
 			->from(self::JOBS, 'j')
 			->leftJoin('j', 'ocrflow_workers', 'w', $select->expr()->eq('w.id', 'j.claimed_by_worker_id'))
 			->where($select->expr()->eq('j.status', $select->createNamedParameter(self::STATUS_CLAIMED)))
@@ -404,36 +439,46 @@ class JobStore
 				// A worker that renews forever on a hung job.
 				$select->expr()->lt('j.claimed_at', $select->createNamedParameter($hardCutoff, IQueryBuilder::PARAM_INT)),
 			));
-		$ids = [];
-		$pairs = [];
+		$claims = [];
 		foreach ($select->executeQuery()->fetchAll() as $row) {
-			$ids[] = (int) $row['id'];
-			$pairs[(int) $row['id']] = [
-				'id' => (int) $row['id'],
+			$id = (int) $row['id'];
+			$claims[$id] = [
+				'id' => $id,
 				'attempts' => (int) ($row['attempts'] ?? 0),
 				'claim_token' => (string) ($row['claim_token'] ?? ''),
+				'claim_revision' => (int) ($row['claim_revision'] ?? 0),
 			];
 		}
-		if ($ids === []) {
+		if ($claims === []) {
 			return 0;
 		}
 
 		$released = 0;
-		foreach (array_chunk($ids, self::IN_CHUNK) as $chunk) {
+		$recovered = [];
+		foreach ($claims as $claim) {
 			$qb = $this->db->getQueryBuilder();
 			$qb->update(self::JOBS)
 				->set('status', $qb->createNamedParameter(self::STATUS_QUEUED))
 				->set('claim_token', $qb->createNamedParameter(null))
+				->set('claim_revision', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT))
 				->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
 				->set('claimed_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
 				->set('claim_expires_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
-				->where($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
-				->andWhere($qb->expr()->in('id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
-			$released += $qb->executeStatement();
+				->where($qb->expr()->eq('id', $qb->createNamedParameter($claim['id'], IQueryBuilder::PARAM_INT)))
+				->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
+				// The exact ownership snapshot that was judged stale: a token
+				// catches a replacement claim, the revision catches a renewal.
+				// A pre-registry claim stores NULL, never the empty string.
+				->andWhere($claim['claim_token'] === ''
+					? $qb->expr()->isNull('claim_token')
+					: $qb->expr()->eq('claim_token', $qb->createNamedParameter($claim['claim_token'])))
+				->andWhere($qb->expr()->eq('claim_revision', $qb->createNamedParameter($claim['claim_revision'], IQueryBuilder::PARAM_INT)));
+			if ($qb->executeStatement() === 1) {
+				$released++;
+				$recovered[$claim['id']] = $claim;
+			}
 		}
-		if ($requeuedIds !== null) {
-			$requeuedIds = array_values(array_intersect_key($pairs, array_flip($ids)));
-		}
+		$requeuedIds = $recovered;
 
 		return $released;
 	}

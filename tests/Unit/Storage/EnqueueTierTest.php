@@ -11,6 +11,7 @@ use OCA\OcrFlow\Service\FileExchange;
 use OCA\OcrFlow\Storage\EnqueueService;
 use OCA\OcrFlow\Storage\JobStore;
 use OCA\OcrFlow\Storage\Ledger;
+use OCA\OcrFlow\Storage\PendingFileStore;
 use OCA\OcrFlow\Storage\SettlementService;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
@@ -25,6 +26,9 @@ class EnqueueTierTest extends TestCase
 	private Ledger&MockObject $ledger;
 	private FileExchange&MockObject $exchange;
 	private IDBConnection&MockObject $db;
+	private PendingFileStore&MockObject $pending;
+	/** @var array{path: string, etag: ?string, size: ?int, revision: int} */
+	private array $pendingRow;
 
 	protected function setUp(): void
 	{
@@ -32,11 +36,20 @@ class EnqueueTierTest extends TestCase
 		$this->ledger = $this->createMock(Ledger::class);
 		$this->exchange = $this->createMock(FileExchange::class);
 		$this->db = $this->createMock(IDBConnection::class);
+		$this->pending = $this->createMock(PendingFileStore::class);
 
 		$this->jobs->method('jobForVersion')->willReturn(null);
 		$this->jobs->method('isDoneForVersion')->willReturn(false);
 		$this->ledger->method('permanentFailureForVersion')->willReturn(null);
 		$this->ledger->method('settledForVersion')->willReturn(null);
+		$this->pendingRow = [
+			'path' => '/alice/files/report.pdf',
+			'etag' => 'etag-after-our-lock-moved-it',
+			'size' => 100,
+			'revision' => 1,
+		];
+		$this->pending->method('get')->willReturnCallback(fn (): array => $this->pendingRow);
+		$this->pending->method('deleteIfRevision')->willReturn(true);
 	}
 
 	private function service(): EnqueueService
@@ -50,15 +63,19 @@ class EnqueueTierTest extends TestCase
 			null,
 			$this->createMock(LoggerInterface::class),
 			$this->exchange,
+			$this->pending,
 		);
 	}
 
-	public function testWorkAlreadyInFlightWinsOverTheMovedEtag(): void
+	public function testClaimedWorkDefersTheLatestObservation(): void
 	{
-		$this->jobs->method('activeForFile')->willReturn(true);
+		$this->jobs->method('claimedForFile')->willReturn(true);
 		$this->jobs->expects($this->never())->method('jobForVersion');
+		$this->pending->expects($this->once())->method('observe')
+			->with(42, '/alice/files/report.pdf', 'etag-after-our-lock-moved-it', 100)
+			->willReturn(5);
 		$this->exchange->expects($this->never())->method('contentSha256');
-		$this->db->expects($this->never())->method('getQueryBuilder');
+		$this->pending->expects($this->never())->method('deleteIfRevision');
 
 		$this->assertNull($this->service()->enqueue(
 			'/alice/files/report.pdf',
@@ -68,9 +85,44 @@ class EnqueueTierTest extends TestCase
 		));
 	}
 
+	public function testANewerObservationSupersedesUnclaimedWork(): void
+	{
+		$this->jobs->method('claimedForFile')->willReturn(false);
+		$this->jobs->expects($this->once())->method('supersedeQueued')->with(42)->willReturn(1);
+		$this->pending->expects($this->once())->method('observe')
+			->with(42, '/alice/files/report.pdf', 'new-etag', 100);
+		$this->pendingRow = [
+			'path' => '/alice/files/report.pdf',
+			'etag' => 'new-etag',
+			'size' => 100,
+			'revision' => 2,
+		];
+		$this->pending->expects($this->once())->method('deleteIfRevision')->with(42, 2)->willReturn(true);
+
+		$values = [];
+		$qb = $this->createMock(IQueryBuilder::class);
+		$qb->method('createNamedParameter')->willReturnCallback(static fn (mixed $value): mixed => $value);
+		$qb->method('insert')->willReturnSelf();
+		$qb->method('values')->willReturnCallback(function (array $rows) use (&$values, $qb): IQueryBuilder {
+			$values = $rows;
+			return $qb;
+		});
+		$qb->method('executeStatement')->willReturn(1);
+		$qb->method('getLastInsertId')->willReturn(124);
+		$this->db->method('getQueryBuilder')->willReturn($qb);
+
+		$this->assertSame(124, $this->service()->enqueue(
+			'/alice/files/report.pdf',
+			42,
+			100,
+			'new-etag',
+		));
+		$this->assertSame('new-etag', $values['etag'] ?? null);
+	}
+
 	public function testIdenticalBytesUnderANewEtagDoNotEnqueue(): void
 	{
-		$this->jobs->method('activeForFile')->willReturn(false);
+		$this->jobs->method('claimedForFile')->willReturn(false);
 		$this->ledger->method('identityFor')->willReturn([
 			'settled_sha256' => 'same-bytes',
 			'settled_under_lock' => false,
@@ -90,7 +142,7 @@ class EnqueueTierTest extends TestCase
 
 	public function testDifferentBytesEnqueueAndCarryTheirSourceHash(): void
 	{
-		$this->jobs->method('activeForFile')->willReturn(false);
+		$this->jobs->method('claimedForFile')->willReturn(false);
 		$this->ledger->method('identityFor')->willReturn([
 			'settled_sha256' => 'old-bytes',
 			'settled_under_lock' => false,

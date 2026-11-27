@@ -54,7 +54,7 @@ class SettlementService
 	}
 
 
-	public function finish(int $id, array $result, string $claimToken): bool
+	public function finish(int $id, array $result, string $claimToken, ?int $expectedClaimRevision = null): bool
 	{
 		// One outcome, one transaction: the guarded job update, the ledger
 		// row, the stage rows and the retry go in together or not at all.
@@ -64,7 +64,7 @@ class SettlementService
 		// back, the job stays claimed and lease recovery requeues it: no
 		// partial answer survives.
 		try {
-			return $this->atomically(fn (): bool => $this->finishNow($id, $result, $claimToken));
+			return $this->atomically(fn (): bool => $this->finishNow($id, $result, $claimToken, $expectedClaimRevision));
 		} finally {
 			// The run is over however it ended: the file must not stay locked.
 			$settled = $this->jobs->getById($id);
@@ -89,7 +89,7 @@ class SettlementService
 			'reason' => 'the worker died before it could report a result',
 			'reason_code' => 'error_worker_died',
 			'retryable' => false,
-		], (string) $job->getClaimToken());
+		], (string) $job->getClaimToken(), $job->getClaimRevision());
 	}
 
 	/**
@@ -105,7 +105,7 @@ class SettlementService
 		$this->spend->settleForRun($job->getId(), $job->getAttempts(), max(0, $pages));
 	}
 
-	private function finishNow(int $id, array $result, string $claimToken): bool
+	private function finishNow(int $id, array $result, string $claimToken, ?int $expectedClaimRevision = null): bool
 	{
 		$job = $this->jobs->getById($id);
 		if ($job === null) {
@@ -143,6 +143,12 @@ class SettlementService
 			// a logged 409; this guard is the database's own say.
 			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
 			->andWhere($qb->expr()->eq('claim_token', $qb->createNamedParameter($claimToken)));
+		if ($expectedClaimRevision !== null) {
+			// Recovery settles from a selected snapshot. A renewal keeps the
+			// token but moves the revision, so a live holder is not declared
+			// dead by a stale ceiling read.
+			$qb->andWhere($qb->expr()->eq('claim_revision', $qb->createNamedParameter($expectedClaimRevision, IQueryBuilder::PARAM_INT)));
+		}
 		$updated = $qb->executeStatement() === 1;
 
 		if ($updated) {

@@ -14,12 +14,14 @@ use OCA\OcrFlow\BackgroundJob\ReconcileJob;
 use OCA\OcrFlow\Controller\QueueController;
 use OCA\OcrFlow\Db\Job;
 use OCA\OcrFlow\Db\WorkerRegistry;
+use OCA\OcrFlow\Service\EnginePolicy;
 use OCA\OcrFlow\Service\FileExchange;
 use OCA\OcrFlow\Service\Locks;
 use OCA\OcrFlow\Service\PendingResults;
 use OCA\OcrFlow\Service\RetryPolicy;
 use OCA\OcrFlow\Service\StageEvents;
 use OCA\OcrFlow\Storage\JobStore;
+use OCA\OcrFlow\Storage\EnqueueService;
 use OCA\OcrFlow\Storage\Ledger;
 use OCA\OcrFlow\Storage\SettlementService;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -46,12 +48,15 @@ class LockReleaseTest extends TestCase
 	/** @var list<string> */
 	private array $unlockOwners = [];
 	private bool $nodeExists = true;
+	/** @var list<mixed> */
+	private array $dbParams = [];
 
 	protected function setUp(): void
 	{
 		$this->released = [];
 		$this->unlockOwners = [];
 		$this->nodeExists = true;
+		$this->dbParams = [];
 	}
 
 	private function locks(): Locks
@@ -90,6 +95,7 @@ class LockReleaseTest extends TestCase
 		$job->setPath('/alice/files/source.pdf');
 		$job->setStatus(JobStore::STATUS_CLAIMED);
 		$job->setClaimToken('tok');
+		$job->setClaimRevision(4);
 		$job->setAttempts(1);
 		$job->setEtag('source-etag');
 		$job->setEngine('tesseract');
@@ -103,7 +109,10 @@ class LockReleaseTest extends TestCase
 		$expr->method('eq')->willReturn('1 = 1');
 		$qb = $this->createMock(IQueryBuilder::class);
 		$qb->method('expr')->willReturn($expr);
-		$qb->method('createNamedParameter')->willReturn(':p');
+		$qb->method('createNamedParameter')->willReturnCallback(function (mixed $value) {
+			$this->dbParams[] = $value;
+			return ':p';
+		});
 		$qb->method('update')->willReturnSelf();
 		$qb->method('set')->willReturnSelf();
 		$qb->method('where')->willReturnSelf();
@@ -214,8 +223,37 @@ class LockReleaseTest extends TestCase
 		$this->assertSame([7], $this->released);
 	}
 
-	private function sweep(JobStore $jobs, SettlementService $settlement, ?Locks $fileLocks = null): void
+	public function testRecoverySettlementIsFencedByClaimRevision(): void
 	{
+		$settlement = $this->settlement($this->job(), $this->createMock(Ledger::class), $this->locks());
+
+		$this->assertTrue($settlement->finish(9, ['status' => 'error'], 'tok', 4));
+		$this->assertContains(4, $this->dbParams, 'a renewed claim must fail the terminal recovery fence');
+	}
+
+	public function testTheSweepDrainsPendingObservationsAfterRecovery(): void
+	{
+		$jobs = $this->createMock(JobStore::class);
+		$jobs->method('requeueStale')->willReturn(0);
+		$jobs->method('doomedClaims')->willReturn([]);
+		$engineConfig = $this->createMock(IConfig::class);
+		$engineConfig->method('getAppValue')->willReturn('tesseract');
+		$engine = new EnginePolicy($engineConfig);
+		$enqueue = $this->createMock(EnqueueService::class);
+		$enqueue->expects($this->once())->method('drainPendingBatch')
+			->with(500, 'tesseract')
+			->willReturn(['drained' => 1, 'deferred' => 0, 'refused' => 0]);
+
+		$this->sweep($jobs, $this->createMock(SettlementService::class), null, $enqueue, $engine);
+	}
+
+	private function sweep(
+		JobStore $jobs,
+		SettlementService $settlement,
+		?Locks $fileLocks = null,
+		?EnqueueService $enqueue = null,
+		?EnginePolicy $enginePolicy = null,
+	): void {
 		$workers = $this->createMock(WorkerRegistry::class);
 		$workers->method('pruneStale')->willReturn(0);
 		$pending = $this->createMock(PendingResults::class);
@@ -235,6 +273,8 @@ class LockReleaseTest extends TestCase
 			$settlement,
 			null,
 			$fileLocks,
+			$enqueue,
+			$enginePolicy,
 		);
 		$run = new \ReflectionMethod(ReconcileJob::class, 'run');
 		$run->setAccessible(true);
@@ -249,7 +289,7 @@ class LockReleaseTest extends TestCase
 			$pairs = [9 => ['id' => 9, 'attempts' => 1, 'claim_token' => 'stale-claim']];
 			return 1;
 		});
-		$jobs->method('doomedClaimedIds')->willReturn([]);
+		$jobs->method('doomedClaims')->willReturn([]);
 		$jobs->method('getById')->willReturn($job);
 
 		$this->sweep($jobs, $this->createMock(SettlementService::class), $this->locks());
@@ -262,8 +302,9 @@ class LockReleaseTest extends TestCase
 		$job = $this->job();
 		$jobs = $this->createMock(JobStore::class);
 		$jobs->method('requeueStale')->willReturn(0);
-		$jobs->method('doomedClaimedIds')->willReturn([['id' => 9, 'attempts' => 3]]);
-		$jobs->method('getById')->willReturn($job);
+		$jobs->method('doomedClaims')->willReturn([$job]);
+		$jobs->expects($this->never())->method('getById')
+			->with($this->anything());
 		$settlement = $this->createMock(SettlementService::class);
 		$settlement->expects($this->once())->method('recordWorkerDied')->with($job)->willReturn(true);
 

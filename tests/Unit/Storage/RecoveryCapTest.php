@@ -50,7 +50,7 @@ class RecoveryCapTest extends TestCase
 	public function testDoomedRunsAreTheComplementOfWhatGetsRequeued(): void
 	{
 		$store = $this->storeReturning([]);
-		$store->doomedClaimedIds(JobStore::CLAIM_LEASE_SECONDS);
+		$store->doomedClaims(JobStore::CLAIM_LEASE_SECONDS);
 
 		$gteCalls = array_filter($this->gteCalls, static fn (array $c): bool => $c['x'] === 'j.attempts');
 		$this->assertCount(1, $gteCalls, 'the doomed select is the ceiling complement');
@@ -72,9 +72,9 @@ class RecoveryCapTest extends TestCase
 			/** @var list<array{id: int, result: array, token: string}> */
 			public array $finished = [];
 
-			public function finish(int $id, array $result, string $claimToken): bool
+			public function finish(int $id, array $result, string $claimToken, ?int $expectedClaimRevision = null): bool
 			{
-				$this->finished[] = ['id' => $id, 'result' => $result, 'token' => $claimToken];
+				$this->finished[] = ['id' => $id, 'result' => $result, 'token' => $claimToken, 'revision' => $expectedClaimRevision];
 
 				return true;
 			}

@@ -13,6 +13,8 @@ use OCP\Files\NotFoundException;
 use OCP\Files\SimpleFS\ISimpleFolder;
 use OCP\IConfig;
 use OCP\IDBConnection;
+use OCP\Lock\ILockingProvider;
+use OCP\Lock\LockedException;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -67,6 +69,8 @@ class PendingResults
 		private LoggerInterface $logger,
 		private ?\OCP\Files\IRootFolder $rootFolder = null,
 		private ?\OCP\App\IAppManager $appManager = null,
+		// One decision per artifact: Apply, Discard and expiry share this lock.
+		private ?ILockingProvider $lockingProvider = null,
 	) {
 	}
 
@@ -157,9 +161,18 @@ class PendingResults
 
 		$discarded = 0;
 		foreach ($this->expiredRows($cutoff) as $row) {
-			$this->deleteArtifact((string) $row['artifact_path']);
-			$this->discardRow((int) $row['id']);
-			$discarded++;
+			$id = (int) $row['id'];
+			if (!$this->acquireDecision($id)) {
+				continue;
+			}
+			try {
+				$this->deleteArtifact((string) $row['artifact_path']);
+				if ($this->discardRow($id)) {
+					$discarded++;
+				}
+			} finally {
+				$this->releaseDecision($id);
+			}
 		}
 		return $discarded;
 	}
@@ -228,6 +241,19 @@ class PendingResults
 	 */
 	public function apply(int $id): array
 	{
+		if (!$this->acquireDecision($id)) {
+			return ['status' => 'refused', 'warning' => 'another decision for this stash is in progress'];
+		}
+		try {
+			return $this->applyLocked($id);
+		} finally {
+			$this->releaseDecision($id);
+		}
+	}
+
+	/** @return array{status: 'applied'|'refused', warning: ?string} */
+	private function applyLocked(int $id): array
+	{
 		$row = $this->fetchRow($id);
 		if ($row === null || ($row['status'] ?? null) !== self::STATUS_PENDING) {
 			return ['status' => 'refused', 'warning' => 'no pending stash with this id'];
@@ -271,6 +297,19 @@ class PendingResults
 	 */
 	public function discard(int $id): array
 	{
+		if (!$this->acquireDecision($id)) {
+			return ['status' => 'refused', 'warning' => 'another decision for this stash is in progress'];
+		}
+		try {
+			return $this->discardLocked($id);
+		} finally {
+			$this->releaseDecision($id);
+		}
+	}
+
+	/** @return array{status: 'discarded'|'refused', warning: ?string} */
+	private function discardLocked(int $id): array
+	{
 		$row = $this->fetchRow($id);
 		if ($row === null || ($row['status'] ?? null) !== self::STATUS_PENDING) {
 			return ['status' => 'refused', 'warning' => 'no pending stash with this id'];
@@ -302,16 +341,49 @@ class PendingResults
 		}
 	}
 
+	/** Acquire the one decision lock for an artifact. */
+	private function acquireDecision(int $id): bool
+	{
+		if ($this->lockingProvider === null) {
+			return true;
+		}
+		try {
+			$this->lockingProvider->acquireLock($this->decisionKey($id), ILockingProvider::LOCK_EXCLUSIVE);
+			return true;
+		} catch (LockedException) {
+			$this->logger->info('ocrflow: stash ' . $id . ' already has a decision in progress');
+			return false;
+		}
+	}
+
+	private function releaseDecision(int $id): void
+	{
+		if ($this->lockingProvider === null) {
+			return;
+		}
+		try {
+			$this->lockingProvider->releaseLock($this->decisionKey($id), ILockingProvider::LOCK_EXCLUSIVE);
+		} catch (\Throwable $e) {
+			$this->logger->warning('ocrflow: could not release the decision lock for stash ' . $id . ': ' . $e->getMessage());
+		}
+	}
+
+	private function decisionKey(int $id): string
+	{
+		return 'ocrflow/pending-result/' . $id;
+	}
+
 	/**
 	 * Close a row with its decision. The status column is the audit trail.
 	 */
-	protected function markRow(int $id, string $status): void
+	protected function markRow(int $id, string $status): bool
 	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->update(self::TABLE)
 			->set('status', $qb->createNamedParameter($status))
-			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, \PDO::PARAM_INT)));
-		$qb->executeStatement();
+			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, \PDO::PARAM_INT)))
+			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_PENDING)));
+		return $qb->executeStatement() === 1;
 	}
 
 	/**
@@ -453,13 +525,14 @@ class PendingResults
 		}
 	}
 
-	protected function discardRow(int $id): void
+	protected function discardRow(int $id): bool
 	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->update(self::TABLE)
 			->set('status', $qb->createNamedParameter(self::STATUS_DISCARDED))
-			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, \PDO::PARAM_INT)));
-		$qb->executeStatement();
+			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, \PDO::PARAM_INT)))
+			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_PENDING)));
+		return $qb->executeStatement() === 1;
 	}
 
 	private function deleteArtifact(string $name): void

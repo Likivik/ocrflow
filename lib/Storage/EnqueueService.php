@@ -10,6 +10,7 @@ namespace OCA\OcrFlow\Storage;
 use OCA\OcrFlow\Service\EnginePolicy;
 use OCP\DB\Exception;
 use OCP\DB\QueryBuilder\IQueryBuilder;
+use OCP\Files\IRootFolder;
 use OCP\IDBConnection;
 use Psr\Log\LoggerInterface;
 
@@ -38,6 +39,12 @@ class EnqueueService
 		// Only used by the identity ladder's hash tier. Last argument on
 		// purpose: positional callers keep working.
 		private ?\OCA\OcrFlow\Service\FileExchange $exchange = null,
+		// Durable observations. Optional only for tests and exceptional
+		// callers without a file id; every normal event path has it.
+		private ?PendingFileStore $pendingFiles = null,
+		// Current-node lookup for a deferred observation. Optional so
+		// worker-plane and unit callers can keep refusing to invent paths.
+		private ?IRootFolder $rootFolder = null,
 	) {
 	}
 
@@ -54,6 +61,87 @@ class EnqueueService
 		?string $engine = null,
 		bool $fromScan = false,
 	): ?int {
+		if ($fileId !== null && $this->pendingFiles !== null) {
+			if (!$fromScan) {
+				// Commit desired work before any decision. A crash between
+				// here and the insert leaves a durable observation for
+				// Reconcile, not a lost upload.
+				$this->pendingFiles->observe($fileId, $path, $etag, $size);
+				return $this->drainPending($fileId, $engine);
+			}
+			return $this->enqueueKnown($path, $fileId, $size, $etag, $engine, true);
+		}
+
+		return $this->enqueueKnown($path, $fileId, $size, $etag, $engine, $fromScan);
+	}
+
+	/**
+	 * Make one enqueue decision for the latest observation of a file.
+	 *
+	 * The snapshot revision is a compare-and-swap fence on the final delete:
+	 * an observation that arrives while this drain is working survives for
+	 * the next drain.
+	 */
+	public function drainPending(int $fileId, ?string $engine = null): ?int
+	{
+		if ($this->pendingFiles === null) {
+			return null;
+		}
+		$pending = $this->pendingFiles->get($fileId);
+		if ($pending === null) {
+			return null;
+		}
+
+		if ($this->rootFolder !== null) {
+			try {
+				$nodes = $this->rootFolder->getById($fileId);
+			} catch (\Throwable $e) {
+				$this->logger?->warning('ocrflow: pending file ' . $fileId . ' could not be resolved; keeping the observation', ['exception' => $e]);
+				return null;
+			}
+			$node = $nodes[0] ?? null;
+			if ($node === null) {
+				// The file was deleted while its observation waited. Clear only
+				// the revision that was read; a newer row survives.
+				$this->pendingFiles->deleteIfRevision($fileId, $pending['revision']);
+				return null;
+			}
+			$pending['path'] = $node->getPath();
+			$pending['etag'] = $node->getEtag();
+			$pending['size'] = $node->getSize();
+		}
+
+		return $this->enqueueKnown(
+			$pending['path'],
+			$fileId,
+			$pending['size'],
+			$pending['etag'],
+			$engine,
+			false,
+			$pending['revision'],
+		);
+	}
+
+	private function enqueueKnown(
+		string $path,
+		?int $fileId,
+		?int $size,
+		?string $etag,
+		?string $engine,
+		bool $fromScan,
+		?int $pendingRevision = null,
+	): ?int {
+		if ($fileId !== null && $this->jobs->claimedForFile($fileId)) {
+			// Work owns the file. Remember the latest observation, including
+			// a zero-byte one; it is judged after the claim releases. A
+			// pending drain already committed its revision, so only a scan
+			// observation needs recording here.
+			if ($pendingRevision === null) {
+				$this->pendingFiles?->observe($fileId, $path, $etag, $size);
+			}
+			return null;
+		}
+
 		// A zero-byte source is a data problem, not work: the worker can only fetch
 		// an empty stream and fail after transport — the QueueProtocolError class
 		// that died four times in production. This must run BEFORE the dedupe
@@ -62,21 +150,17 @@ class EnqueueService
 		// so the correction would otherwise never be recorded.
 		if ($size !== null && $size <= 0) {
 			$this->settlement->recordEmptySource($path, $fileId, $size, $etag);
+			$this->clearPending($fileId, $pendingRevision);
 			return null;
 		}
 
 		if ($fileId !== null) {
-			// Tier 0: work already in flight for this file, whatever the etag
-			// says. A run holds the file locked and its lock has already moved
-			// the etag, so an exact-etag dedupe would see an unknown version
-			// and enqueue a duplicate — billed twice, written twice.
-			if ($this->jobs->activeForFile($fileId)) {
-				return null;
-			}
 			if ($this->jobs->jobForVersion($fileId, $etag) !== null) {
+				$this->clearPending($fileId, $pendingRevision);
 				return null;
 			}
 			if ($this->jobs->isDoneForVersion($fileId, $etag)) {
+				$this->clearPending($fileId, $pendingRevision);
 				return null;
 			}
 			// The verdict that must outlive the purge. Retention (#90) deletes
@@ -95,6 +179,7 @@ class EnqueueService
 					'ocrflow: file skipped: permanent failure (' . $permanentReason . ')'
 					. ' for ' . $path . '; occ ocrflow:requeue "' . $path . '" to retry anyway',
 				);
+				$this->clearPending($fileId, $pendingRevision);
 				return null;
 			}
 			// Settled, not permanent: these bytes were already written by us.
@@ -119,6 +204,7 @@ class EnqueueService
 						. ' for ' . $path . '; redo candidate, never automatic; occ ocrflow:requeue "' . $path . '" to OCR it anyway',
 					);
 				}
+				$this->clearPending($fileId, $pendingRevision);
 				return null;
 			}
 			// The per-file loop breaker, scan-initiated enqueues only. Job
@@ -130,6 +216,7 @@ class EnqueueService
 			// operator override resets the counter and stays exempt.
 			if ($fromScan && $this->jobs->alreadyEnqueuedForVersion($fileId, $etag)) {
 				$this->settlement->recordQueuedTwice($path, $fileId, $size, $etag);
+				$this->clearPending($fileId, $pendingRevision);
 				return null;
 			}
 		} elseif ($this->jobs->findByPath($path) !== null) {
@@ -159,6 +246,7 @@ class EnqueueService
 						'file_id' => $fileId,
 						'tier' => $identity['settled_under_lock'] === true ? 2 : 3,
 					]);
+					$this->clearPending($fileId, $pendingRevision);
 					return null;
 				}
 			}
@@ -177,6 +265,17 @@ class EnqueueService
 				if ($pos !== false) {
 					$sourceHash = $this->exchange->contentSha256($owner, substr($path, $pos + strlen($marker)));
 				}
+			}
+		}
+
+		if ($fileId !== null) {
+			// The latest observation wins over work nobody has claimed. If a
+			// worker claims first, this delete affects zero rows and the
+			// pending observation stays for the next drain.
+			$this->jobs->supersedeQueued($fileId);
+			if ($this->jobs->claimedForFile($fileId)) {
+				$this->pendingFiles?->observe($fileId, $path, $etag, $size);
+				return null;
 			}
 		}
 
@@ -201,6 +300,7 @@ class EnqueueService
 			// A concurrent insert won the unique(path) race. Same answer as
 			// "already queued": nothing for this caller to do.
 			if ($e->getReason() === Exception::REASON_UNIQUE_CONSTRAINT_VIOLATION) {
+				$this->clearPending($fileId, $pendingRevision);
 				return null;
 			}
 			throw $e;
@@ -215,12 +315,46 @@ class EnqueueService
 			$this->jobs->countScanEnqueue($fileId, $path, $size, $etag);
 		}
 
+		$this->clearPending($fileId, $pendingRevision);
+
 		// `IDBConnection::getLastInsertId()` was removed in Nextcloud 34; the
 		// query builder owns it now. Calling it on the connection threw
 		// "Call to undefined method ConnectionAdapter::getLastInsertId()" on every
 		// upload — the row landed, the listener logged a failure and returned no
 		// id, so nothing downstream could tell the job it had just created.
 		return $qb->getLastInsertId();
+	}
+
+	/**
+	 * Drain a bounded snapshot of durable observations. Reconcile calls this;
+	 * immediate upload paths drain their own file directly.
+	 *
+	 * @return array{drained: int, deferred: int, refused: int}
+	 */
+	public function drainPendingBatch(int $limit = 500, ?string $engine = null): array
+	{
+		if ($this->pendingFiles === null) {
+			return ['drained' => 0, 'deferred' => 0, 'refused' => 0];
+		}
+
+		$out = ['drained' => 0, 'deferred' => 0, 'refused' => 0];
+		foreach ($this->pendingFiles->ids($limit) as $fileId) {
+			if ($this->drainPending($fileId, $engine) !== null) {
+				$out['drained']++;
+			} elseif ($this->pendingFiles->get($fileId) !== null) {
+				$out['deferred']++;
+			} else {
+				$out['refused']++;
+			}
+		}
+		return $out;
+	}
+
+	private function clearPending(?int $fileId, ?int $pendingRevision): void
+	{
+		if ($fileId !== null && $pendingRevision !== null) {
+			$this->pendingFiles?->deleteIfRevision($fileId, $pendingRevision);
+		}
 	}
 
 	public function enqueueNeverProcessed(string $uid, int $limit, ?string $engine): array
