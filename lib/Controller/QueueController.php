@@ -222,7 +222,7 @@ class QueueController extends OCSController
 			// lock would refuse it.
 			$lockNode = $this->locks?->nodeFor($job->getFileId());
 			$written = $lockNode !== null && $this->locks !== null
-				? $this->locks->runInScope($lockNode, fn (): array => $this->files->replace($owner, $relative, $body))
+				? $this->locks->runInScope($lockNode, (string) $job->getClaimToken(), fn (): array => $this->files->replace($owner, $relative, $body))
 				: $this->files->replace($owner, $relative, $body);
 		} catch (NotFoundException) {
 			// Degraded result, by design: the file was moved or deleted while
@@ -481,9 +481,9 @@ class QueueController extends OCSController
 		// a job (its row stays `queued`: no attempt is burned) and lets the
 		// next candidate have the turn; all-locked answers "nothing to do".
 		// The gate walks a batch of candidates: claim the row first, then take
-		// the lock. Locking first would let two workers "take" the same file
-		// (an existing own lock EXTENDS instead of throwing), and the loser's
-		// compensation would delete the lock the winner relies on.
+		// the lock under an owner derived from that claim token. Two OCR runs
+		// therefore never share a re-entrant owner, and a stale run's cleanup
+		// cannot delete the replacement run's lock.
 		$job = null;
 		$node = null;
 		foreach ($this->jobStore->queuedIds(self::CLAIM_CANDIDATES) as $candidateId) {
@@ -492,10 +492,10 @@ class QueueController extends OCSController
 				continue;   // someone else got it between the list and the update
 			}
 			$candidateNode = $this->locks?->nodeFor($candidate->getFileId());
-			if ($candidateNode !== null && $this->locks !== null && !$this->locks->lockForRun($candidateNode)) {
+			if ($candidateNode !== null && $this->locks !== null && !$this->locks->lockForRun($candidateNode, (string) $candidate->getClaimToken())) {
 				// Someone is in the file: give the claim straight back. The row
 				// stays queued, no attempt is spent, the next candidate runs.
-				$this->jobStore->release((int) $candidate->getId(), (string) $candidate->getClaimToken());
+				$this->jobStore->release((int) $candidate->getId(), (string) $candidate->getClaimToken(), true);
 				continue;
 			}
 			$job = $candidate;
@@ -511,11 +511,24 @@ class QueueController extends OCSController
 		// lock, because taking a lock rewrites the file's etag. A failed
 		// bookkeeping write releases both — no lock may outlive its claim.
 		if ($node !== null && $this->locks !== null) {
+			// A rename keeps file_id but invalidates the enqueue-time path.
+			// Refresh it from the claimed node before the worker sees the job.
+			$currentPath = $node->getPath();
+			$runPath = $currentPath !== '' && $currentPath !== $job->getPath() ? $currentPath : null;
+			if ($runPath !== null) {
+				$job->setPath($runPath);
+			}
 			$split = self::splitPath((string) $job->getPath());
 			$runEtag = $split !== null ? $this->locks->freshEtag($split[0], $split[1]) : null;
-			if ($runEtag === null || !$this->jobStore->setRunEtag((int) $job->getId(), (string) $job->getClaimToken(), $runEtag)) {
-				$this->locks->releaseForRun($node);
-				$this->jobStore->release((int) $job->getId(), (string) $job->getClaimToken());
+			$booked = false;
+			if ($runEtag !== null) {
+				$booked = $runPath === null
+					? $this->jobStore->setRunEtag((int) $job->getId(), (string) $job->getClaimToken(), $runEtag)
+					: $this->jobStore->setRunEtag((int) $job->getId(), (string) $job->getClaimToken(), $runEtag, $runPath);
+			}
+			if ($runEtag === null || !$booked) {
+				$this->locks->releaseForRun($node, (string) $job->getClaimToken());
+				$this->jobStore->release((int) $job->getId(), (string) $job->getClaimToken(), true);
 				return new DataResponse(['message' => 'claim bookkeeping failed'], Http::STATUS_INTERNAL_SERVER_ERROR);
 			}
 		}
@@ -526,9 +539,9 @@ class QueueController extends OCSController
 		// queued, and nothing is spent.
 		if (!$this->bookRun($job)) {
 			if ($node !== null) {
-				$this->locks?->releaseForRun($node);
+				$this->locks?->releaseForRun($node, (string) $job->getClaimToken());
 			}
-			$this->jobStore->release($job->getId(), (string) $job->getClaimToken());
+			$this->jobStore->release($job->getId(), (string) $job->getClaimToken(), true);
 			return new DataResponse([
 				'wait' => 'budget',
 				'message' => 'today\'s page budget is spent; sleep and claim again later',
@@ -739,7 +752,7 @@ class QueueController extends OCSController
 			// cleanup. Inside it, the delete is the owner's work, as it is.
 			$lockNode = $this->locks?->nodeFor($job->getFileId());
 			if ($lockNode !== null && $this->locks !== null) {
-				$this->locks->runInScope($lockNode, fn () => $this->files->trashSource($owner, $relative));
+				$this->locks->runInScope($lockNode, (string) $job->getClaimToken(), fn () => $this->files->trashSource($owner, $relative));
 			} else {
 				$this->files->trashSource($owner, $relative);
 			}
@@ -952,7 +965,7 @@ class QueueController extends OCSController
 			$this->spend?->releaseForRun($id, (int) $job->getAttempts());
 			// The run is not going to happen: the file must not stay locked.
 			if ($job->getFileId() !== null) {
-				$this->locks?->releaseById($job->getFileId());
+				$this->locks?->releaseById($job->getFileId(), $token);
 			}
 		}
 		return new DataResponse(

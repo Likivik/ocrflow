@@ -23,6 +23,17 @@ written.
 
 ### Fixed
 
+- **A rename no longer strands a queued file.** Claim refreshes the job's path
+  from its stable `file_id`, persists the current name, and returns that path to
+  the worker. A retry after a rename no longer fetches the old name forever.
+- **A refused claim really costs no attempt.** Lock contention, failed claim
+  bookkeeping and a spent daily budget return the atomic claim's attempt instead
+  of letting polling exhaust the retry budget before OCR ever runs.
+- **One claim cannot release another claim's lock.** `files_lock` owners are now
+  derived from a hash of the claim token, including during write scope, settle,
+  graceful release and stale recovery. A late stale-run cleanup can no longer
+  unlock a replacement run, and two OCR runs cannot share a re-entrant app lock.
+
 - **The panel's buttons update everything they touch.** Retry and Delete now
   move the queue numbers at once instead of waiting for the 5 s poll, and a
   chip click or a search that fails says so — it used to keep the old rows

@@ -7,6 +7,8 @@ declare(strict_types=1);
 
 namespace OCA\OcrFlow\Tests\Unit\Service;
 
+require_once __DIR__ . '/../BackgroundJob/oc_hooks_emitter.php';
+
 use OCA\OcrFlow\Service\Locks;
 use OCP\Files\IRootFolder;
 use OCP\Files\Lock\ILock;
@@ -62,9 +64,9 @@ class LocksTest extends TestCase
 		$manager->expects($this->never())->method('runInScope');
 		$locks = $this->locks(flagged: false, manager: $manager);
 
-		$this->assertTrue($locks->lockForRun($this->node()));
-		$locks->releaseForRun($this->node());
-		$this->assertSame('ran', $locks->runInScope($this->node(), static fn (): string => 'ran'));
+		$this->assertTrue($locks->lockForRun($this->node(), 'claim'));
+		$locks->releaseForRun($this->node(), 'claim');
+		$this->assertSame('ran', $locks->runInScope($this->node(), 'claim', static fn (): string => 'ran'));
 	}
 
 	public function testNoProviderMeansProceed(): void
@@ -72,7 +74,7 @@ class LocksTest extends TestCase
 		$locks = $this->locks(available: false);
 
 		$this->assertFalse($locks->available());
-		$this->assertTrue($locks->lockForRun($this->node()));
+		$this->assertTrue($locks->lockForRun($this->node(), 'claim'));
 	}
 
 	public function testAForeignLockMeansSkip(): void
@@ -82,7 +84,7 @@ class LocksTest extends TestCase
 			new OwnerLockedException($this->createMock(ILock::class)),
 		);
 
-		$this->assertFalse($this->locks(manager: $manager)->lockForRun($this->node()));
+		$this->assertFalse($this->locks(manager: $manager)->lockForRun($this->node(), 'claim'));
 	}
 
 	public function testOurLockIsAppOwned(): void
@@ -95,8 +97,8 @@ class LocksTest extends TestCase
 			},
 		);
 
-		$this->assertTrue($this->locks(manager: $manager)->lockForRun($this->node()));
-		$this->assertSame([ILock::TYPE_APP, 'ocrflow'], $seen);
+		$this->assertTrue($this->locks(manager: $manager)->lockForRun($this->node(), 'claim'));
+		$this->assertSame([ILock::TYPE_APP, Locks::OWNER . ':' . hash('sha256', 'claim')], $seen);
 	}
 
 	public function testALockGlitchProceedsUnlocked(): void
@@ -104,7 +106,7 @@ class LocksTest extends TestCase
 		$manager = $this->manager(true);
 		$manager->method('lock')->willThrowException(new \RuntimeException('database is on fire'));
 
-		$this->assertTrue($this->locks(manager: $manager)->lockForRun($this->node()));
+		$this->assertTrue($this->locks(manager: $manager)->lockForRun($this->node(), 'claim'));
 	}
 
 	public function testReleaseSwallowsFailures(): void
@@ -112,7 +114,7 @@ class LocksTest extends TestCase
 		$manager = $this->manager(true);
 		$manager->method('unlock')->willThrowException(new \RuntimeException('already gone'));
 
-		$this->locks(manager: $manager)->releaseForRun($this->node());
+		$this->locks(manager: $manager)->releaseForRun($this->node(), 'claim');
 		$this->addToAssertionCount(1);
 	}
 
@@ -122,12 +124,12 @@ class LocksTest extends TestCase
 		$manager = $this->manager(true);
 		$manager->expects($this->once())->method('runInScope')->willReturnCallback(
 			static function (LockContext $ctx, callable $fn) use (&$inScope): void {
-				$inScope = $ctx->getOwner() === 'ocrflow';
+				$inScope = $ctx->getOwner() === Locks::OWNER . ':' . hash('sha256', 'claim');
 				$fn();
 			},
 		);
 
-		$this->assertSame('bytes', $this->locks(manager: $manager)->runInScope($this->node(), static fn (): string => 'bytes'));
+		$this->assertSame('bytes', $this->locks(manager: $manager)->runInScope($this->node(), 'claim', static fn (): string => 'bytes'));
 		$this->assertTrue($inScope);
 	}
 }

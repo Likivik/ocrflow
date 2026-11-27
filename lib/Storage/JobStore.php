@@ -228,15 +228,19 @@ class JobStore
 	}
 
 	/**
-	 * Record the etag the run works against (read after the lock was taken).
-	 * Guarded by the claim token: a stale worker cannot move another's baseline.
+	 * Record the current path and the etag the run works against (read after
+	 * the lock was taken). Guarded by the claim token: a stale worker cannot
+	 * move another's baseline.
 	 */
-	public function setRunEtag(int $id, string $claimToken, ?string $etag): bool
+	public function setRunEtag(int $id, string $claimToken, ?string $etag, ?string $path = null): bool
 	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->update(self::JOBS)
-			->set('run_etag', $qb->createNamedParameter($etag))
-			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
+			->set('run_etag', $qb->createNamedParameter($etag));
+		if ($path !== null) {
+			$qb->set('path', $qb->createNamedParameter($path));
+		}
+		$qb->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
 			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
 			->andWhere($qb->expr()->eq('claim_token', $qb->createNamedParameter($claimToken)));
 
@@ -293,7 +297,7 @@ class JobStore
 	 * free retry.
 	 * @throws Exception
 	 */
-	public function release(int $id, string $claimToken): bool
+	public function release(int $id, string $claimToken, bool $withoutAttempt = false): bool
 	{
 		$qb = $this->db->getQueryBuilder();
 		$qb->update(self::JOBS)
@@ -301,8 +305,11 @@ class JobStore
 			->set('claim_token', $qb->createNamedParameter(null))
 			->set('claimed_by_worker_id', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
 			->set('claimed_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
-			->set('claim_expires_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT))
-			->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
+			->set('claim_expires_at', $qb->createNamedParameter(null, IQueryBuilder::PARAM_INT));
+		if ($withoutAttempt) {
+			$qb->set('attempts', $qb->createFunction('CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END'));
+		}
+		$qb->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)))
 			->andWhere($qb->expr()->eq('status', $qb->createNamedParameter(self::STATUS_CLAIMED)))
 			->andWhere($qb->expr()->eq('claim_token', $qb->createNamedParameter($claimToken)));
 		return $qb->executeStatement() === 1;
@@ -369,7 +376,7 @@ class JobStore
 	 * @throws Exception
 	 */
 	/**
-	 * @param array<int, array{id: int, attempts: int}>|null $requeuedIds what moved, so the caller can release each run's spend booking
+	 * @param array<int, array{id: int, attempts: int, claim_token: string}>|null $requeuedIds what moved, so the caller can release each run's spend booking and claim-owned lock
 	 */
 	public function requeueStale(int $heartbeatStaleSeconds = self::CLAIM_LEASE_SECONDS, ?array &$requeuedIds = null): int
 	{
@@ -377,7 +384,7 @@ class JobStore
 		$leaseCutoff = $now - max(1, $heartbeatStaleSeconds);
 		$hardCutoff = $now - self::CLAIM_HARD_CAP_SECONDS;
 		$select = $this->db->getQueryBuilder();
-		$select->select('j.id')
+		$select->select('j.id', 'j.attempts', 'j.claim_token')
 			->from(self::JOBS, 'j')
 			->leftJoin('j', 'ocrflow_workers', 'w', $select->expr()->eq('w.id', 'j.claimed_by_worker_id'))
 			->where($select->expr()->eq('j.status', $select->createNamedParameter(self::STATUS_CLAIMED)))
@@ -401,7 +408,11 @@ class JobStore
 		$pairs = [];
 		foreach ($select->executeQuery()->fetchAll() as $row) {
 			$ids[] = (int) $row['id'];
-			$pairs[(int) $row['id']] = ['id' => (int) $row['id'], 'attempts' => (int) ($row['attempts'] ?? 0)];
+			$pairs[(int) $row['id']] = [
+				'id' => (int) $row['id'],
+				'attempts' => (int) ($row['attempts'] ?? 0),
+				'claim_token' => (string) ($row['claim_token'] ?? ''),
+			];
 		}
 		if ($ids === []) {
 			return 0;

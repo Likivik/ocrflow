@@ -399,6 +399,55 @@ status=$(sql "SELECT status FROM ${JOBS} WHERE id=${id}")
 [ "$status" = "error" ] || fail "job status should be error after a reported failure, got ${status}"
 ok "failure recorded as ${status}"
 
+echo "== rename before claim: file_id, not the enqueue-time path, finds the bytes"
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary 'rename me' \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/rename.pdf" || fail "rename fixture upload failed"
+sleep 2
+rename_id=$(sql "SELECT id FROM ${JOBS} WHERE path='/admin/files/rename.pdf' ORDER BY id DESC LIMIT 1")
+[ -n "$rename_id" ] || fail "rename fixture produced no job"
+move_code=$(curl -s -o /dev/null -w '%{http_code}' -u "${ADMIN_USER}:${ADMIN_PASS}" -X MOVE \
+  -H "Destination: $BASE/remote.php/dav/files/${ADMIN_USER}/renamed.pdf" \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/rename.pdf")
+[ "$move_code" = "201" ] || fail "rename fixture MOVE returned ${move_code}"
+renamed=$(curl -fsS -X POST -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  -H "X-OcrFlow-Secret: ${secret}" \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/next" | jq -c '.ocs.data')
+[ "$(printf '%s' "$renamed" | jq -r '.id')" = "$rename_id" ] \
+  || fail "rename fixture was not the next claim: ${renamed}"
+[ "$(printf '%s' "$renamed" | jq -r '.path')" = "/admin/files/renamed.pdf" ] \
+  || fail "claim kept the stale path after rename: ${renamed}"
+rename_token=$(printf '%s' "$renamed" | jq -r '.claim_token')
+rename_response=$(curl -sS -w '\n%{http_code}' -H 'OCS-APIRequest: true' \
+  -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${rename_token}" \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${rename_id}/file")
+rename_code=$(printf '%s' "$rename_response" | tail -n 1)
+rename_bytes=$(printf '%s' "$rename_response" | sed '$d')
+[ "$rename_code" = "200" ] || fail "renamed file fetch returned ${rename_code}: ${rename_bytes}"
+[ "$rename_bytes" = "rename me" ] || fail "renamed file returned the wrong bytes"
+[ "$(sql "SELECT path FROM ${JOBS} WHERE id=${rename_id}")" = "/admin/files/renamed.pdf" ] \
+  || fail "claim did not persist the renamed path"
+curl -fsS -o /dev/null -X POST -H 'OCS-APIRequest: true' -H 'Accept: application/json' \
+  -H "X-OcrFlow-Secret: ${secret}" -H "X-OcrFlow-Claim: ${rename_token}" \
+  "$BASE/ocs/v2.php/apps/ocrflow/api/v1/queue/${rename_id}/release" \
+  || fail "renamed fixture release failed"
+ok "a rename before claim returns the current path and the right bytes"
+
+echo "== a claim returned before the run returns its attempt too"
+curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary 'attempt probe' \
+  "$BASE/remote.php/dav/files/${ADMIN_USER}/attempt.pdf" || fail "attempt fixture upload failed"
+sleep 2
+attempt_id=$(sql "SELECT id FROM ${JOBS} WHERE path='/admin/files/attempt.pdf' ORDER BY id DESC LIMIT 1")
+[ -n "$attempt_id" ] || fail "attempt fixture produced no job"
+$ENGINE cp "${APP_DIR}/tests/integration/attempt-release-probe.php" "$NAME:/tmp/attempt-release-probe.php" \
+  || fail "could not copy the attempt probe"
+attempt_probe=$($ENGINE exec -u www-data "$NAME" php /tmp/attempt-release-probe.php "$attempt_id" 2>&1) \
+  || { echo "$attempt_probe"; fail "the attempt probe crashed"; }
+echo "$attempt_probe"
+for expected in '"claim_attempts":1' '"released":true' '"release_attempts":0' '"status":"queued"'; do
+  case "$attempt_probe" in *"$expected"*) ;; *) fail "attempt probe lacked ${expected}" ;; esac
+done
+ok "an unused claim returns attempts=1 to attempts=0 and stays queued"
+
 echo "== a dead worker's claim is taken back, and the attempt is counted"
 id=$(sql "SELECT id FROM ${JOBS} ORDER BY id DESC LIMIT 1")
 # A claim with no registered holder (the curl claim sent no worker id) is
@@ -1329,9 +1378,8 @@ echo "== files_lock: the claim gate's read works, and a held lock moves the etag
 # Two facts the claim gate stands on, neither of which a unit test can reach.
 # 1. `LockService::getLockFromFileId()` answers "locked" for a live lock.
 # 2. Taking a lock rewrites the file's etag (`propagateEtag()`), which is why
-#    this app reads locks instead of holding one: a held lock would invalidate
-#    the etag snapshot the write ladder compares against, and every result
-#    would be stashed. The smoke saw exactly that when the claim took a lock.
+#    the write ladder records run_etag after lock acquisition and compares bytes
+#    when any lock operation moves the etag again.
 occ app:enable files_lock >/tmp/ocrflow-files-lock.log 2>&1 \
   || { tail -5 /tmp/ocrflow-files-lock.log; fail "files_lock ships with the server and must enable"; }
 curl -s -o /dev/null -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT --data-binary 'lock probe' \
@@ -1342,10 +1390,12 @@ probe=$($ENGINE exec -u www-data "$NAME" php /tmp/files-lock-probe.php "$ADMIN_U
   || { echo "$probe"; fail "the lock probe crashed"; }
 echo "$probe"
 for expected in '"available":true' '"query_before":false' '"query_while_locked":true' \
-                '"etag_changed":true' '"query_after_unlock":false'; do
+                '"etag_changed":true' '"query_after_unlock":false' \
+                '"second_claim_refused":true' '"new_claim_after_release":true' \
+                '"stale_release_kept_new_lock":true' '"third_claim_after_new_release":true'; do
   case "$probe" in *"$expected"*) ;; *) fail "lock probe lacked ${expected}" ;; esac
 done
-ok "a live lock is visible to the read query, and taking one moves the etag (so we read, not hold)"
+ok "locks are visible, etags move, and each claim releases only its own lock"
 
 echo "== report: the aggregate report equals the id-list arithmetic, on a real database"
 # Twice now a report change passed unit tests and PHPStan and died on the real

@@ -8,10 +8,10 @@
  * 1. `LockService::getLockFromFileId()` answers "is this file locked?" for a
  *    lock taken by anyone — that is the read the claim gate makes.
  * 2. Taking a lock **rewrites the file's etag** (`propagateEtag()` sets
- *    `etag = uniqid()`). This is why the app reads locks instead of holding
- *    one: a held lock invalidates the etag snapshot the write ladder compares
- *    against, and every result would be stashed. The smoke asserts the etag
- *    moves, so a files_lock release that changes this is noticed here.
+ *    `etag = uniqid()`). The app therefore records `run_etag` after locking and
+ *    compares content hashes when later lock operations move the etag again.
+ * 3. OCRFlow lock owners are claim-specific: a second claim is refused, and a
+ *    stale claim's release cannot unlock the newer claim.
  *
  * @copyright Copyright (c) 2026, Likivik
  * @license AGPL-3.0-or-later
@@ -62,5 +62,19 @@ $out['etag_changed'] = $out['etag_after'] !== $out['etag_before'];
 
 $manager->unlock($ctx);
 $out['query_after_unlock'] = $query();
+
+// Claim tokens are capabilities, so the app hashes them into distinct lock
+// owners. A stale claim's late cleanup must not unlock the claim that replaced
+// it, and two OCR runs must not share one re-entrant app-owned lock.
+$appLocks = \OC::$server->get(\OCA\OcrFlow\Service\Locks::class);
+$appLocks->lockForRun($node, 'old-claim');
+$out['second_claim_refused'] = !$appLocks->lockForRun($node, 'new-claim');
+$appLocks->releaseForRun($node, 'old-claim');
+$out['new_claim_after_release'] = $appLocks->lockForRun($node, 'new-claim');
+$appLocks->releaseForRun($node, 'old-claim'); // stale settlement, after requeue
+$out['stale_release_kept_new_lock'] = !$appLocks->lockForRun($node, 'third-claim');
+$appLocks->releaseForRun($node, 'new-claim');
+$out['third_claim_after_new_release'] = $appLocks->lockForRun($node, 'third-claim');
+$appLocks->releaseForRun($node, 'third-claim');
 
 echo json_encode($out, JSON_UNESCAPED_SLASHES), "\n";

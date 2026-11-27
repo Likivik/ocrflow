@@ -69,7 +69,7 @@ class SettlementService
 			// The run is over however it ended: the file must not stay locked.
 			$settled = $this->jobs->getById($id);
 			if ($settled?->getFileId() !== null) {
-				$this->locks?->releaseById($settled->getFileId());
+				$this->locks?->releaseById($settled->getFileId(), $claimToken);
 			}
 		}
 	}
